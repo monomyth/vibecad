@@ -90,6 +90,9 @@ PROVIDER_COMMAND_WRITE_TOOLS = {
     "assembly.create_assembly",
     "assembly.add_component",
     "assembly.set_component_placement",
+    "assembly.ground_component",
+    "assembly.create_joint",
+    "assembly.solve",
     "sketcher.create_sketch",
     "sketcher.open_sketch",
     "sketcher.close_sketch",
@@ -230,11 +233,22 @@ WORKBENCH_EXECUTION_CONTRACTS: dict[str, dict[str, Any]] = {
             "verify component objects exist",
             "create native assembly",
             "add each component",
-            "inspect assembly component count and screenshot when visual judgement matters",
+            "ground exactly one base component with assembly.ground_component so "
+            "the solver has a fixed anchor",
+            "mate components with assembly.create_joint using geometry references "
+            "(faces/edges/vertices resolved via partdesign.find_subelements), "
+            "never by dead-reckoned raw placement",
+            "solve the assembly with assembly.solve and verify the resulting "
+            "component placements",
+            "inspect assembly components/joints and screenshot when visual "
+            "judgement matters",
         ],
         "completion_gates": [
             "assemblies require real generated components, not missing placeholders",
             "all requested components must be added to the assembly",
+            "an assembly with 2+ components requires one grounded component and "
+            "joints on referenced geometry; raw placement is layout, not mating",
+            "the assembly must solve successfully after joints are created",
         ],
     },
     "TechDrawWorkbench": {
@@ -1658,6 +1672,38 @@ def _assembly_state_from_context(context: dict[str, Any]) -> tuple[int, int]:
     return assembly_count, component_count
 
 
+def _assembly_kinematic_summaries_from_context(
+    context: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Per-assembly component/grounded/joint counts from the provider context."""
+    assembly = context.get("assembly", {}) if isinstance(context, dict) else {}
+    if not isinstance(assembly, dict):
+        return []
+    assemblies = assembly.get("assemblies", [])
+    if not isinstance(assemblies, list):
+        return []
+    summaries: list[dict[str, Any]] = []
+    for item in assemblies:
+        if not isinstance(item, dict):
+            continue
+
+        def _count(value: Any) -> int:
+            try:
+                return max(0, int(value or 0))
+            except (TypeError, ValueError):
+                return 0
+
+        summaries.append(
+            {
+                "name": str(item.get("name") or item.get("label") or "the assembly"),
+                "components": _count(item.get("components")),
+                "grounded_count": _count(item.get("grounded_count")),
+                "joints": _count(item.get("joints")),
+            }
+        )
+    return summaries
+
+
 def _missing_requirement_lines(
     prompt: str,
     context: dict[str, Any],
@@ -1723,6 +1769,22 @@ def _missing_requirement_lines(
             lines.append(
                 "- native Assembly has fewer components than generated PartDesign bodies "
                 f"({component_count}/{body_count}); add the remaining generated component bodies before reporting completion"
+            )
+    for kinematic in _assembly_kinematic_summaries_from_context(context):
+        if kinematic["components"] < 2:
+            continue
+        if kinematic["grounded_count"] <= 0:
+            lines.append(
+                f"- assembly {kinematic['name']} has {kinematic['components']} "
+                "components but no grounded component; ground one base component "
+                "with assembly.ground_component so the solver has a fixed anchor"
+            )
+        elif kinematic["joints"] <= 0:
+            lines.append(
+                f"- assembly {kinematic['name']} has a grounded component but no "
+                "joints; mate the components with assembly.create_joint using "
+                "geometry references (faces/edges/vertices), then run "
+                "assembly.solve — raw placement is layout, not mating"
             )
     visual_lines: list[str] = []
     screenshot = context.get("view_screenshot", {})

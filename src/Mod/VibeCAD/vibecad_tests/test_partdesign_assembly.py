@@ -1567,6 +1567,8 @@ class TestVibeCADPartDesignAssembly(SettingsSnapshotTestCase):
             self.assertEqual(item["label"], "Readable Assembly")
             self.assertEqual(item["joint_groups"], 1)
             self.assertEqual(item["joints"], 0)
+            self.assertEqual(item["grounded_count"], 0)
+            self.assertEqual(item["joint_children"], [])
             self.assertEqual(item["components"], 1)
             child_names = {child["name"] for child in item["children"]}
             self.assertIn(joint_group.Name, child_names)
@@ -1667,5 +1669,320 @@ class TestVibeCADPartDesignAssembly(SettingsSnapshotTestCase):
             self.assertAlmostEqual(float(arm.Placement.Base.z), 12.0)
             self.assertEqual(placement_result["placement"], {"x": 42.0, "y": -8.0, "z": 12.0})
             self.assertEqual(placement_result["assembly_summary"]["assemblies"][0]["components"], 1)
+        finally:
+            App.closeDocument(doc.Name)
+
+    def test_assembly_ground_component_grounds_base_and_is_idempotent(self):
+        import FreeCAD as App
+
+        doc = App.newDocument("VibeCADAssemblyGroundTest")
+        try:
+            doc.addObject("Part::Box", "BaseBox")
+            doc.recompute()
+            service = VibeCADService()
+            create = service.registry.call("assembly.create_assembly", label="Ground Test")
+            self.assertTrue(create["ok"], create)
+            added = service.registry.call("assembly.add_component", component_name="BaseBox")
+            self.assertTrue(added["ok"], added)
+
+            grounded = service.registry.call(
+                "assembly.ground_component", component_name="BaseBox"
+            )
+            self.assertTrue(grounded["ok"], grounded)
+            self.assertFalse(grounded["already_grounded"])
+            joint = doc.getObject(grounded["grounded_joint"])
+            self.assertIsNotNone(joint)
+            self.assertEqual(joint.ObjectToGround.Name, "BaseBox")
+            self.assertEqual(grounded["grounded_components"], ["BaseBox"])
+
+            summary = service.assembly_summary()["assemblies"][0]
+            self.assertEqual(summary["grounded_count"], 1)
+            self.assertEqual(summary["joints"], 0)
+            self.assertEqual(summary["components"], 1)
+            self.assertEqual(len(summary["joint_children"]), 1)
+            self.assertTrue(summary["joint_children"][0]["grounded"])
+            self.assertEqual(summary["joint_children"][0]["object_to_ground"], "BaseBox")
+
+            again = service.registry.call(
+                "assembly.ground_component", component_name="BaseBox"
+            )
+            self.assertTrue(again["ok"], again)
+            self.assertTrue(again["already_grounded"])
+            self.assertEqual(
+                service.assembly_summary()["assemblies"][0]["grounded_count"], 1
+            )
+        finally:
+            App.closeDocument(doc.Name)
+
+    def test_assembly_ground_component_rejects_missing_and_non_child_components(self):
+        import FreeCAD as App
+
+        doc = App.newDocument("VibeCADAssemblyGroundErrorTest")
+        try:
+            doc.addObject("Part::Box", "LooseBox")
+            doc.recompute()
+            service = VibeCADService()
+
+            missing_assembly = service.registry.call(
+                "assembly.ground_component",
+                assembly_name="NoSuchAssembly",
+                component_name="LooseBox",
+            )
+            self.assertFalse(missing_assembly["ok"], missing_assembly)
+            self.assertTrue(missing_assembly["recoverable"])
+            self.assertIn("assembly.create_assembly", str(missing_assembly["next_actions"]))
+
+            create = service.registry.call("assembly.create_assembly", label="Ground Errors")
+            self.assertTrue(create["ok"], create)
+
+            missing_component = service.registry.call(
+                "assembly.ground_component", component_name="NoSuchComponent"
+            )
+            self.assertFalse(missing_component["ok"], missing_component)
+            self.assertTrue(missing_component["recoverable"])
+
+            not_a_child = service.registry.call(
+                "assembly.ground_component", component_name="LooseBox"
+            )
+            self.assertFalse(not_a_child["ok"], not_a_child)
+            self.assertTrue(not_a_child["recoverable"])
+            self.assertIn("assembly.add_component", str(not_a_child["next_actions"]))
+        finally:
+            App.closeDocument(doc.Name)
+
+    def test_assembly_create_joint_fixed_mates_displaced_boxes(self):
+        import FreeCAD as App
+
+        doc = App.newDocument("VibeCADAssemblyFixedJointTest")
+        try:
+            box_a = doc.addObject("Part::Box", "BoxA")
+            box_b = doc.addObject("Part::Box", "BoxB")
+            box_b.Placement = App.Placement(
+                App.Vector(40, 50, 60), App.Rotation(45, 55, 65)
+            )
+            doc.recompute()
+            service = VibeCADService()
+            create = service.registry.call("assembly.create_assembly", label="Fixed Joint")
+            self.assertTrue(create["ok"], create)
+            for name in ("BoxA", "BoxB"):
+                added = service.registry.call("assembly.add_component", component_name=name)
+                self.assertTrue(added["ok"], added)
+            grounded = service.registry.call(
+                "assembly.ground_component", component_name="BoxA"
+            )
+            self.assertTrue(grounded["ok"], grounded)
+
+            joint = service.registry.call(
+                "assembly.create_joint",
+                joint_type="Fixed",
+                component1="BoxA",
+                element1="Face6",
+                vertex1="Vertex7",
+                component2="BoxB",
+                element2="Face6",
+                vertex2="Vertex7",
+            )
+            self.assertTrue(joint["ok"], joint)
+            self.assertEqual(joint["solver_return_code"], 0)
+            self.assertIsNotNone(doc.getObject(joint["joint"]))
+            self.assertTrue(
+                box_a.Placement.isSame(box_b.Placement, 1e-6),
+                (box_a.Placement, box_b.Placement),
+            )
+            self.assertIn("BoxA", joint["component_placements"])
+            self.assertIn("BoxB", joint["component_placements"])
+
+            summary = joint["assembly_summary"]["assemblies"][0]
+            self.assertEqual(summary["components"], 2)
+            self.assertEqual(summary["grounded_count"], 1)
+            self.assertEqual(summary["joints"], 1)
+            connecting = [
+                child for child in summary["joint_children"] if not child["grounded"]
+            ]
+            self.assertEqual(len(connecting), 1)
+            self.assertEqual(connecting[0]["joint_type"], "Fixed")
+            self.assertEqual(connecting[0]["reference1"]["object"], "BoxA")
+            self.assertEqual(connecting[0]["reference2"]["object"], "BoxB")
+        finally:
+            App.closeDocument(doc.Name)
+
+    def test_assembly_create_joint_revolute_aligns_cylinder_axes(self):
+        import FreeCAD as App
+
+        doc = App.newDocument("VibeCADAssemblyRevoluteJointTest")
+        try:
+            cyl_a = doc.addObject("Part::Cylinder", "CylA")
+            cyl_b = doc.addObject("Part::Cylinder", "CylB")
+            cyl_b.Placement = App.Placement(
+                App.Vector(25, -10, 5), App.Rotation(30, 40, 50)
+            )
+            doc.recompute()
+            service = VibeCADService()
+            create = service.registry.call(
+                "assembly.create_assembly", label="Revolute Joint"
+            )
+            self.assertTrue(create["ok"], create)
+            for name in ("CylA", "CylB"):
+                added = service.registry.call("assembly.add_component", component_name=name)
+                self.assertTrue(added["ok"], added)
+            grounded = service.registry.call(
+                "assembly.ground_component", component_name="CylA"
+            )
+            self.assertTrue(grounded["ok"], grounded)
+
+            joint = service.registry.call(
+                "assembly.create_joint",
+                joint_type="Revolute",
+                component1="CylA",
+                element1="Face1",
+                component2="CylB",
+                element2="Face1",
+            )
+            self.assertTrue(joint["ok"], joint)
+            self.assertEqual(joint["solver_return_code"], 0)
+            axis_a = cyl_a.Placement.Rotation.multVec(App.Vector(0, 0, 1))
+            axis_b = cyl_b.Placement.Rotation.multVec(App.Vector(0, 0, 1))
+            self.assertGreater(abs(axis_a.dot(axis_b)), 1.0 - 1e-6, (axis_a, axis_b))
+        finally:
+            App.closeDocument(doc.Name)
+
+    def test_assembly_create_joint_rejects_bad_type_elements_and_membership(self):
+        import FreeCAD as App
+
+        doc = App.newDocument("VibeCADAssemblyJointErrorTest")
+        try:
+            doc.addObject("Part::Box", "BoxA")
+            doc.addObject("Part::Box", "BoxB")
+            doc.addObject("Part::Box", "LooseBox")
+            doc.recompute()
+            service = VibeCADService()
+            create = service.registry.call("assembly.create_assembly", label="Joint Errors")
+            self.assertTrue(create["ok"], create)
+            for name in ("BoxA", "BoxB"):
+                added = service.registry.call("assembly.add_component", component_name=name)
+                self.assertTrue(added["ok"], added)
+
+            unknown_type = service.registry.call(
+                "assembly.create_joint",
+                joint_type="Weld",
+                component1="BoxA",
+                component2="BoxB",
+            )
+            self.assertFalse(unknown_type["ok"], unknown_type)
+            self.assertIn("Fixed", unknown_type["supported_joint_types"])
+            self.assertIn("Revolute", unknown_type["supported_joint_types"])
+
+            bad_element = service.registry.call(
+                "assembly.create_joint",
+                joint_type="Fixed",
+                component1="BoxA",
+                element1="Face99",
+                component2="BoxB",
+                element2="Face6",
+            )
+            self.assertFalse(bad_element["ok"], bad_element)
+            self.assertTrue(bad_element["recoverable"])
+            self.assertIn("partdesign.find_subelements", str(bad_element["next_actions"]))
+
+            malformed = service.registry.call(
+                "assembly.create_joint",
+                joint_type="Fixed",
+                component1="BoxA",
+                element1="TopFace",
+                component2="BoxB",
+            )
+            self.assertFalse(malformed["ok"], malformed)
+            self.assertTrue(malformed["recoverable"])
+
+            same_component = service.registry.call(
+                "assembly.create_joint",
+                joint_type="Fixed",
+                component1="BoxA",
+                component2="BoxA",
+            )
+            self.assertFalse(same_component["ok"], same_component)
+
+            not_a_child = service.registry.call(
+                "assembly.create_joint",
+                joint_type="Fixed",
+                component1="BoxA",
+                component2="LooseBox",
+            )
+            self.assertFalse(not_a_child["ok"], not_a_child)
+            self.assertIn("assembly.add_component", str(not_a_child["next_actions"]))
+        finally:
+            App.closeDocument(doc.Name)
+
+    def test_assembly_solve_resolves_jointed_assembly_and_guides_jointless(self):
+        import FreeCAD as App
+
+        doc = App.newDocument("VibeCADAssemblySolveTest")
+        try:
+            service = VibeCADService()
+
+            missing = service.registry.call("assembly.solve")
+            self.assertFalse(missing["ok"], missing)
+            self.assertTrue(missing["recoverable"])
+            self.assertIn("assembly.create_assembly", str(missing["next_actions"]))
+
+            create = service.registry.call("assembly.create_assembly", label="Solve Test")
+            self.assertTrue(create["ok"], create)
+            doc.addObject("Part::Box", "BoxA")
+            box_b = doc.addObject("Part::Box", "BoxB")
+            box_b.Placement = App.Placement(
+                App.Vector(40, 50, 60), App.Rotation(45, 55, 65)
+            )
+            doc.recompute()
+            for name in ("BoxA", "BoxB"):
+                added = service.registry.call("assembly.add_component", component_name=name)
+                self.assertTrue(added["ok"], added)
+
+            jointless = service.registry.call("assembly.solve")
+            self.assertFalse(jointless["ok"], jointless)
+            self.assertEqual(jointless["grounded_count"], 0)
+            self.assertEqual(jointless["joint_count"], 0)
+            actions = str(jointless["next_actions"])
+            self.assertIn("assembly.ground_component", actions)
+            self.assertIn("assembly.create_joint", actions)
+
+            grounded = service.registry.call(
+                "assembly.ground_component", component_name="BoxA"
+            )
+            self.assertTrue(grounded["ok"], grounded)
+            grounded_jointless = service.registry.call("assembly.solve")
+            self.assertFalse(grounded_jointless["ok"], grounded_jointless)
+            self.assertEqual(grounded_jointless["grounded_count"], 1)
+            actions = str(grounded_jointless["next_actions"])
+            self.assertNotIn("assembly.ground_component", actions)
+            self.assertIn("assembly.create_joint", actions)
+
+            joint = service.registry.call(
+                "assembly.create_joint",
+                joint_type="Fixed",
+                component1="BoxA",
+                element1="Face6",
+                vertex1="Vertex7",
+                component2="BoxB",
+                element2="Face6",
+                vertex2="Vertex7",
+            )
+            self.assertTrue(joint["ok"], joint)
+
+            # Perturb the mated component so the solve has real work to do.
+            box_b.Placement = App.Placement(
+                App.Vector(120, -30, 90), App.Rotation(10, 20, 30)
+            )
+            doc.recompute()
+            solved = service.registry.call("assembly.solve")
+            self.assertTrue(solved["ok"], solved)
+            self.assertEqual(solved["solver_return_code"], 0)
+            self.assertEqual(solved["grounded_count"], 1)
+            self.assertEqual(solved["joint_count"], 1)
+            placements = solved["component_placements"]
+            self.assertEqual(set(placements), {"BoxA", "BoxB"})
+            for key in ("x", "y", "z"):
+                self.assertAlmostEqual(
+                    placements["BoxA"][key], placements["BoxB"][key], places=6
+                )
         finally:
             App.closeDocument(doc.Name)

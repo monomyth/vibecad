@@ -485,6 +485,78 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         lines = _missing_requirement_lines("Continue this model.", context, [])
         self.assertFalse(any("Assembly" in line or "component bodies" in line for line in lines), lines)
 
+    def test_loop_requirements_gate_grounding_and_joints_for_kinematic_assemblies(self):
+        context = {
+            "document": {"object_count": 1, "objects": [{"type": "Assembly::AssemblyObject"}]},
+            "partdesign": {"body_count": 0, "bodies": []},
+            "assembly": {
+                "assembly_count": 1,
+                "assemblies": [
+                    {
+                        "name": "Assembly",
+                        "components": 2,
+                        "grounded_count": 0,
+                        "joints": 0,
+                    }
+                ],
+            },
+        }
+        lines = _missing_requirement_lines("Continue this model.", context, [])
+        self.assertTrue(any("assembly.ground_component" in line for line in lines), lines)
+        self.assertFalse(any("assembly.create_joint" in line for line in lines), lines)
+
+        context["assembly"]["assemblies"][0]["grounded_count"] = 1
+        lines = _missing_requirement_lines("Continue this model.", context, [])
+        self.assertFalse(any("assembly.ground_component" in line for line in lines), lines)
+        joints_lines = [line for line in lines if "assembly.create_joint" in line]
+        self.assertEqual(len(joints_lines), 1, lines)
+        self.assertIn("assembly.solve", joints_lines[0])
+        self.assertIn("raw placement is layout, not mating", joints_lines[0])
+
+        context["assembly"]["assemblies"][0]["joints"] = 1
+        lines = _missing_requirement_lines("Continue this model.", context, [])
+        self.assertFalse(
+            any("assembly.ground_component" in line or "assembly.create_joint" in line for line in lines),
+            lines,
+        )
+
+        # Single-component assemblies need no kinematic gating.
+        context["assembly"]["assemblies"][0].update(
+            {"components": 1, "grounded_count": 0, "joints": 0}
+        )
+        lines = _missing_requirement_lines("Continue this model.", context, [])
+        self.assertFalse(
+            any("assembly.ground_component" in line or "assembly.create_joint" in line for line in lines),
+            lines,
+        )
+
+        # Malformed assembly context entries are tolerated without gating noise.
+        context["assembly"] = {
+            "assembly_count": 1,
+            "assemblies": [None, "junk", {"components": "not-a-number"}],
+        }
+        lines = _missing_requirement_lines("Continue this model.", context, [])
+        self.assertFalse(
+            any("assembly.ground_component" in line or "assembly.create_joint" in line for line in lines),
+            lines,
+        )
+
+    def test_assembly_execution_contract_requires_grounding_joints_and_solve(self):
+        from VibeCADSession import _execution_contract_for_context
+
+        contract = _execution_contract_for_context({"workbench": "AssemblyWorkbench"})
+        self.assertEqual(contract["mode"], "native_assembly")
+        required_order = " ".join(contract["required_order"])
+        self.assertIn("assembly.ground_component", required_order)
+        self.assertIn("assembly.create_joint", required_order)
+        self.assertIn("partdesign.find_subelements", required_order)
+        self.assertIn("never by dead-reckoned raw placement", required_order)
+        self.assertIn("assembly.solve", required_order)
+        gates = " ".join(contract["completion_gates"])
+        self.assertIn("grounded component", gates)
+        self.assertIn("raw placement is layout, not mating", gates)
+        self.assertIn("solve successfully", gates)
+
     def test_provider_safe_tool_schemas_expose_only_command_write_tools(self):
         service = VibeCADService()
         names = {schema["name"] for schema in provider_safe_tool_schemas(service)}
@@ -684,6 +756,12 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         self.assertIn("assembly.add_component", assembly_names)
         self.assertIn("assembly.set_component_placement", assembly_names)
         self.assertIn("assembly.check_interference", assembly_names)
+        # Kinematic mating: ground, joint on referenced geometry, solve — with
+        # the geometric subelement resolver for deterministic references.
+        self.assertIn("assembly.ground_component", assembly_names)
+        self.assertIn("assembly.create_joint", assembly_names)
+        self.assertIn("assembly.solve", assembly_names)
+        self.assertIn("partdesign.find_subelements", assembly_names)
         # Clearance checks are part of the modeling loop: PartDesign exposes
         # interference checking without a workbench switch.
         self.assertIn("assembly.check_interference", partdesign_names)
@@ -1421,6 +1499,20 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         self.assertFalse(report["capabilities"]["edge_chamfering"]["available"])
         self.assertFalse(report["capabilities"]["detail_drawings"]["available"])
         self.assertFalse(report["capabilities"]["assembly_component_add"]["available"])
+        self.assertFalse(report["capabilities"]["assembly_grounding"]["available"])
+        self.assertFalse(report["capabilities"]["kinematic_joints"]["available"])
+        self.assertFalse(report["capabilities"]["kinematic_solve"]["available"])
+
+        assembly_report = service.tool_shape_report("AssemblyWorkbench")
+        assembly_capabilities = assembly_report["capabilities"]
+        self.assertTrue(assembly_capabilities["assembly_grounding"]["available"])
+        self.assertTrue(assembly_capabilities["kinematic_joints"]["available"])
+        self.assertTrue(assembly_capabilities["kinematic_solve"]["available"])
+        assembly_names = set(assembly_report["provider_tool_names"])
+        self.assertIn("assembly.ground_component", assembly_names)
+        self.assertIn("assembly.create_joint", assembly_names)
+        self.assertIn("assembly.solve", assembly_names)
+        self.assertIn("partdesign.find_subelements", assembly_names)
         coverage = {
             item["tool_class"]: item
             for item in report["sketcher_human_command_coverage"]

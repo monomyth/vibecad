@@ -81,6 +81,9 @@ TOOL_MODULES = {
     "assembly.create_assembly": "provider_tools.assembly_create_assembly",
     "assembly.add_component": "provider_tools.assembly_add_component",
     "assembly.set_component_placement": "provider_tools.assembly_set_component_placement",
+    "assembly.ground_component": "provider_tools.assembly_ground_component",
+    "assembly.create_joint": "provider_tools.assembly_create_joint",
+    "assembly.solve": "provider_tools.assembly_solve",
     "assembly.check_interference": "provider_tools.assembly_check_interference",
     "model.build_from_script": "provider_tools.model_build_from_script",
 }

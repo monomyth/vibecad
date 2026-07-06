@@ -141,6 +141,24 @@ class TestVibeCADWorkbenchPacks(SettingsSnapshotTestCase):
         self.assertNotIn("sketcher.create_sketch", pack.tool_names)
         self.assertIn("partdesign.create_sketch", pack.tool_names)
 
+    def test_assembly_pack_covers_kinematic_mating_workflow(self):
+        pack = get_tool_pack("AssemblyWorkbench")
+        # Container/layout tools.
+        self.assertIn("assembly.create_assembly", pack.tool_names)
+        self.assertIn("assembly.add_component", pack.tool_names)
+        self.assertIn("assembly.set_component_placement", pack.tool_names)
+        self.assertIn("assembly.check_interference", pack.tool_names)
+        # Kinematic mating: ground one base component, mate on referenced
+        # geometry, solve — with the subelement resolver so joint faces are
+        # picked geometrically instead of guessed positionally.
+        self.assertIn("assembly.ground_component", pack.tool_names)
+        self.assertIn("assembly.create_joint", pack.tool_names)
+        self.assertIn("assembly.solve", pack.tool_names)
+        self.assertIn("partdesign.find_subelements", pack.tool_names)
+        # The assembly pack is not a modeling pack.
+        self.assertNotIn("partdesign.extrude", pack.tool_names)
+        self.assertNotIn("sketcher.add_geometry", pack.tool_names)
+
     def test_non_modeling_packs_do_not_expose_modeling_tools(self):
         for workbench in ("FemWorkbench", "MeshWorkbench", "CAMWorkbench"):
             pack = get_tool_pack(workbench)

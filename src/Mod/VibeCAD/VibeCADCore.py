@@ -1767,32 +1767,61 @@ class VibeCADService:
         return assemblies[0] if assemblies else None
 
     @staticmethod
-    def _assembly_child_counts(assembly: Any) -> dict[str, int]:
+    def _is_grounded_joint(obj: Any) -> bool:
+        return getattr(obj, "ObjectToGround", None) is not None
+
+    @staticmethod
+    def _assembly_joint_objects(assembly: Any) -> list[Any]:
+        joints: list[Any] = []
+        for child in list(getattr(assembly, "Group", []) or []):
+            if getattr(child, "TypeId", "") == "Assembly::JointGroup":
+                joints.extend(list(getattr(child, "Group", []) or []))
+        return joints
+
+    def _assembly_child_counts(self, assembly: Any) -> dict[str, int]:
         counts = {
             "components": 0,
             "joints": 0,
+            "grounded_count": 0,
             "joint_groups": 0,
             "bom_groups": 0,
             "view_groups": 0,
             "simulation_groups": 0,
         }
+        joint_names = {
+            getattr(joint, "Name", None)
+            for joint in self._assembly_joint_objects(assembly)
+        }
         for child in list(getattr(assembly, "Group", []) or []):
             type_id = getattr(child, "TypeId", "")
             if type_id == "Assembly::JointGroup":
                 counts["joint_groups"] += 1
-                counts["joints"] += len(list(getattr(child, "Group", []) or []))
+                for joint in list(getattr(child, "Group", []) or []):
+                    if self._is_grounded_joint(joint):
+                        counts["grounded_count"] += 1
+                    else:
+                        counts["joints"] += 1
             elif type_id == "Assembly::BomGroup":
                 counts["bom_groups"] += 1
             elif type_id == "Assembly::ViewGroup":
                 counts["view_groups"] += 1
             elif type_id == "Assembly::SimulationGroup":
                 counts["simulation_groups"] += 1
+            elif getattr(child, "Name", None) in joint_names:
+                # App::Part-style groups list nested members recursively; joint
+                # objects already counted through their JointGroup are not
+                # components.
+                continue
             else:
                 counts["components"] += 1
         return counts
 
     def _assembly_component_children(self, assembly: Any) -> list[dict[str, Any]]:
         components = []
+        joint_names = {
+            getattr(joint, "Name", None)
+            for joint in self._assembly_joint_objects(assembly)
+        }
         for child in list(getattr(assembly, "Group", []) or []):
             type_id = getattr(child, "TypeId", "")
             if type_id in {
@@ -1802,8 +1831,42 @@ class VibeCADService:
                 "Assembly::SimulationGroup",
             }:
                 continue
+            if getattr(child, "Name", None) in joint_names:
+                continue
             components.append(self._object_summary(child))
         return components
+
+    @staticmethod
+    def _joint_reference_summary(reference: Any) -> dict[str, Any] | None:
+        if not reference:
+            return None
+        try:
+            obj = reference[0]
+            subelements = [str(sub) for sub in (reference[1] or []) if sub]
+        except (TypeError, IndexError):
+            return None
+        return {
+            "object": getattr(obj, "Name", None),
+            "label": getattr(obj, "Label", None),
+            "elements": subelements,
+        }
+
+    def _joint_summary(self, joint: Any) -> dict[str, Any]:
+        item = self._object_summary(joint)
+        if self._is_grounded_joint(joint):
+            grounded_obj = getattr(joint, "ObjectToGround", None)
+            item["grounded"] = True
+            item["object_to_ground"] = getattr(grounded_obj, "Name", None)
+            return item
+        item["grounded"] = False
+        item["joint_type"] = getattr(joint, "JointType", None)
+        item["reference1"] = self._joint_reference_summary(
+            getattr(joint, "Reference1", None)
+        )
+        item["reference2"] = self._joint_reference_summary(
+            getattr(joint, "Reference2", None)
+        )
+        return item
 
     def _assembly_summary(self, assembly: Any) -> dict[str, Any]:
         item = self._object_summary(assembly)
@@ -1811,6 +1874,10 @@ class VibeCADService:
         item["child_count"] = len(list(getattr(assembly, "Group", []) or []))
         item.update(self._assembly_child_counts(assembly))
         item["component_children"] = self._assembly_component_children(assembly)[:60]
+        item["joint_children"] = [
+            self._joint_summary(joint)
+            for joint in self._assembly_joint_objects(assembly)[:40]
+        ]
         item["children"] = [
             self._object_summary(child)
             for child in list(getattr(assembly, "Group", []) or [])[:40]

@@ -4,8 +4,10 @@
 
 from __future__ import annotations
 
-TOOL_SPEC = {'description': 'Return Assembly workbench assemblies, child counts, joint groups, and '
-                'component summaries.',
+TOOL_SPEC = {'description': 'Return Assembly workbench assemblies with component summaries, '
+                'grounded/connecting joint counts, and joint details (type and '
+                'both geometry references) for inspecting or repairing the '
+                'kinematic structure.',
  'name': 'assembly.get_assemblies',
  'safety': 'READ',
  'workbench': 'AssemblyWorkbench'}

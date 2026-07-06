@@ -89,6 +89,15 @@ ASSEMBLY_PACK_TOOL_NAMES: tuple[str, ...] = (
     "assembly.create_assembly",
     "assembly.add_component",
     "assembly.set_component_placement",
+    # Kinematic mating: anchor one component, mate the rest with joints on
+    # referenced geometry, then run the solver. Raw placement is layout,
+    # not mating.
+    "assembly.ground_component",
+    "assembly.create_joint",
+    "assembly.solve",
+    # Joint references target faces/edges/vertices; the geometric resolver
+    # picks them deterministically instead of guessing element names.
+    "partdesign.find_subelements",
     "assembly.check_interference",
 )
 
