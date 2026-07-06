@@ -165,6 +165,7 @@ def _wrap_tc(tc: Any) -> Postable:
                 toollabel=tc.Label,
                 spindlespeed=tc.SpindleSpeed if tc.SpindleSpeed else 0,
                 spindledirection=spindle_dir,
+                tool_length_offset=getattr(tc, "ToolLengthOffset", 0),
             )
             path = Path.Path(commands)
         except Exception:
@@ -175,7 +176,10 @@ def _wrap_tc(tc: Any) -> Postable:
         label=tc.Label,
         path=path,
         source=tc,
-        data={"tool_number": tc.ToolNumber},
+        data={
+            "tool_number": tc.ToolNumber,
+            "tool_length_offset": int(getattr(tc, "ToolLengthOffset", 0) or 0),
+        },
     )
 
 

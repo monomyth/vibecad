@@ -502,15 +502,19 @@ def findToolController(obj, proxy, name=None):
         raise PathNoTCExistsException()
 
     # If there's only one in the job, use it.
+    tc = None
     if len(controllers) == 1:
         if name is None or name == controllers[0].Label:
             tc = controllers[0]
-        else:
-            tc = None
     elif name is not None:
-        tc = [i for i in controllers if i.Label == name][0]
+        matches = [i for i in controllers if i.Label == name]
+        tc = matches[0] if matches else None
     elif UserInput:  # More than one, make the user choose.
         tc = UserInput.chooseToolController(controllers)
+    else:
+        # Headless with multiple controllers and no name: deterministically
+        # fall back to the first controller instead of raising.
+        tc = controllers[0]
     return tc
 
 

@@ -31,6 +31,10 @@ from .machine import (
     OutputOptions,
     ProcessingOptions,
 )
+from .validation import (
+    Violation,
+    validate_job_against_machine,
+)
 
 # Legacy compatibility aliases
 Spindle = Toolhead
@@ -49,4 +53,6 @@ __all__ = [
     "OutputUnits",
     "OutputOptions",
     "ProcessingOptions",
+    "Violation",
+    "validate_job_against_machine",
 ]

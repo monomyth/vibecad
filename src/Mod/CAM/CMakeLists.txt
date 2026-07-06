@@ -185,6 +185,12 @@ SET(PathPythonMachineUiEditor_SRCS
 SET(PathPythonMachineModels_SRCS
     Machine/models/__init__.py
     Machine/models/machine.py
+    Machine/models/validation.py
+)
+
+SET(Machine_Templates_SRCS
+    Machine/machines/Generic_3-Axis_GRBL_Router.fcm
+    Machine/machines/Generic_LinuxCNC_Mill.fcm
 )
 
 SET(PathPythonToolsToolBit_SRCS
@@ -693,6 +699,7 @@ SET(all_files
     ${PathPythonToolsLibrarySerializers_SRCS}
     ${PathPythonToolsLibraryUi_SRCS}
     ${PathPythonMachineModels_SRCS}
+    ${Machine_Templates_SRCS}
     ${PathPythonMachineUi_SRCS}
     ${PathPythonMachineUiEditor_SRCS}
     ${PathPythonGui_SRCS}

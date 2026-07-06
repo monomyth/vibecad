@@ -43,10 +43,22 @@ class SpindleDirection(Enum):
     CCW = "M4"
 
 
-def generate(toolnumber, toollabel, spindlespeed=0, spindledirection=SpindleDirection.OFF):
+def generate(
+    toolnumber,
+    toollabel,
+    spindlespeed=0,
+    spindledirection=SpindleDirection.OFF,
+    tool_length_offset=None,
+    output_tlo=False,
+):
     """
     Generates Gcode for a simple toolchange.
 
+    When output_tlo is True a ``G43 H{n}`` tool length offset command is
+    emitted immediately after the ``M6`` tool change.  The H register is
+    taken from tool_length_offset when provided (> 0), otherwise it
+    defaults to the tool number.  Default calls emit no G43 for backward
+    compatibility.
     """
 
     Path.Log.track(
@@ -60,10 +72,21 @@ def generate(toolnumber, toollabel, spindlespeed=0, spindledirection=SpindleDire
     if spindlespeed < 0:
         raise ValueError("Spindle speed must be a positive value")
 
+    if tool_length_offset is not None and tool_length_offset < 0:
+        raise ValueError("Tool length offset must be a positive value")
+
     commands = []
 
     commands.append(Path.Command(f"({toollabel})"))
     commands.append(Path.Command("M6", {"T": int(toolnumber)}))
+
+    if output_tlo:
+        h_register = (
+            int(tool_length_offset)
+            if tool_length_offset is not None and tool_length_offset > 0
+            else int(toolnumber)
+        )
+        commands.append(Path.Command("G43", {"H": h_register}))
 
     if spindledirection is SpindleDirection.OFF:
         return commands

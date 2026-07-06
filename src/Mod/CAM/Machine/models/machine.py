@@ -52,6 +52,27 @@ refRotAxis = RefRotAxes(
 )
 
 
+def _coerce_vector(value, axis_name):
+    """Coerce a vector-like value into a FreeCAD.Vector.
+
+    Accepts FreeCAD.Vector, or a sequence of three numbers (tuple/list).
+    Raises TypeError naming the axis when the value cannot be coerced.
+    """
+    if isinstance(value, FreeCAD.Vector):
+        return value
+    if isinstance(value, (tuple, list)) and len(value) == 3:
+        try:
+            return FreeCAD.Vector(float(value[0]), float(value[1]), float(value[2]))
+        except (TypeError, ValueError) as e:
+            raise TypeError(
+                f"Axis '{axis_name}': vector components must be numeric, got {value!r}"
+            ) from e
+    raise TypeError(
+        f"Axis '{axis_name}': expected FreeCAD.Vector or a sequence of 3 numbers, "
+        f"got {type(value).__name__} ({value!r})"
+    )
+
+
 # ============================================================================
 # Enums for Machine Configuration
 # ============================================================================
@@ -259,7 +280,9 @@ class LinearAxis:
     def from_dict(cls, data):
         """Deserialize from dictionary"""
         vec = FreeCAD.Vector(
-            data["direction_vector"][0], data["direction_vector"][1], data["direction_vector"][2]
+            data["direction_vector"][0],
+            data["direction_vector"][1],
+            data["direction_vector"][2],
         )
         return cls(
             data["name"],
@@ -362,7 +385,9 @@ class RotaryAxis:
     def from_dict(cls, data):
         """Deserialize from dictionary"""
         vec = FreeCAD.Vector(
-            data["rotation_vector"][0], data["rotation_vector"][1], data["rotation_vector"][2]
+            data["rotation_vector"][0],
+            data["rotation_vector"][1],
+            data["rotation_vector"][2],
         )
         return cls(
             data["name"],
@@ -727,7 +752,7 @@ class Machine:
         """Get output units as enum for G-code generation"""
         return (
             MachineUnits.METRIC
-            if self.output.output_units == OutputUnits.METRIC
+            if self.output.units == OutputUnits.METRIC
             else MachineUnits.IMPERIAL
         )
 
@@ -736,7 +761,7 @@ class Machine:
         """Get G-code output units as enum for post-processor"""
         return (
             MachineUnits.METRIC
-            if self.output.output_units == OutputUnits.METRIC
+            if self.output.units == OutputUnits.METRIC
             else MachineUnits.IMPERIAL
         )
 
@@ -748,7 +773,7 @@ class Machine:
     @property
     def output_unit_format(self) -> str:
         """Get G-code output unit format string (mm or in)"""
-        return "mm" if self.output.output_units == OutputUnits.METRIC else "in"
+        return "mm" if self.output.units == OutputUnits.METRIC else "in"
 
     @property
     def unit_speed_format(self) -> str:
@@ -758,7 +783,7 @@ class Machine:
     @property
     def output_unit_speed_format(self) -> str:
         """Get G-code output unit speed format string (mm/min or in/min)"""
-        return "mm/min" if self.output.output_units == OutputUnits.METRIC else "in/min"
+        return "mm/min" if self.output.units == OutputUnits.METRIC else "in/min"
 
     @property
     def machine_type(self) -> str:
@@ -823,6 +848,7 @@ class Machine:
         self, name, direction_vector, min_limit=0, max_limit=1000, max_velocity=10000
     ):
         """Add a linear axis to the configuration"""
+        direction_vector = _coerce_vector(direction_vector, name)
         self.linear_axes[name] = LinearAxis(
             name, direction_vector, min_limit, max_limit, max_velocity
         )
@@ -832,6 +858,7 @@ class Machine:
         self, name, rotation_vector, min_limit=-360, max_limit=360, max_velocity=36000
     ):
         """Add a rotary axis to the configuration"""
+        rotation_vector = _coerce_vector(rotation_vector, name)
         self.rotary_axes[name] = RotaryAxis(
             name, rotation_vector, min_limit, max_limit, max_velocity
         )
@@ -847,7 +874,17 @@ class Machine:
         tool_change="manual",
     ):
         """Add a toolhead to the configuration"""
-        self.toolheads.append(Toolhead(name, id, max_power_kw, max_rpm, min_rpm, tool_change))
+        self.toolheads.append(
+            Toolhead(
+                name=name,
+                toolhead_type=ToolheadType.ROTARY,
+                id=id,
+                max_power_kw=max_power_kw,
+                max_rpm=max_rpm,
+                min_rpm=min_rpm,
+                tool_change=tool_change,
+            )
+        )
         return self
 
     def save(self, filepath):
@@ -1489,7 +1526,10 @@ class Machine:
                     parent=parent,
                     joint_origin=joint_origin,
                 )
-            elif axis_type in ["angular", "rotary"]:  # Support both old and new type names
+            elif axis_type in [
+                "angular",
+                "rotary",
+            ]:  # Support both old and new type names
                 # Create rotary axis with parsed joint data
                 rotation_vec = FreeCAD.Vector(axis_vector[0], axis_vector[1], axis_vector[2])
 

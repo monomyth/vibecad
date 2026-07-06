@@ -55,6 +55,7 @@ class ToolControllerTemplate:
     RampFeed = "rampfeed"
     SpindleDir = "dir"
     SpindleSpeed = "speed"
+    ToolLengthOffset = "tlo"
     ToolNumber = "nr"
     Tool = "tool"
     Version = "version"
@@ -156,6 +157,16 @@ class ToolController:
             "Tool",
             QT_TRANSLATE_NOOP("App::Property", "Direction of spindle rotation"),
         )
+        obj.addProperty(
+            "App::PropertyIntegerConstraint",
+            "ToolLengthOffset",
+            "Tool",
+            QT_TRANSLATE_NOOP(
+                "App::Property",
+                "Tool length offset register (G43 H word); 0 uses the tool number",
+            ),
+        )
+        obj.ToolLengthOffset = (0, 0, 10000, 1)
         obj.addProperty(
             "App::PropertySpeed",
             "VertFeed",
@@ -297,6 +308,19 @@ class ToolController:
             obj.setExpression("LeadOutFeed", "HorizFeed")
             needsRecompute = True
 
+        if not hasattr(obj, "ToolLengthOffset"):
+            obj.addProperty(
+                "App::PropertyIntegerConstraint",
+                "ToolLengthOffset",
+                "Tool",
+                QT_TRANSLATE_NOOP(
+                    "App::Property",
+                    "Tool length offset register (G43 H word); 0 uses the tool number",
+                ),
+            )
+            obj.ToolLengthOffset = (0, 0, 10000, 1)
+            needsRecompute = True
+
         if needsRecompute:
             obj.recompute()
 
@@ -341,6 +365,10 @@ class ToolController:
                     obj.SpindleDir = template.get(ToolControllerTemplate.SpindleDir)
                 if template.get(ToolControllerTemplate.ToolNumber):
                     obj.ToolNumber = int(template.get(ToolControllerTemplate.ToolNumber))
+                if template.get(ToolControllerTemplate.ToolLengthOffset):
+                    obj.ToolLengthOffset = int(
+                        template.get(ToolControllerTemplate.ToolLengthOffset)
+                    )
                 if template.get(ToolControllerTemplate.Tool):
                     self.ensureToolBit(obj)
                     tool_data = template.get(ToolControllerTemplate.Tool)
@@ -392,6 +420,8 @@ class ToolController:
         attrs[ToolControllerTemplate.HorizRapid] = "%s" % (obj.HorizRapid)
         attrs[ToolControllerTemplate.SpindleSpeed] = obj.SpindleSpeed
         attrs[ToolControllerTemplate.SpindleDir] = obj.SpindleDir
+        if getattr(obj, "ToolLengthOffset", 0):
+            attrs[ToolControllerTemplate.ToolLengthOffset] = obj.ToolLengthOffset
         attrs[ToolControllerTemplate.Tool] = obj.Tool.Proxy.to_dict()
         expressions = []
         for expr in obj.ExpressionEngine:
@@ -414,6 +444,7 @@ class ToolController:
             "toollabel": obj.Label,
             "spindlespeed": obj.SpindleSpeed,
             "spindledirection": obj.Tool.Proxy.get_spindle_direction(),
+            "tool_length_offset": getattr(obj, "ToolLengthOffset", 0),
         }
 
         commands = toolchange.generate(**args)

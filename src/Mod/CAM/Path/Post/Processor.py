@@ -269,7 +269,7 @@ class PostProcessorFactory:
                             )
                             # Return a mock instance that can be used for schema inspection
                             return PostClass.__new__(PostClass)
-                        except:
+                        except Exception:
                             pass
                     raise
 
@@ -945,7 +945,7 @@ class PostProcessor:
             if key.upper() not in self.values:
                 self.values[key.upper()] = value
 
-        Path.Log.debug(f"Configuration bundle applied — " f"bundle: {bundle}")
+        Path.Log.debug(f"Configuration bundle applied — bundle: {bundle}")
 
     # ------------------------------------------------------------------
     # Bundle helpers
@@ -1335,7 +1335,6 @@ class PostProcessor:
 
             def insert_op_bcnc(section_name: str, item, section_state: dict):
                 if item.item_type == "operation" and item.path:
-
                     new_postable = self._make_postable(
                         "Post: bCNC preop",
                         [
@@ -1403,9 +1402,30 @@ class PostProcessor:
             # add
             else:
                 if cmd.Name in Constants.MCODE_TOOL_CHANGE and "T" in cmd.Parameters:
-                    tool_num = cmd.Parameters["T"]
-                    Path.Log.debug(f"Added G43 H{tool_num} after M6 in operation {item.label}")
-                    return (1, [Path.Command("G43", {"H": tool_num}, {"tool_length_offset": True})])
+                    # Idempotency: if this item's path already carries a G43
+                    # (e.g. emitted by the toolchange generator), don't inject
+                    # a duplicate.
+                    if "_tlo_has_g43" not in section_state:
+                        section_state["_tlo_has_g43"] = {}
+                    has_g43 = section_state["_tlo_has_g43"].get(id(item))
+                    if has_g43 is None:
+                        has_g43 = any(
+                            c.Name in Constants.GCODE_TOOL_LENGTH_OFFSET for c in item.Path.Commands
+                        )
+                        section_state["_tlo_has_g43"][id(item)] = has_g43
+                    if has_g43:
+                        return (None, None)
+
+                    # Prefer the tool controller's explicit H register when set,
+                    # falling back to the tool number.
+                    h_register = item.data.get("tool_length_offset", 0) if item.data else 0
+                    if not h_register:
+                        h_register = cmd.Parameters["T"]
+                    Path.Log.debug(f"Added G43 H{h_register} after M6 in {item.label}")
+                    return (
+                        1,
+                        [Path.Command("G43", {"H": h_register}, {"tool_length_offset": True})],
+                    )
                 else:
                     return (None, None)
 
