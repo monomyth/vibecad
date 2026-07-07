@@ -43,6 +43,7 @@ from VibeCADProvider import (
     MAX_PROVIDER_IMAGE_BYTES,
     _build_provider_function_tools,
     _provider_reasoning_effort,
+    _provider_spawn_bootstrap_environment,
     _provider_spawn_python_executable,
     _provider_subprocess_smoke,
     _run_agents_subprocess,
@@ -273,6 +274,40 @@ class TestVibeCADAnthropicProvider(unittest.TestCase):
                 sys, "executable", str(freecad_exe)
             ):
                 self.assertEqual(_provider_spawn_python_executable(), str(python_exe))
+
+    def test_provider_spawn_bootstrap_uses_python_when_freecad_appears_frozen(self):
+        from multiprocessing import spawn
+
+        original_executable = spawn.get_executable()
+        sentinel = object()
+        original_frozen = getattr(sys, "frozen", sentinel)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                python_exe = Path(tmp) / "python.exe"
+                python_exe.write_text("", encoding="utf-8")
+                multiprocessing.set_executable(str(python_exe))
+                with mock.patch.object(sys, "platform", "win32"), mock.patch.object(
+                    sys, "executable", "FreeCADCmd.exe"
+                ):
+                    sys.frozen = True
+                    frozen_cmd = spawn.get_command_line(pipe_handle=1)
+                    self.assertEqual(frozen_cmd[0], "FreeCADCmd.exe")
+
+                    with _provider_spawn_bootstrap_environment():
+                        spawn_cmd = spawn.get_command_line(pipe_handle=1)
+
+                    self.assertEqual(os.fsdecode(spawn_cmd[0]), str(python_exe))
+                    self.assertIn("spawn_main", " ".join(map(str, spawn_cmd)))
+                    self.assertTrue(getattr(sys, "frozen"))
+        finally:
+            multiprocessing.set_executable(original_executable)
+            if original_frozen is sentinel:
+                try:
+                    delattr(sys, "frozen")
+                except Exception:
+                    pass
+            else:
+                sys.frozen = original_frozen
 
     def test_provider_subprocess_smoke_completes(self):
         _provider_subprocess_smoke()

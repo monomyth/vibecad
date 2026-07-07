@@ -438,6 +438,41 @@ def _provider_multiprocessing_context() -> multiprocessing.context.BaseContext:
     return multiprocessing.get_context()
 
 
+@contextmanager
+def _provider_spawn_bootstrap_environment():
+    """Force multiprocessing spawn to use python.exe in embedded Windows hosts.
+
+    Python's Windows spawn command ignores ``multiprocessing.set_executable()``
+    when ``sys.frozen`` is true and launches ``sys.executable`` with
+    ``--multiprocessing-fork`` instead.  FreeCAD is an embedded application, not
+    a Python-frozen app with a multiprocessing-aware executable, so the child can
+    exit cleanly without ever running the target.  Temporarily clearing the flag
+    lets multiprocessing generate the normal ``python.exe -c spawn_main(...)``
+    command line.
+    """
+
+    if sys.platform != "win32" or not getattr(sys, "frozen", False):
+        yield
+        return
+
+    sentinel = object()
+    original = getattr(sys, "frozen", sentinel)
+    try:
+        try:
+            delattr(sys, "frozen")
+        except Exception:
+            setattr(sys, "frozen", False)
+        yield
+    finally:
+        if original is sentinel:
+            try:
+                delattr(sys, "frozen")
+            except Exception:
+                pass
+        else:
+            setattr(sys, "frozen", original)
+
+
 def _provider_subprocess_smoke_child_main(
     conn,
     prompt: str,
@@ -517,7 +552,8 @@ def _run_agents_subprocess(
         if not hasattr(sys.stdin, "close"):
             replacement_stdin = open(os.devnull, "r", encoding="utf-8")
             sys.stdin = replacement_stdin
-        process.start()
+        with _provider_spawn_bootstrap_environment():
+            process.start()
     finally:
         sys.stdin = original_stdin
         if replacement_stdin is not None:
