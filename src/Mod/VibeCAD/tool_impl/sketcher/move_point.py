@@ -80,7 +80,7 @@ def run(
         doc = App.ActiveDocument
         if doc is not None:
             doc.recompute()
-        geometry = service._geometry_summary(list(getattr(target, "Geometry", []))[index], index)
+        geometry = service._geometry_summary(list(getattr(target, "Geometry", []))[index], index, target)
         return {
             "sketch": target.Name,
             "geometry_index": index,

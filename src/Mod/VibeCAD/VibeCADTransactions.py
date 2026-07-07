@@ -24,6 +24,7 @@ def run_freecad_transaction(
     opened = False
     doc = App.ActiveDocument
     before = _document_snapshot(doc)
+    report_view_error_summary()
     try:
         if doc is not None and hasattr(doc, "openTransaction"):
             doc.openTransaction(name)
@@ -33,13 +34,41 @@ def run_freecad_transaction(
         if active_doc is not None and hasattr(active_doc, "recompute"):
             active_doc.recompute()
         verification = verifier(result) if verifier else {"ok": True, "checks": []}
+        report_view_errors = report_view_error_summary()
+        report_error = _report_view_transaction_error(report_view_errors)
+        if report_error:
+            verification = dict(verification)
+            verification["ok"] = False
+            checks = list(verification.get("checks", []) or [])
+            checks.append(
+                {
+                    "ok": False,
+                    "name": "report_view_errors",
+                    "message": report_error,
+                }
+            )
+            verification["checks"] = checks
+        transaction_ok = bool(verification.get("ok", True)) and not bool(report_error)
+        aborted_transaction = False
+        if opened:
+            if transaction_ok and hasattr(doc, "commitTransaction"):
+                doc.commitTransaction()
+            elif report_error and hasattr(doc, "abortTransaction"):
+                doc.abortTransaction()
+                aborted_transaction = True
+            elif hasattr(doc, "commitTransaction"):
+                doc.commitTransaction()
+        active_doc = App.ActiveDocument or doc
         after = _document_snapshot(active_doc)
         document_delta = _document_delta(before, after)
-        report_view_errors = report_view_error_summary()
-        if opened and hasattr(doc, "commitTransaction"):
-            doc.commitTransaction()
-        return {
-            "ok": bool(verification.get("ok", True)),
+        cleanup_result = None
+        if report_error:
+            cleanup_result = _cleanup_created_objects(active_doc, document_delta)
+            if cleanup_result.get("removed_objects"):
+                after = _document_snapshot(active_doc)
+                document_delta = _document_delta(before, after)
+        transaction = {
+            "ok": transaction_ok,
             "result": result,
             "verification": verification,
             "document_before": before,
@@ -47,6 +76,14 @@ def run_freecad_transaction(
             "document_delta": document_delta,
             "report_view_errors": report_view_errors,
         }
+        if report_error:
+            transaction["error"] = report_error
+            transaction["aborted_transaction"] = aborted_transaction
+            transaction["created_object_cleanup"] = cleanup_result
+            transaction["rolled_back_transaction"] = _document_delta_is_empty(document_delta)
+            if not transaction["rolled_back_transaction"]:
+                transaction["rollback_incomplete"] = True
+        return transaction
     except Exception as exc:
         if opened and doc is not None and hasattr(doc, "abortTransaction"):
             doc.abortTransaction()
@@ -161,6 +198,49 @@ def _document_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, 
     }
 
 
+def _document_delta_is_empty(delta: dict[str, Any]) -> bool:
+    return (
+        int(delta.get("object_count_delta", 0) or 0) == 0
+        and not delta.get("created_objects")
+        and not delta.get("deleted_objects")
+        and not delta.get("changed_objects")
+    )
+
+
+def _cleanup_created_objects(doc: Any | None, delta: dict[str, Any]) -> dict[str, Any]:
+    created = delta.get("created_objects") if isinstance(delta, dict) else []
+    if doc is None or not isinstance(created, list) or not created:
+        return {
+            "attempted": False,
+            "removed_objects": [],
+            "errors": [],
+        }
+    removed: list[str] = []
+    errors: list[str] = []
+    for item in reversed(created):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        try:
+            if hasattr(doc, "getObject") and doc.getObject(name) is not None:
+                doc.removeObject(name)
+                removed.append(name)
+        except Exception as exc:
+            errors.append(f"{name}: {exc}")
+    if removed and hasattr(doc, "recompute"):
+        try:
+            doc.recompute()
+        except Exception as exc:
+            errors.append(f"recompute after cleanup: {exc}")
+    return {
+        "attempted": True,
+        "removed_objects": removed,
+        "errors": errors,
+    }
+
+
 _REPORT_VIEW_CURSORS: dict[str, int] = {}
 
 
@@ -266,10 +346,39 @@ def _is_report_view_error_line(line: str) -> bool:
         return False
     if lowered.startswith("report errors:"):
         return False
-    return "error" in lowered or "exception" in lowered or "traceback" in lowered
+    fatal_phrases = (
+        "failed to make face",
+        "invalid edge link",
+        "command not done",
+        "brep_api",
+        "part::facemaker: result shape is null",
+    )
+    return (
+        "error" in lowered
+        or "exception" in lowered
+        or "traceback" in lowered
+        or any(phrase in lowered for phrase in fatal_phrases)
+    )
 
 
 def _bounded_report_view_line(line: str, limit: int = 500) -> str:
     if len(line) <= limit:
         return line
     return line[: limit - 3] + "..."
+
+
+def _report_view_transaction_error(report_view_errors: dict[str, Any]) -> str | None:
+    if not isinstance(report_view_errors, dict):
+        return None
+    errors = [str(item) for item in report_view_errors.get("errors", []) or []]
+    if not errors:
+        return None
+    first = errors[0]
+    if len(first) > 220:
+        first = first[:217] + "..."
+    if len(errors) == 1:
+        return f"FreeCAD reported an error during this operation: {first}"
+    return (
+        f"FreeCAD reported {len(errors)} errors during this operation. "
+        f"First error: {first}"
+    )

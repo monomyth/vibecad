@@ -68,12 +68,28 @@ def run(
         doc = App.ActiveDocument
         if doc is not None:
             doc.recompute()
+        after = bool(target.getConstruction(index))
+        geometry = service._geometry_summary(
+            list(getattr(target, "Geometry", []))[index],
+            index,
+            target,
+        )
         return {
             "sketch": target.Name,
             "geometry_index": index,
             "geometry_handle": geometry_handle or f"geometry:{index}",
             "before": before,
-            "after": bool(target.getConstruction(index)),
+            "after": after,
+            "before_construction": before,
+            "after_construction": after,
+            "changed": before != after,
+            "geometry": geometry,
+            "profile_effect": (
+                "ignored_by_profile_validation"
+                if after
+                else "included_in_profile_validation"
+            ),
+            "modified_geometry_indices": [index],
         }
 
     return active_response(service, sketch, run_freecad_transaction("Set Sketcher construction geometry", _set))

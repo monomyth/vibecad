@@ -23,13 +23,20 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
                 Part.LineSegment(App.Vector(0, 0, 0), App.Vector(10, 0, 0)),
                 False,
             )
+            sketch.addGeometry(
+                Part.LineSegment(App.Vector(0, 5, 0), App.Vector(10, 5, 0)),
+                True,
+            )
             doc.recompute()
             service = VibeCADService()
             summary = service.sketcher_summary(sketch.Name)
             self.assertTrue(summary["found"])
             self.assertEqual(summary["sketch"]["name"], sketch.Name)
-            self.assertEqual(summary["geometry_count"], 1)
+            self.assertEqual(summary["geometry_count"], 2)
             self.assertEqual(summary["geometry"][0]["type"], "LineSegment")
+            self.assertFalse(summary["geometry"][0]["construction"])
+            self.assertTrue(summary["geometry"][1]["construction"])
+            self.assertEqual(summary["profile_status"]["construction_geometry_count"], 1)
         finally:
             App.closeDocument(doc.Name)
 
@@ -703,7 +710,29 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
             )
             self.assertTrue(construction["ok"], construction)
             self.assertTrue(construction["transaction"]["result"]["after"])
+            self.assertTrue(construction["transaction"]["result"]["after_construction"])
+            self.assertTrue(construction["transaction"]["result"]["geometry"]["construction"])
+            self.assertEqual(
+                construction["transaction"]["result"]["profile_effect"],
+                "ignored_by_profile_validation",
+            )
             self.assertEqual(construction["mutation"]["modified_geometry_indices"], [0])
+            self.assertTrue(construction["sketcher"]["geometry"][0]["construction"])
+            self.assertEqual(
+                construction["profile_validation"]["construction_geometry_count"],
+                1,
+            )
+
+            inspected = service.registry.call(
+                "sketcher.inspect_sketch",
+                sketch_name=sketch.Name,
+                include=["geometry", "profile"],
+            )
+            self.assertTrue(inspected["geometry"][0]["construction"], inspected)
+            self.assertEqual(
+                inspected["profile_validation"]["construction_geometry_count"],
+                1,
+            )
 
             delete_constraint = service.registry.call('sketcher.delete_items', sketch_name=sketch.Name, constraint_items=[0])
             self.assertTrue(delete_constraint["ok"], delete_constraint)

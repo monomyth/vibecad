@@ -469,6 +469,80 @@ class TestVibeCADServiceContext(SettingsSnapshotTestCase):
         self.assertNotIn("provider_tool_surface", visible)
         self.assertNotIn("tool_shape_report", visible)
 
+    def test_model_visible_context_is_compact_and_filters_object_names(self):
+        visible = _model_visible_context(
+            {
+                "workbench": "PartDesignWorkbench",
+                "document": {
+                    "document": "Doc",
+                    "label": "Doc",
+                    "object_count": 3,
+                    "objects": [
+                        {
+                            "name": "TopHeadPlane",
+                            "label": "Top Head Plane",
+                            "type": "PartDesign::Plane",
+                            "base": {"name": "Origin"},
+                            "shape": {"solids": 0, "faces": 0, "edges": 0},
+                        },
+                        {
+                            "name": "Sketch001",
+                            "label": "TopHeadSketch",
+                            "type": "Sketcher::SketchObject",
+                            "bound_box": {"x_length": 10.0},
+                        },
+                    ],
+                },
+                "conversation": {
+                    "conversation": [
+                        {"role": "user", "content": "large old prompt"},
+                        {"role": "assistant", "content": "large old answer"},
+                    ],
+                    "path": "/tmp/conversation.json",
+                },
+                "provider_tool_surface": {"tools": ["partdesign.create_sketch"]},
+                "workbench_tool_pack": {
+                    "active_workbench": "PartDesignWorkbench",
+                    "tool_pack": {
+                        "workbench": "PartDesignWorkbench",
+                        "domain": "parametric solids",
+                        "enabled": True,
+                        "tool_names": ["a", "b", "c"],
+                    },
+                },
+            },
+            {"object_names": ["TopHeadPlane", "TopHeadSketch", "Missing"], "max_objects": 1},
+        )
+        self.assertEqual(visible["context_kind"], "compact_current_freecad_context")
+        self.assertNotIn("conversation", visible)
+        self.assertNotIn("provider_tool_surface", visible)
+        self.assertEqual(len(visible["document"]["objects"]), 1)
+        self.assertEqual(visible["document"]["objects"][0]["name"], "TopHeadPlane")
+        self.assertNotIn("base", visible["document"]["objects"][0])
+        query = visible["object_query"]
+        self.assertFalse(query["all_found"])
+        self.assertEqual([item["exists"] for item in query["queries"]], [True, True, False])
+        self.assertEqual(query["queries"][1]["matches"][0]["label"], "TopHeadSketch")
+        self.assertEqual(
+            visible["workbench_tool_pack"]["tool_pack"]["tool_count"],
+            3,
+        )
+
+    def test_model_visible_context_conversation_section_returns_metadata_only(self):
+        visible = _model_visible_context(
+            {
+                "workbench": "PartDesignWorkbench",
+                "conversation": {
+                    "conversation": [{"role": "user", "content": "do not dump this"}],
+                    "path": "/tmp/conversation.json",
+                },
+            },
+            {"sections": ["conversation"]},
+        )
+        self.assertEqual(visible["conversation"]["turn_count"], 1)
+        self.assertTrue(visible["conversation"]["content_omitted"])
+        self.assertNotIn("do not dump this", str(visible))
+
     def test_conversation_history_is_scoped_to_active_document(self):
         import FreeCAD as App
 

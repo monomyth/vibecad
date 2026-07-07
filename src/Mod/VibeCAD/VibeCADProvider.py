@@ -91,11 +91,12 @@ VIBECAD_SYSTEM_INSTRUCTIONS = (
     "sketches, anchor them to the origin, and exploit symmetry about "
     "origin planes. Name the plane and origin anchor before drawing.\n\n"
     "Operate by the current FreeCAD state, not by memory or prose. Use "
-    "get_current_freecad_context when you need context. The current "
-    "document, active workbench, task panel, screenshot observation, "
-    "vibecad_project, vibecad_workspace, vibecad_loop.next_step, "
-    "state_validation_notes, human_steering, and recent tool results "
-    "are authoritative.\n\n"
+    "get_current_freecad_context when you need context; pass object_names "
+    "when you only need to verify that specific objects or labels exist. "
+    "The current document, active workbench, task panel, screenshot "
+    "observation, vibecad_project, vibecad_workspace, "
+    "vibecad_loop.next_step, state_validation_notes, human_steering, and "
+    "recent tool results are authoritative.\n\n"
     "Preserve the user's existing model by default. If the request says "
     "fix, correct, improve, optimize, modify, add to, this model, or "
     "otherwise refers to existing geometry, treat the active/selected "
@@ -806,12 +807,15 @@ def _call_parent_tool(
         return {"ok": False, "error": str(exc)}
 
 
-def _model_visible_context(context: dict[str, Any]) -> dict[str, Any]:
+def _model_visible_context(
+    context: dict[str, Any],
+    arguments: dict[str, Any] | str | None = None,
+) -> dict[str, Any]:
     from provider_tools.core_get_current_freecad_context import (
         _model_visible_context as visible,
     )
 
-    return visible(context)
+    return visible(context, arguments)
 
 
 def _json_safe(value: Any) -> Any:
@@ -885,10 +889,54 @@ def _build_context_function_tool(context: dict[str, Any], FunctionTool: Any) -> 
 
     schema = {
         "name": "core.get_current_freecad_context",
-        "description": "Return the current VibeCAD-visible FreeCAD context.",
+        "description": (
+            "Return compact current VibeCAD-visible FreeCAD context. Pass "
+            "object_names to verify whether named objects or labels exist "
+            "without requesting the full context."
+        ),
         "parameters": {
             "type": "object",
-            "properties": {},
+            "properties": {
+                "object_names": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Optional FreeCAD object Names or Labels to verify in "
+                        "the current compact document context."
+                    ),
+                },
+                "sections": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": [
+                            "document",
+                            "selection",
+                            "view",
+                            "task_panel",
+                            "view_screenshot",
+                            "screenshot",
+                            "reference_images",
+                            "workbench",
+                            "workspace",
+                            "loop",
+                            "domain",
+                            "errors",
+                            "conversation",
+                        ],
+                    },
+                    "description": (
+                        "Optional compact context sections to return. Omit for "
+                        "the default lean CAD context."
+                    ),
+                },
+                "max_objects": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100,
+                    "description": "Maximum compact document objects to include.",
+                },
+            },
             "additionalProperties": False,
         },
         "workbench": "global",

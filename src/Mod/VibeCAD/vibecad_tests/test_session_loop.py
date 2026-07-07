@@ -258,6 +258,22 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         )
         self.assertTrue(_is_report_view_error_line("Traceback: native sketch solver failed"))
         self.assertTrue(_is_report_view_error_line("PartDesign error: pocket failed"))
+        self.assertTrue(
+            _is_report_view_error_line(
+                "<Sketch> SketchObject.cpp(426): Failed to make face for sketch: "
+                "Part::FaceMaker: result shape is null."
+            )
+        )
+        self.assertTrue(
+            _is_report_view_error_line(
+                "EdgeBevelChamfer: Invalid edge link: ;#c:2;:H29c,E.Edge9"
+            )
+        )
+        self.assertTrue(
+            _is_report_view_error_line(
+                "Micro_Edge_Break_All_Blades_And_Hub: BRep_API: command not done"
+            )
+        )
         self.assertEqual(
             _bounded_report_view_line("x" * 600),
             ("x" * 497) + "...",
@@ -337,6 +353,35 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
             summary = report_view_error_summary()
             self.assertEqual(summary["errors"], ["Sketcher error: over-constrained"])
             self.assertEqual(summary["stale_error_count"], 0)
+
+    def test_transaction_fails_on_fresh_report_view_errors(self):
+        import FreeCAD as App
+
+        doc = App.newDocument("VibeCADReportErrorTransactionTest")
+        try:
+            with _fake_report_view_widget() as widget:
+                def _bad_operation():
+                    doc.addObject("App::DocumentObjectGroup", "ReportErrorCreatedObject")
+                    widget.append_text(
+                        "<Sketch> SketchObject.cpp(426): Failed to make face for sketch: "
+                        "Part::FaceMaker: result shape is null.\n"
+                    )
+                    return {"created": "ReportErrorCreatedObject"}
+
+                result = run_freecad_transaction("Report error operation", _bad_operation)
+
+            self.assertFalse(result["ok"], result)
+            self.assertIn("FreeCAD reported an error", result.get("error", ""))
+            self.assertTrue(result.get("rolled_back_transaction"), result)
+            self.assertEqual(
+                result["created_object_cleanup"]["removed_objects"],
+                ["ReportErrorCreatedObject"],
+            )
+            self.assertIn("Failed to make face", str(result.get("report_view_errors")))
+            self.assertFalse(result["verification"]["ok"])
+            self.assertIsNone(doc.getObject("ReportErrorCreatedObject"))
+        finally:
+            App.closeDocument(doc.Name)
 
     def test_result_summary_includes_assembly_payload(self):
         summary = _result_summary(

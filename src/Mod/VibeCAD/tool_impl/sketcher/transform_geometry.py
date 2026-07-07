@@ -229,7 +229,7 @@ def _run_translate(
         if doc is not None:
             doc.recompute()
         geometry = [
-            service._geometry_summary(list(getattr(target, "Geometry", []))[index], index)
+            service._geometry_summary(list(getattr(target, "Geometry", []))[index], index, target)
             for index in indices
         ]
         return {
@@ -277,7 +277,7 @@ def _run_copy(
         if doc is not None:
             doc.recompute()
         geometry = [
-            service._geometry_summary(list(getattr(target, "Geometry", []))[index], index)
+            service._geometry_summary(list(getattr(target, "Geometry", []))[index], index, target)
             for index in created
         ]
         return {
@@ -338,7 +338,7 @@ def _run_mirror(
             doc.recompute()
         all_geometry = list(getattr(target, "Geometry", []))
         affected = created if keep_original else modified
-        geometry = [service._geometry_summary(all_geometry[index], index) for index in affected]
+        geometry = [service._geometry_summary(all_geometry[index], index, target) for index in affected]
         return {
             "sketch": target.Name,
             "operation": "mirror",
@@ -400,7 +400,7 @@ def _run_offset(
         if doc is not None:
             doc.recompute()
         all_geometry = list(getattr(target, "Geometry", []))
-        geometry = [service._geometry_summary(all_geometry[index], index) for index in created]
+        geometry = [service._geometry_summary(all_geometry[index], index, target) for index in created]
         return {
             "sketch": target.Name,
             "operation": "offset",
@@ -475,7 +475,7 @@ def _run_array(
         if doc is not None:
             doc.recompute()
         geometry = [
-            service._geometry_summary(list(getattr(target, "Geometry", []))[index], index)
+            service._geometry_summary(list(getattr(target, "Geometry", []))[index], index, target)
             for index in created
         ]
         return {

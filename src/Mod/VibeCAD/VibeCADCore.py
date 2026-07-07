@@ -1011,12 +1011,33 @@ class VibeCADService:
         return sketches[0] if sketches else None
 
     @staticmethod
-    def _geometry_summary(geometry: Any, index: int) -> dict[str, Any]:
+    def _geometry_construction_state(
+        geometry: Any,
+        index: int,
+        sketch: Any | None = None,
+    ) -> bool:
+        if sketch is not None:
+            try:
+                return bool(sketch.getConstruction(index))
+            except Exception:
+                pass
+        return bool(getattr(geometry, "Construction", False))
+
+    @staticmethod
+    def _geometry_summary(
+        geometry: Any,
+        index: int,
+        sketch: Any | None = None,
+    ) -> dict[str, Any]:
         item = {
             "index": index,
             "handle": f"geometry:{index}",
             "type": geometry.__class__.__name__,
-            "construction": bool(getattr(geometry, "Construction", False)),
+            "construction": VibeCADService._geometry_construction_state(
+                geometry,
+                index,
+                sketch,
+            ),
         }
         start = getattr(geometry, "StartPoint", None)
         end = getattr(geometry, "EndPoint", None)
@@ -1117,7 +1138,7 @@ class VibeCADService:
             "geometry_count": len(geometry),
             "constraint_count": len(constraints),
             "geometry": [
-                self._geometry_summary(item, index)
+                self._geometry_summary(item, index, sketch)
                 for index, item in enumerate(geometry[:50])
             ],
             "constraints": constraint_summaries,
@@ -1144,12 +1165,9 @@ class VibeCADService:
         construction_count = 0
         drawable_geometry: list[Any] = []
         for index, _geometry in enumerate(geometry):
-            try:
-                if bool(sketch.getConstruction(index)):
-                    construction_count += 1
-                    continue
-            except Exception:
-                pass
+            if self._geometry_construction_state(_geometry, index, sketch):
+                construction_count += 1
+                continue
             drawable_geometry.append(_geometry)
         closed_loop = self._sketch_geometry_has_closed_profile(drawable_geometry)
         usable_shape_profile = bool(faces) or bool(edges)
