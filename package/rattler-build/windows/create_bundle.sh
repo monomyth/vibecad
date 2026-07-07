@@ -246,7 +246,9 @@ if ! "$SIGN_DIR/bin/freecadcmd.exe" --safe-mode -c "from VibeCADProvider import 
   exit 1
 fi
 
-7z a -t7z -mx9 -mmt=${NUMBER_OF_PROCESSORS} ${version_name}.7z ${version_name} -bb
+# -mx5 ("Normal") instead of -mx9 ("Ultra"): still LZMA2, so any 7-Zip that reads
+# the current archive still reads it, but it compresses much faster on the runner.
+7z a -t7z -mx5 -mmt=${NUMBER_OF_PROCESSORS} ${version_name}.7z ${version_name} -bb
 # create hash
 sha256sum ${version_name}.7z > ${version_name}.7z-SHA256.txt
 
