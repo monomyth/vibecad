@@ -41,6 +41,7 @@ cmake ^
     -D Python3_EXECUTABLE:FILEPATH="%PYTHON%" ^
     -D SMESH_INCLUDE_DIR:FILEPATH="%LIBRARY_PREFIX%/include/smesh" ^
     -D SMESH_LIBRARY:FILEPATH="%LIBRARY_PREFIX%/lib/SMESH.lib" ^
+    -D ENABLE_DEVELOPER_TESTS:BOOL=OFF ^
     -B build ^
     -S .
 if %ERRORLEVEL% neq 0 exit 1
