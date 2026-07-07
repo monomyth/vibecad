@@ -69,29 +69,66 @@ PY
   fi
 }
 
+copy_matching_files() {
+  local source="${1%/}"
+  local pattern="$2"
+  local target="${3%/}"
+
+  if [[ ! -d "${source}" ]]; then
+    echo "Missing required file source directory: ${source}" >&2
+    exit 1
+  fi
+
+  echo "Copying files: ${source}/${pattern} -> ${target}"
+  if ! "${conda_env}/python.exe" - "${source}" "${pattern}" "${target}" <<'PY'
+import fnmatch
+import os
+import shutil
+import sys
+
+source, pattern, target = sys.argv[1], sys.argv[2], sys.argv[3]
+os.makedirs(target, exist_ok=True)
+matches = [
+    name
+    for name in os.listdir(source)
+    if os.path.isfile(os.path.join(source, name)) and fnmatch.fnmatchcase(name, pattern)
+]
+if not matches:
+    print(f"No files matched {source}/{pattern}", file=sys.stderr)
+    sys.exit(2)
+for name in sorted(matches):
+    shutil.copy2(os.path.join(source, name), os.path.join(target, name))
+print(f"Copied {len(matches)} files.")
+PY
+  then
+    echo "Failed to copy files: ${source}/${pattern} -> ${target}" >&2
+    exit 1
+  fi
+}
+
 ../scripts/install_vibecad_provider_deps.sh "${conda_env}"
 
 # Copy Conda's Python and (U)CRT to FreeCAD/bin
 copy_tree "${conda_env}/DLLs" "${copy_dir}/bin/DLLs"
 copy_tree "${conda_env}/Lib" "${copy_dir}/bin/Lib"
 copy_tree "${conda_env}/Scripts" "${copy_dir}/bin/Scripts"
-cp -a "${conda_env}"/python*.* "${copy_dir}/bin"
-cp -a "${conda_env}"/msvc*.* "${copy_dir}/bin"
-cp -a "${conda_env}"/ucrt*.* "${copy_dir}/bin"
+copy_matching_files "${conda_env}" "python*.*" "${copy_dir}/bin"
+copy_matching_files "${conda_env}" "msvc*.*" "${copy_dir}/bin"
+copy_matching_files "${conda_env}" "ucrt*.*" "${copy_dir}/bin"
 # Copy meaningful executables
 cp -a "${conda_env}/Library/bin/ccx.exe" "${copy_dir}/bin"
 cp -a "${conda_env}/Library/bin/gmsh.exe" "${copy_dir}/bin"
 cp -a "${conda_env}/Library/bin/dot.exe" "${copy_dir}/bin"
 cp -a "${conda_env}/Library/bin/unflatten.exe" "${copy_dir}/bin"
-cp -a "${conda_env}"/Library/mingw-w64/bin/* "${copy_dir}/bin"
+copy_tree "${conda_env}/Library/mingw-w64/bin" "${copy_dir}/bin"
 # Copy resources with Python instead of Git Bash cp; this avoids silent
 # failures on Windows symlink/path metadata in deep share trees.
 copy_tree "${conda_env}/Library/share" "${copy_dir}/share"
 # get all the dependency .dlls
-cp -a "${conda_env}"/Library/bin/*.dll "${copy_dir}/bin"
+copy_matching_files "${conda_env}/Library/bin" "*.dll" "${copy_dir}/bin"
 # Copy FreeCAD build
-cp -a "${conda_env}"/Library/bin/freecad* "${copy_dir}/bin"
-cp -a "${conda_env}"/Library/bin/FreeCAD* "${copy_dir}/bin"
+copy_matching_files "${conda_env}/Library/bin" "freecad*" "${copy_dir}/bin"
+copy_matching_files "${conda_env}/Library/bin" "FreeCAD*" "${copy_dir}/bin"
 copy_tree "${conda_env}/Library/data" "${copy_dir}/data"
 copy_tree "${conda_env}/Library/Ext" "${copy_dir}/Ext"
 copy_tree "${conda_env}/Library/lib" "${copy_dir}/lib"
