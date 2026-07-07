@@ -8,34 +8,68 @@ conda_env="$(pwd)/../.pixi/envs/default/"
 copy_dir="VibeCAD_Windows"
 mkdir -p ${copy_dir}/bin
 
+copy_tree() {
+  local source="${1%/}"
+  local target="${2%/}"
+
+  if [[ ! -d "${source}" ]]; then
+    echo "Missing required bundle directory: ${source}" >&2
+    exit 1
+  fi
+
+  echo "Copying directory: ${source} -> ${target}"
+  if ! "${conda_env}/python.exe" - "${source}" "${target}" <<'PY'
+import os
+import shutil
+import sys
+
+source, target = sys.argv[1], sys.argv[2]
+os.makedirs(target, exist_ok=True)
+shutil.copytree(
+    source,
+    target,
+    dirs_exist_ok=True,
+    symlinks=False,
+    ignore_dangling_symlinks=True,
+)
+PY
+  then
+    echo "Failed to copy directory: ${source} -> ${target}" >&2
+    df -h . >&2 || true
+    du -sh "${source}" "${target}" >&2 || true
+    exit 1
+  fi
+}
+
 ../scripts/install_vibecad_provider_deps.sh "${conda_env}"
 
 # Copy Conda's Python and (U)CRT to FreeCAD/bin
-cp -a ${conda_env}/DLLs ${copy_dir}/bin/DLLs
-cp -a ${conda_env}/Lib ${copy_dir}/bin/Lib
-cp -a ${conda_env}/Scripts ${copy_dir}/bin/Scripts
-cp -a ${conda_env}/python*.* ${copy_dir}/bin
-cp -a ${conda_env}/msvc*.* ${copy_dir}/bin
-cp -a ${conda_env}/ucrt*.* ${copy_dir}/bin
+copy_tree "${conda_env}/DLLs" "${copy_dir}/bin/DLLs"
+copy_tree "${conda_env}/Lib" "${copy_dir}/bin/Lib"
+copy_tree "${conda_env}/Scripts" "${copy_dir}/bin/Scripts"
+cp -a "${conda_env}"/python*.* "${copy_dir}/bin"
+cp -a "${conda_env}"/msvc*.* "${copy_dir}/bin"
+cp -a "${conda_env}"/ucrt*.* "${copy_dir}/bin"
 # Copy meaningful executables
-cp -a ${conda_env}/Library/bin/ccx.exe ${copy_dir}/bin
-cp -a ${conda_env}/Library/bin/gmsh.exe ${copy_dir}/bin
-cp -a ${conda_env}/Library/bin/dot.exe ${copy_dir}/bin
-cp -a ${conda_env}/Library/bin/unflatten.exe ${copy_dir}/bin
-cp -a ${conda_env}/Library/mingw-w64/bin/* ${copy_dir}/bin
-# copy resources -- perhaps needs reduction
-cp -a ${conda_env}/Library/share ${copy_dir}/share
+cp -a "${conda_env}/Library/bin/ccx.exe" "${copy_dir}/bin"
+cp -a "${conda_env}/Library/bin/gmsh.exe" "${copy_dir}/bin"
+cp -a "${conda_env}/Library/bin/dot.exe" "${copy_dir}/bin"
+cp -a "${conda_env}/Library/bin/unflatten.exe" "${copy_dir}/bin"
+cp -a "${conda_env}"/Library/mingw-w64/bin/* "${copy_dir}/bin"
+# Copy resources with Python instead of Git Bash cp; this avoids silent
+# failures on Windows symlink/path metadata in deep share trees.
+copy_tree "${conda_env}/Library/share" "${copy_dir}/share"
 # get all the dependency .dlls
-cp -a ${conda_env}/Library/bin/*.dll ${copy_dir}/bin
+cp -a "${conda_env}"/Library/bin/*.dll "${copy_dir}/bin"
 # Copy FreeCAD build
-cp -a ${conda_env}/Library/bin/freecad* ${copy_dir}/bin
-cp -a ${conda_env}/Library/bin/FreeCAD* ${copy_dir}/bin
-cp -a ${conda_env}/Library/data ${copy_dir}/data
-cp -a ${conda_env}/Library/Ext ${copy_dir}/Ext
-cp -a ${conda_env}/Library/lib ${copy_dir}/lib
-cp -a ${conda_env}/Library/Mod ${copy_dir}/Mod
+cp -a "${conda_env}"/Library/bin/freecad* "${copy_dir}/bin"
+cp -a "${conda_env}"/Library/bin/FreeCAD* "${copy_dir}/bin"
+copy_tree "${conda_env}/Library/data" "${copy_dir}/data"
+copy_tree "${conda_env}/Library/Ext" "${copy_dir}/Ext"
+copy_tree "${conda_env}/Library/lib" "${copy_dir}/lib"
+copy_tree "${conda_env}/Library/Mod" "${copy_dir}/Mod"
 mkdir -p ${copy_dir}/doc
-cp -a ${conda_env}/Library/doc/{ThirdPartyLibraries.html,LICENSE.html} ${copy_dir}/doc
+cp -a "${conda_env}"/Library/doc/{ThirdPartyLibraries.html,LICENSE.html} "${copy_dir}/doc"
 
 # delete unnecessary stuff
 find ${copy_dir} -name \*.a -delete
