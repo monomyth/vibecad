@@ -26,7 +26,6 @@ from VibeCADProvider import (
 from VibeCADSession import (
     CORE_PROVIDER_TOOLS,
     _effective_provider_workbench,
-    _missing_requirement_lines,
     _provider_loop_state,
     _result_summary,
     _should_continue_autonomously,
@@ -135,7 +134,7 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
             progress_callback=events.append,
             steering_check=steering_check,
         )
-        result = runner("core.get_active_document", "{}")
+        result = runner("cad.inspect_state", "{}")
 
         self.assertTrue(result["ok"], result)
         self.assertEqual(
@@ -151,7 +150,7 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
             ),
             events,
         )
-        self.assertEqual(trace[-1]["tool_name"], "core.get_active_document")
+        self.assertEqual(trace[-1]["tool_name"], "cad.inspect_state")
 
     def test_tool_runner_cancellation_does_not_consume_queued_steering(self):
         queued = ["change direction after the stop clears"]
@@ -161,7 +160,7 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
             steering_check=lambda: [queued.pop(0)] if queued else [],
         )
 
-        result = runner("core.get_active_document", "{}")
+        result = runner("cad.inspect_state", "{}")
 
         self.assertFalse(result["ok"], result)
         self.assertTrue(result["cancelled"])
@@ -563,302 +562,30 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         self.assertTrue(summary["rolled_back_feature"])
         self.assertEqual(summary["body_shape_after_rollback"]["volume"], 100.0)
 
-    def test_loop_requirements_are_state_based_not_prompt_keyword_gates(self):
-        prompts = (
-            "Make me a mounting bracket with bolt holes and chamfered edges.",
-            "Make me a robot with at least: base, shoulder, wrist.",
-            "Paint this assembly with transparent blue material appearance.",
-            "Create a TechDraw detail drawing page for this model.",
-        )
-        empty_context = {"document": {"object_count": 0, "objects": []}}
-        for prompt in prompts:
-            with self.subTest(prompt=prompt):
-                self.assertEqual(_missing_requirement_lines(prompt, empty_context, []), [])
-
-        attempted_write = [{"tool_name": "partdesign.extrude", "ok": False, "safety": "safe_write"}]
-        self.assertIn(
-            "create native geometry",
-            _missing_requirement_lines("Any prompt text", empty_context, attempted_write)[0],
-        )
-
-        sketch_context = {
-            "document": {"object_count": 1, "objects": [{"type": "Sketcher::SketchObject"}]},
-            "sketcher": {
-                "profile_status": {
-                    "found": True,
-                    "sketch": "Sketch",
-                    "geometry_count": 4,
-                    "closed_profile": True,
-                    "fully_constrained": False,
-                    "degrees_of_freedom": 2,
-                }
-            },
-        }
-        self.assertEqual(
-            _missing_requirement_lines("No keyword dependency", sketch_context, []),
-            ["- constrain Sketch (2 DoF)"],
-        )
-
-    def test_loop_requirements_need_fresh_screenshot_after_latest_write(self):
-        context = {
-            "document": {
-                "object_count": 2,
-                "objects": [{"type": "PartDesign::Body"}, {"type": "PartDesign::Pad"}],
-            },
-            "view_screenshot": {
-                "captured": True,
-                "file_size": 1234,
-                "visual_observation": {"available": True, "mostly_blank": False},
-            },
-        }
-        write = {
-            "tool_name": "partdesign.extrude",
-            "ok": True,
-            "safety": SafetyLevel.SAFE_WRITE.value,
-        }
-        screenshot = {
-            "tool_name": "core.capture_view_screenshot",
-            "ok": True,
-            "safety": SafetyLevel.VIEW.value,
-        }
-
-        stale_lines = _missing_requirement_lines(
-            "Create CAD geometry",
-            context,
-            [screenshot, write],
-        )
-        self.assertIn("capture_view", stale_lines[-1])
-
-        fresh_lines = _missing_requirement_lines(
-            "Create CAD geometry",
-            context,
-            [write, screenshot],
-        )
-        self.assertNotIn("capture_view", "\n".join(fresh_lines))
-
-        headless_screenshot = {
-            "tool_name": "core.capture_view_screenshot",
-            "ok": False,
-            "safety": SafetyLevel.VIEW.value,
-            "result": {"error": "module 'FreeCADGui' has no attribute 'ActiveDocument'"},
-        }
-        headless_lines = _missing_requirement_lines(
-            "Create CAD geometry",
-            context,
-            [write, headless_screenshot],
-        )
-        self.assertNotIn("capture_view", "\n".join(headless_lines))
-
-    def test_loop_requirements_do_not_parse_prompt_for_scenario_gates(self):
-        context = {
-            "document": {
-                "object_count": 3,
-                "objects": [
-                    {"type": "PartDesign::Body"},
-                    {"type": "PartDesign::Pad"},
-                    {"type": "Sketcher::SketchObject"},
-                ],
-            },
-            "partdesign": {
-                "bodies": [
-                    {
-                        "features": [
-                            {"type": "Sketcher::SketchObject"},
-                            {"type": "PartDesign::Pad"},
-                        ]
-                    },
-                ]
-            },
-            "assembly": {"assembly_count": 0, "assemblies": []},
-        }
-        lines = _missing_requirement_lines(
-            "Create a native assembly with at least four surviving native PartDesign features.",
-            context,
-            [],
-        )
-        self.assertFalse(any("native PartDesign feature depth" in line for line in lines), lines)
-        self.assertFalse(any("native Assembly object" in line for line in lines), lines)
-
-    def test_loop_requirements_require_assembly_for_multi_body_state(self):
-        context = {
-            "document": {
-                "object_count": 4,
-                "objects": [
-                    {"type": "PartDesign::Body"},
-                    {"type": "PartDesign::Pad"},
-                    {"type": "PartDesign::Body"},
-                    {"type": "PartDesign::Pad"},
-                ],
-            },
-            "partdesign": {
-                "body_count": 2,
-                "bodies": [
-                    {"features": [{"type": "PartDesign::Pad"}]},
-                    {"features": [{"type": "PartDesign::Pad"}]},
-                ],
-            },
-            "assembly": {"assembly_count": 0, "assemblies": []},
-        }
-        for prompt in (
-            "Continue this model.",
-            "Create a native assembly with at least four surviving native PartDesign features.",
-        ):
-            with self.subTest(prompt=prompt):
-                lines = _missing_requirement_lines(prompt, context, [])
-                self.assertTrue(any("multi-body component geometry" in line for line in lines), lines)
-                self.assertFalse(any("native PartDesign feature depth" in line for line in lines), lines)
-
-        context["assembly"] = {"assembly_count": 1, "assemblies": [{"components": 1}]}
-        lines = _missing_requirement_lines("Continue this model.", context, [])
-        self.assertTrue(any("fewer components than generated PartDesign bodies" in line for line in lines), lines)
-
-        context["assembly"] = {"assembly_count": 1, "assemblies": [{"components": 2}]}
-        lines = _missing_requirement_lines("Continue this model.", context, [])
-        self.assertFalse(any("Assembly" in line or "component bodies" in line for line in lines), lines)
-
-    def test_loop_requirements_gate_grounding_and_joints_for_kinematic_assemblies(self):
-        context = {
-            "document": {"object_count": 1, "objects": [{"type": "Assembly::AssemblyObject"}]},
-            "partdesign": {"body_count": 0, "bodies": []},
-            "assembly": {
-                "assembly_count": 1,
-                "assemblies": [
-                    {
-                        "name": "Assembly",
-                        "components": 2,
-                        "grounded_count": 0,
-                        "joints": 0,
-                    }
-                ],
-            },
-        }
-        lines = _missing_requirement_lines("Continue this model.", context, [])
-        self.assertTrue(any(line == "- ground TestAssembly" for line in lines), lines)
-        self.assertFalse(any("joint TestAssembly" in line for line in lines), lines)
-
-        context["assembly"]["assemblies"][0]["grounded_count"] = 1
-        lines = _missing_requirement_lines("Continue this model.", context, [])
-        self.assertFalse(any("ground TestAssembly" in line for line in lines), lines)
-        joints_lines = [line for line in lines if "joint TestAssembly" in line]
-        self.assertEqual(len(joints_lines), 1, lines)
-        self.assertEqual("- joint TestAssembly; solve", joints_lines[0])
-
-        context["assembly"]["assemblies"][0]["joints"] = 1
-        lines = _missing_requirement_lines("Continue this model.", context, [])
-        self.assertFalse(
-            any("ground TestAssembly" in line or "joint TestAssembly" in line for line in lines),
-            lines,
-        )
-
-        # Single-component assemblies need no kinematic gating.
-        context["assembly"]["assemblies"][0].update(
-            {"components": 1, "grounded_count": 0, "joints": 0}
-        )
-        lines = _missing_requirement_lines("Continue this model.", context, [])
-        self.assertFalse(
-            any("assembly.ground_component" in line or "assembly.create_joint" in line for line in lines),
-            lines,
-        )
-
-        # Malformed assembly context entries are tolerated without gating noise.
-        context["assembly"] = {
-            "assembly_count": 1,
-            "assemblies": [None, "junk", {"components": "not-a-number"}],
-        }
-        lines = _missing_requirement_lines("Continue this model.", context, [])
-        self.assertFalse(
-            any("assembly.ground_component" in line or "assembly.create_joint" in line for line in lines),
-            lines,
-        )
-
-    def test_loop_requirements_gate_cam_jobs_without_machine_binding(self):
-        context = {
-            "workbench": "CAMWorkbench",
-            "document": {"object_count": 3, "objects": []},
-            "cam": {
-                "job_count": 1,
-                "jobs": [{"name": "Job", "label": "Job", "machine": None}],
-            },
-        }
-        lines = _missing_requirement_lines("machine the part", context, [])
-        self.assertTrue(any("cam_bind:Job" in line for line in lines), lines)
-
-        context["cam"]["jobs"][0]["machine"] = "Generic LinuxCNC Mill"
-        lines = _missing_requirement_lines("machine the part", context, [])
-        self.assertFalse(any("cam_bind:" in line for line in lines), lines)
-
-        # Malformed cam context entries are tolerated without gating noise.
-        context["cam"] = {"job_count": 1, "jobs": [None, "junk", {"no_machine_key": True}]}
-        lines = _missing_requirement_lines("machine the part", context, [])
-        self.assertFalse(any("cam_bind:" in line for line in lines), lines)
-
-    def test_loop_requirements_gate_unvalidated_or_forced_postprocess(self):
-        context = {
-            "workbench": "CAMWorkbench",
-            "document": {"object_count": 3, "objects": []},
-            "cam": {
-                "job_count": 1,
-                "jobs": [{"name": "Job", "label": "Job", "machine": "Mill"}],
-            },
-        }
-
-        unvalidated = [
-            {
-                "tool_name": "cam.postprocess",
-                "ok": True,
-                "result": {"ok": True, "output_path": "/tmp/x.nc"},
-            }
-        ]
-        lines = _missing_requirement_lines("machine the part", context, unvalidated)
-        self.assertTrue(any("cam_validate" in line for line in lines), lines)
-
-        forced = [
-            {
-                "tool_name": "cam.postprocess",
-                "ok": True,
-                "result": {
-                    "ok": True,
-                    "output_path": "/tmp/x.nc",
-                    "validation": {"error_count": 1, "warning_count": 0, "forced": True},
-                },
-            }
-        ]
-        lines = _missing_requirement_lines("machine the part", context, forced)
-        self.assertTrue(any("cam_fix" in line for line in lines), lines)
-
-        clean = [
-            {
-                "tool_name": "cam.postprocess",
-                "ok": True,
-                "result": {
-                    "ok": True,
-                    "output_path": "/tmp/x.nc",
-                    "validation": {"valid": True, "error_count": 0, "warning_count": 0},
-                },
-            }
-        ]
-        lines = _missing_requirement_lines("machine the part", context, clean)
-        self.assertFalse(
-            any("cam_validate" in line or "cam_fix" in line for line in lines), lines
-        )
-
-        # The steering lines flow into loop-state validation notes so an
-        # unvalidated postprocess refuses autonomous completion.
-        state = _provider_loop_state("machine the part", context, unvalidated, 1, False)
-        notes = state.get("state_validation_notes", [])
-        self.assertTrue(any("cam_validate" in str(note) for note in notes), notes)
-
     def test_provider_safe_tool_schemas_expose_only_command_write_tools(self):
         service = VibeCADService()
         names = {schema["name"] for schema in provider_safe_tool_schemas(service)}
-        self.assertIn("core.get_active_document", names)
+        for semantic in (
+            "cad.inspect_state",
+            "cad.define_component",
+            "cad.define_interface",
+            "cad.define_envelope",
+            "cad.define_mechanism",
+            "cad.create_profile",
+            "cad.create_feature",
+            "cad.verify_design",
+        ):
+            self.assertIn(semantic, names)
+        self.assertNotIn("core.get_active_document", names)
         self.assertNotIn("core.create_new_document", names)
         self.assertNotIn("core.open_document", names)
-        self.assertIn("core.delete_object", names)
+        self.assertNotIn("core.delete_object", names)
+        self.assertNotIn("core.enter_workspace", names)
+        self.assertNotIn("core.get_object_properties", names)
         self.assertNotIn("core.report_tool_shape_gap", names)
         self.assertNotIn("core.run_workbench_command", names)
         self.assertNotIn("core.get_tool_shape_report", names)
-        self.assertIn("core.wait_for_user_gui_action", names)
+        self.assertNotIn("core.wait_for_user_gui_action", names)
         self.assertNotIn("core.propose_run_workbench_command", names)
         self.assertIn("core.capture_view_screenshot", names)
         self.assertIn("core.set_view", names)
@@ -902,6 +629,35 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         self.assertNotIn("core.clear_local_session", names)
 
     def test_provider_safe_tool_schemas_are_workbench_scoped(self):
+        old_settings = load_settings()
+        self.addCleanup(save_settings, old_settings)
+        save_settings(
+            VibeCADSettings(
+                enable_native_freecad_tools=True,
+                native_tool_workbenches=(
+                    "AssemblyWorkbench",
+                    "BIMWorkbench",
+                    "CAMWorkbench",
+                    "DraftWorkbench",
+                    "FemWorkbench",
+                    "InspectionWorkbench",
+                    "MaterialWorkbench",
+                    "MeshPartWorkbench",
+                    "MeshWorkbench",
+                    "NoneWorkbench",
+                    "OpenSCADWorkbench",
+                    "PartDesignWorkbench",
+                    "PartWorkbench",
+                    "PointsWorkbench",
+                    "ReverseEngineeringWorkbench",
+                    "RobotWorkbench",
+                    "SketcherWorkbench",
+                    "SpreadsheetWorkbench",
+                    "SurfaceWorkbench",
+                    "TechDrawWorkbench",
+                ),
+            )
+        )
         service = VibeCADService()
 
         def surface(workbench):
@@ -1065,11 +821,10 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         self.assertNotIn("sketcher.add_geometry", surface_names)
         self.assertNotIn("part.set_placement", surface_names)
 
-        # Non-modeling workbenches: core tools only, list objects via
-        # core.list_workbench_objects, and never modeling pack tools.
+        # Workbenches without native provider tools stay on the AI-native
+        # surface and never leak modeling pack tools.
         for workbench in (
             "FemWorkbench",
-            "CAMWorkbench",
             "BIMWorkbench",
             "MeshWorkbench",
             "PointsWorkbench",
@@ -1081,16 +836,19 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         ):
             with self.subTest(workbench=workbench):
                 names = surface(workbench)
-                self.assertIn("core.list_workbench_objects", names)
+                self.assertIn("cad.inspect_state", names)
+                self.assertNotIn("core.list_workbench_objects", names)
                 self.assertNotIn("sketcher.add_geometry", names)
                 self.assertNotIn("partdesign.extrude", names)
                 self.assertNotIn("part.set_placement", names)
 
         test_names = surface("TestWorkbench")
-        self.assertIn("core.list_workbench_objects", test_names)
+        self.assertIn("cad.inspect_state", test_names)
+        self.assertNotIn("core.list_workbench_objects", test_names)
         self.assertNotIn("core.run_workbench_command", test_names)
         none_names = surface("NoneWorkbench")
-        self.assertIn("core.get_active_document", none_names)
+        self.assertIn("cad.inspect_state", none_names)
+        self.assertNotIn("core.get_active_document", none_names)
         self.assertNotIn("core.run_workbench_command", none_names)
 
     def test_build_script_tool_hidden_unless_script_mode_enabled(self):
@@ -1133,19 +891,18 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
                 "cam.create_job",
                 "cam.add_tool",
                 "cam.create_operation",
+                "cam.validate_job",
                 "cam.postprocess",
             ):
                 self.assertNotIn(hidden, cam_names, hidden)
-            self.assertIn("cam.validate_job", cam_names)
             self.assertIn("model.build_from_script", cam_names)
-            # Read/view tools stay available in script mode.
+            # AI-native read/view tools stay available in script mode.
             for kept in (
-                "core.get_active_document",
+                "cad.inspect_state",
+                "cad.verify_design",
                 "core.capture_view_screenshot",
                 "core.set_view",
                 "core.get_report_view_errors",
-                "core.enter_workspace",
-                "partdesign.get_bodies",
             ):
                 self.assertIn(kept, names, kept)
         finally:
@@ -1157,7 +914,13 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         service = VibeCADService()
         doc = App.newDocument("VibeCADScriptModeGateTest")
         try:
-            save_settings(VibeCADSettings(enable_build_script=True))
+            save_settings(
+                VibeCADSettings(
+                    enable_build_script=True,
+                    enable_native_freecad_tools=True,
+                    native_tool_workbenches=("PartDesignWorkbench",),
+                )
+            )
             runner = make_provider_tool_runner(service, "PartDesignWorkbench")
             blocked = runner("partdesign.create_body", '{"label": "Blocked Body"}')
             self.assertFalse(blocked["ok"], blocked)
@@ -1191,28 +954,39 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
             save_settings(VibeCADSettings(enable_build_script=False))
             App.closeDocument(doc.Name)
 
-    def test_provider_tool_scope_is_pack_based(self):
+    def test_provider_tool_scope_is_ai_native_until_native_pack_enabled(self):
         service = VibeCADService()
-        pack = get_tool_pack("SketcherWorkbench")
-        scope = provider_tool_scope_for_context(service, "SketcherWorkbench")
-        self.assertEqual(scope.stage, "workbench_pack")
-        self.assertEqual(
-            scope.tool_names,
-            set(CORE_PROVIDER_TOOLS) | set(pack.tool_names),
-        )
+        old_settings = load_settings()
+        self.addCleanup(save_settings, old_settings)
 
+        save_settings(VibeCADSettings(enable_native_freecad_tools=False))
+        scope = provider_tool_scope_for_context(service, "PartDesignWorkbench")
+        self.assertEqual(scope.stage, "ai_native_cad")
+        self.assertEqual(scope.tool_names, set(CORE_PROVIDER_TOOLS))
+        self.assertNotIn("partdesign.create_sketch", scope.tool_names)
+        self.assertNotIn("sketcher.add_geometry", scope.tool_names)
+
+        save_settings(
+            VibeCADSettings(
+                enable_native_freecad_tools=True,
+                native_tool_workbenches=("PartDesignWorkbench",),
+            )
+        )
         pd_pack = get_tool_pack("PartDesignWorkbench")
         pd_scope = provider_tool_scope_for_context(service, "PartDesignWorkbench")
-        self.assertEqual(pd_scope.stage, "workbench_pack")
+        self.assertEqual(pd_scope.stage, "native_workbench_pack")
         self.assertEqual(
             pd_scope.tool_names,
-            set(CORE_PROVIDER_TOOLS) | set(pd_pack.tool_names),
+            set(CORE_PROVIDER_TOOLS)
+            | {"partdesign.get_bodies"}
+            | set(pd_pack.tool_names),
         )
         self.assertNotIn("sketcher.create_sketch", pd_scope.tool_names)
         self.assertIn("partdesign.create_sketch", pd_scope.tool_names)
+        self.assertIn("sketcher.add_geometry", pd_scope.tool_names)
 
         unknown_scope = provider_tool_scope_for_context(service, "NoSuchWorkbench")
-        self.assertEqual(unknown_scope.stage, "core_tools")
+        self.assertEqual(unknown_scope.stage, "ai_native_cad")
         self.assertEqual(unknown_scope.tool_names, set(CORE_PROVIDER_TOOLS))
 
     def test_provider_surfaces_expose_single_workspace_switch_tool(self):
@@ -1239,97 +1013,19 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         # Internal session flows still call the tool through the registry.
         self.assertIn("core.activate_workbench", set(service.registry.names()))
 
-    def test_autonomous_loop_enters_workspace_then_exposes_full_tool_surface(self):
-        import FreeCAD as App
-
-        class ScopeProbeProvider(BaseProvider):
-            def __init__(self):
-                self.scopes = []
-                self.tool_names = []
-
-            def run(self, _prompt, context, tool_runner=None):
-                scope = dict(context.get("provider_tool_scope") or {})
-                names = [
-                    schema.get("name")
-                    for schema in context.get("provider_tool_schemas", [])
-                    if isinstance(schema, dict)
-                ]
-                self.scopes.append(scope)
-                self.tool_names.append(names)
-                if len(self.scopes) == 1:
-                    self.assert_tool(tool_runner)
-                    result = tool_runner(
-                        "core.enter_workspace",
-                        json.dumps(
-                            {
-                                "name": "PartDesignWorkbench",
-                                "goal": "Create the base parametric body.",
-                            }
-                        ),
-                    )
-                    if not result.get("ok"):
-                        raise AssertionError(result)
-                    if result.get("workspace_handoff") != "workspace_entry":
-                        raise AssertionError(result)
-                    return ProviderResult("Entered PartDesign; refreshing tool surface.")
-                self.assert_tool(tool_runner)
-                tool_runner("partdesign.create_body", '{"label": "Scoped Body"}')
-                return ProviderResult("Created body with entered workspace tools.")
-
-            @staticmethod
-            def assert_tool(tool_runner):
-                if tool_runner is None:
-                    raise AssertionError("tool_runner is required")
-
-        doc = App.newDocument("VibeCADScopedTurnRefreshTest")
-        original_project_info = VibeCADProject._active_document_info
-        tmp_dir = tempfile.TemporaryDirectory()
-        try:
-            service = VibeCADService()
-            original_project_info = _attach_temp_project_store(
-                service,
-                Path(tmp_dir.name),
-                "Scoped Turn Refresh",
-            )
-            service.active_workbench_name = lambda: "PartDesignWorkbench"  # type: ignore[method-assign]
-            provider = ScopeProbeProvider()
-            response = run_prompt(
-                "Create a PartDesign part in small verified steps.",
-                service=service,
-                provider=provider,
-            )
-
-            self.assertEqual(response.provider, "ScopeProbeProvider")
-            self.assertGreaterEqual(len(provider.scopes), 2)
-            self.assertEqual(provider.scopes[0]["stage"], "workspace_planner")
-            self.assertEqual(provider.scopes[1]["stage"], "entered_workspace")
-            self.assertIsNone(provider.scopes[0]["workbench"])
-            self.assertEqual(provider.scopes[1]["workbench"], "PartDesignWorkbench")
-            self.assertIn("core.enter_workspace", provider.tool_names[0])
-            self.assertNotIn("partdesign.create_body", provider.tool_names[0])
-            self.assertNotIn("sketcher.add_geometry", provider.tool_names[0])
-            self.assertIn("partdesign.create_body", provider.tool_names[1])
-            self.assertIn("sketcher.add_geometry", provider.tool_names[1])
-            self.assertIn("partdesign.create_sketch", provider.tool_names[1])
-            self.assertIn("partdesign.extrude", provider.tool_names[1])
-            self.assertIn("partdesign.dressup", provider.tool_names[1])
-            self.assertTrue(
-                any(
-                    getattr(obj, "TypeId", "") == "PartDesign::Body"
-                    and getattr(obj, "Label", "") == "Scoped Body"
-                    for obj in doc.Objects
-                )
-            )
-        finally:
-            VibeCADProject._active_document_info = original_project_info
-            tmp_dir.cleanup()
-            App.closeDocument(doc.Name)
-
     def test_partdesign_create_sketch_does_not_force_hidden_workspace_handoff(self):
         import FreeCAD as App
 
         doc = App.newDocument("VibeCADCreateSketchRefreshHandoffTest")
         try:
+            old_settings = load_settings()
+            self.addCleanup(save_settings, old_settings)
+            save_settings(
+                VibeCADSettings(
+                    enable_native_freecad_tools=True,
+                    native_tool_workbenches=("PartDesignWorkbench",),
+                )
+            )
             service = VibeCADService()
             with _temporary_design_project(service, "Create Sketch Refresh"):
                 service.active_workbench_name = lambda: "PartDesignWorkbench"  # type: ignore[method-assign]
@@ -1367,6 +1063,14 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
 
         doc = App.newDocument("VibeCADPartDesignEffectiveWorkbenchTest")
         try:
+            old_settings = load_settings()
+            self.addCleanup(save_settings, old_settings)
+            save_settings(
+                VibeCADSettings(
+                    enable_native_freecad_tools=True,
+                    native_tool_workbenches=("SketcherWorkbench",),
+                )
+            )
             service = VibeCADService()
             service.registry.call("partdesign.create_body", label="Body")
             service.registry.call("partdesign.create_sketch", label="Sketch")
@@ -1381,7 +1085,7 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
             self.assertIn("sketcher.draw_rectangle", names)
             self.assertNotIn("partdesign.create_sketch", names)
             self.assertNotIn("partdesign.extrude", names)
-            self.assertIn("core.enter_workspace", names)
+            self.assertNotIn("core.enter_workspace", names)
         finally:
             App.closeDocument(doc.Name)
 
@@ -1390,6 +1094,14 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
 
         doc = App.newDocument("VibeCADSketcherPartDesignBridgeTest")
         try:
+            old_settings = load_settings()
+            self.addCleanup(save_settings, old_settings)
+            save_settings(
+                VibeCADSettings(
+                    enable_native_freecad_tools=True,
+                    native_tool_workbenches=("SketcherWorkbench",),
+                )
+            )
             service = VibeCADService()
             before_names = {
                 schema["name"]
@@ -1411,11 +1123,19 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
             }
             self.assertNotIn("partdesign.extrude", after_names)
             self.assertNotIn("partdesign.revolve", after_names)
-            self.assertIn("core.enter_workspace", after_names)
+            self.assertNotIn("core.enter_workspace", after_names)
         finally:
             App.closeDocument(doc.Name)
 
     def test_part_pack_tools_are_native_in_part_workbench(self):
+        old_settings = load_settings()
+        self.addCleanup(save_settings, old_settings)
+        save_settings(
+            VibeCADSettings(
+                enable_native_freecad_tools=True,
+                native_tool_workbenches=("PartWorkbench", "PartDesignWorkbench"),
+            )
+        )
         service = VibeCADService()
         with _temporary_design_project(service, "Part Pack Provider"):
             names = {

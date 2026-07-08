@@ -331,8 +331,8 @@ SKETCH_EDIT_ALLOWED_TOOLS = {
 }
 
 # Session-internal tools that must never appear in a provider tool listing.
-# core.enter_workspace is the single model-facing workspace switcher;
-# core.activate_workbench remains callable for internal session flows only.
+# Workspace activation remains callable for internal flows only; the model sees
+# AI-native tools by default and native workbench packs only through preferences.
 INTERNAL_SESSION_TOOLS = {
     "core.activate_workbench",
     "core.get_tool_shape_report",
@@ -2834,12 +2834,11 @@ def make_provider_tool_runner(
             }
             return _finalize_result(result)
 
-        resolved_tool_workbench = _provider_scope_workbench_for_tool(
-            service,
-            tool,
-            live_workbench,
-        )
-        if resolved_tool_workbench is None:
+        allowlist = _provider_tool_allowlist_for_workbench(service, live_workbench)
+        if (
+            (allowlist is not None and tool_name not in allowlist)
+            or not _is_tool_available_for_provider_context(service, tool, live_workbench)
+        ):
             result = {
                 "ok": False,
                 "error": (
@@ -2849,20 +2848,9 @@ def make_provider_tool_runner(
                 "active_workbench": actual_workbench,
                 "tool_workbench": tool.workbench,
                 "recoverable": True,
-                "required_next_action": (
-                    {
-                        "tool": "core.enter_workspace",
-                        "arguments": {"name": tool.workbench},
-                        "then_retry_tool": tool_name,
-                    }
-                    if tool.workbench
-                    else None
-                ),
+                "required_next_action": None,
             }
             return _finalize_result(result)
-        if resolved_tool_workbench != live_workbench:
-            live_workbench = resolved_tool_workbench
-            trace_entry["active_workbench"] = live_workbench
 
         if not service.is_tool_enabled_for_provider(tool, live_workbench):
             script_mode = False
@@ -2999,24 +2987,6 @@ def _provider_time_exceeded(
         and max_provider_seconds > 0
         and time.monotonic() - started_at >= max_provider_seconds
     )
-
-
-def _is_tool_available_in_provider_scope(
-    service: VibeCADService,
-    tool: Any,
-    workbench: str | None,
-) -> bool:
-    return _is_tool_available_for_provider_context(service, tool, workbench)
-
-
-def _provider_scope_workbench_for_tool(
-    service: VibeCADService,
-    tool: Any,
-    selected_workbench: str | None,
-) -> str | None:
-    if _is_tool_available_in_provider_scope(service, tool, selected_workbench):
-        return selected_workbench
-    return None
 
 
 def _is_tool_available_in_live_context(
