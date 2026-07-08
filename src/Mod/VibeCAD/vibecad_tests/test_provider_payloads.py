@@ -460,8 +460,8 @@ class TestVibeCADProviderPayloads(SettingsSnapshotTestCase):
 
         self.assertNotIn("core.get_current_freecad_context", registered_tool_names())
         visible = _model_visible_context(context)
-        self.assertIn("doc", visible)
-        self.assertIn("conv", visible)
+        self.assertIn("document", visible)
+        self.assertIn("conversation", visible)
         self.assertNotIn("provider_tool_schemas", visible)
         self.assertNotIn("provider_function_tools", visible)
         self.assertNotIn("provider_tool_surface", visible)

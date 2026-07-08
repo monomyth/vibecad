@@ -98,68 +98,7 @@ _DOMAIN_DEFAULT_LIST_LIMIT = 6
 _DOMAIN_DEFAULT_DICT_LIMIT = 18
 _DOMAIN_MAX_DEPTH = 4
 
-_TOP_LEVEL_ALIASES = {
-    "assembly": "asm",
-    "conversation": "conv",
-    "document": "doc",
-    "draft": "dr",
-    "design_memory": "mem",
-    "design_preflight": "plan",
-    "material": "mat",
-    "object_query": "q",
-    "partdesign": "pd",
-    "reference_images": "refs",
-    "report_view_errors": "errs",
-    "selection": "sel",
-    "sketcher": "sk",
-    "surface": "sf",
-    "task_panel": "task",
-    "techdraw": "td",
-    "vibecad_loop": "loop",
-    "vibecad_workspace": "ws",
-    "view_screenshot": "shot",
-    "workbench": "wb",
-}
-
-_DOMAIN_KEY_ALIASES = {
-    "active_body": "body",
-    "active_sketch": "sk",
-    "active_workbench": "wb",
-    "body_count": "n_bodies",
-    "body_shape_delta": "shape",
-    "component_children": "children",
-    "constraint_count": "n_cons",
-    "constraints": "cons",
-    "degrees_of_freedom": "dof",
-    "edge_count": "edges",
-    "entered_workbench": "entered",
-    "face_count": "faces",
-    "feature_count": "n_feat",
-    "feature_effect": "fx",
-    "features": "feat",
-    "fully_constrained": "full",
-    "geometry": "geom",
-    "geometry_count": "n_geom",
-    "joint_children": "joints",
-    "job_count": "n_jobs",
-    "object_count": "n_objs",
-    "open_endpoint_count": "open",
-    "operation": "op",
-    "placement": "pos",
-    "profile_status": "profile",
-    "ready_for_pad": "pad_ok",
-    "reason": "why",
-    "shape_type": "shape",
-    "sketch_count": "n_sketches",
-    "solids": "solids",
-    "type": "t",
-    "type_id": "t",
-    "vertex_count": "verts",
-    "volume": "vol",
-    "workbench": "wb",
-}
-
-_OMITTED_SUFFIX = "_om"
+_OMITTED_SUFFIX = "_omitted"
 
 
 def _parse_arguments(arguments_json: str | dict[str, Any] | None = None) -> dict[str, Any]:
@@ -247,12 +186,12 @@ def _compact_object_summary(item: Any) -> dict[str, Any] | None:
     label = item.get("label")
     result = {
         "name": name,
-        "lbl": label if label != name else None,
-        "t": _compact_type_id(item.get("type")),
+        "label": label if label != name else None,
+        "type": _compact_type_id(item.get("type")),
     }
     shape = item.get("shape")
     if isinstance(shape, dict):
-        result["sh"] = {
+        result["shape"] = {
             key: _round_number(shape[key])
             for key in ("solids", "faces", "edges", "volume")
             if key in shape and shape[key] not in (None, "", [], {})
@@ -273,9 +212,9 @@ def _compact_object_summary(item: Any) -> dict[str, Any] | None:
         base = placement.get("base")
         rotation = placement.get("rotation_euler")
         if base not in (None, [], [0.0, 0.0, 0.0], [0, 0, 0]):
-            result["pos"] = _round_sequence(base)
+            result["position"] = _round_sequence(base)
         if rotation not in (None, [], [0.0, 0.0, 0.0], [0, 0, 0]):
-            result["rot"] = _round_sequence(rotation)
+            result["rotation"] = _round_sequence(rotation)
     return {
         key: value
         for key, value in result.items()
@@ -285,7 +224,7 @@ def _compact_object_summary(item: Any) -> dict[str, Any] | None:
 
 def _compact_document(document: Any, *, max_objects: int) -> dict[str, Any]:
     if not isinstance(document, dict):
-        return {"name": None, "n": 0, "objs": []}
+        return {"name": None, "object_count": 0, "objects": []}
     raw_objects = document.get("objects")
     objects = raw_objects if isinstance(raw_objects, list) else []
     compact_objects = [
@@ -295,13 +234,13 @@ def _compact_document(document: Any, *, max_objects: int) -> dict[str, Any]:
     ]
     result = {
         "name": document.get("document"),
-        "lbl": (
+        "label": (
             document.get("label")
             if document.get("label") != document.get("document")
             else None
         ),
-        "n": document.get("object_count", len(objects)),
-        "objs": compact_objects,
+        "object_count": document.get("object_count", len(objects)),
+        "objects": compact_objects,
     }
     truncated = bool(
         document.get("objects_truncated")
@@ -311,7 +250,7 @@ def _compact_document(document: Any, *, max_objects: int) -> dict[str, Any]:
         0, int(document.get("object_count", len(objects)) or 0) - len(compact_objects)
     )
     if truncated:
-        result["omit"] = omitted
+        result["omitted_count"] = omitted
     return {key: value for key, value in result.items() if value not in (None, "", [], False)}
 
 
@@ -343,15 +282,15 @@ def _match_objects(document: Any, object_names: list[str]) -> dict[str, Any]:
         matches = exact or folded or contains[:8]
         results.append(
             {
-                "q": query,
+                "query": query,
                 "ok": bool(matches),
-                "n": len(matches),
-                "m": matches,
+                "match_count": len(matches),
+                "matches": matches,
             }
         )
     return {
         "all": all(item["ok"] for item in results) if results else True,
-        "q": results,
+        "results": results,
     }
 
 
@@ -448,22 +387,22 @@ def _compact_design_memory(context: dict[str, Any]) -> dict[str, Any] | None:
         "summary": _compact_text(memory.get("summary"), 180),
         "obligation": _compact_text(memory.get("current_obligation"), 180),
     }
-    for key, alias in (
-        ("accepted_assumptions", "assume"),
-        ("components", "components"),
-        ("sketches_features", "feat"),
-        ("interfaces", "ifc"),
-        ("envelopes", "env"),
-        ("mechanisms", "mech"),
-        ("non_negotiable_product_behavior", "behavior"),
-        ("critical_geometry", "geom"),
-        ("verification_checks", "verify"),
-        ("construction_order", "order"),
-        ("forbidden_shortcuts", "no"),
-        ("known_failures", "failures"),
-        ("corrections", "corrections"),
-        ("open_questions", "questions"),
-        ("notes", "notes"),
+    for key in (
+        "accepted_assumptions",
+        "components",
+        "sketches_features",
+        "interfaces",
+        "envelopes",
+        "mechanisms",
+        "non_negotiable_product_behavior",
+        "critical_geometry",
+        "verification_checks",
+        "construction_order",
+        "forbidden_shortcuts",
+        "known_failures",
+        "corrections",
+        "open_questions",
+        "notes",
     ):
         values = memory.get(key)
         if isinstance(values, list):
@@ -473,7 +412,7 @@ def _compact_design_memory(context: dict[str, Any]) -> dict[str, Any] | None:
                 if str(item or "").strip()
             ]
             if compact_values:
-                result[alias] = compact_values
+                result[key] = compact_values
     return {key: value for key, value in result.items() if value not in (None, "", [], {})}
 
 
@@ -519,7 +458,7 @@ def _compact_screenshot(screenshot: Any) -> dict[str, Any] | None:
             if observation.get(key) not in (None, "", [], {})
         }
         if compact_observation:
-            result["v"] = compact_observation
+            result["visual_observation"] = compact_observation
     return result
 
 
@@ -538,10 +477,10 @@ def _compact_task_panel(task_panel: Any) -> dict[str, Any] | None:
             if value not in (None, "", [], {}):
                 obj[alias] = _compact_text(value, 96)
         if obj:
-            result["obj"] = obj
+            result["edit_object"] = obj
     active_sketch = str(task_panel.get("active_sketch") or "").strip()
     if active_sketch:
-        result["sk"] = _compact_text(active_sketch, 96)
+        result["active_sketch"] = _compact_text(active_sketch, 96)
     profile = task_panel.get("profile_status")
     if isinstance(profile, dict):
         result["profile"] = {
@@ -551,7 +490,7 @@ def _compact_task_panel(task_panel: Any) -> dict[str, Any] | None:
                     profile.get("ready_for_pad") or profile.get("ready_for_pocket")
                 ),
                 "closed": profile.get("closed_profile"),
-                "dof": profile.get("degrees_of_freedom"),
+                "degrees_of_freedom": profile.get("degrees_of_freedom"),
                 "faces": profile.get("face_count"),
                 "edges": profile.get("edge_count"),
                 "reason": _compact_text(profile.get("reason"), 180),
@@ -572,7 +511,7 @@ def _compact_task_panel(task_panel: Any) -> dict[str, Any] | None:
             if action:
                 compact_actions.append(action)
         if compact_actions:
-            result["next"] = compact_actions
+            result["next_actions"] = compact_actions
     return {key: value for key, value in result.items() if value not in (None, "", [], {})}
 
 
@@ -583,7 +522,7 @@ def _compact_references(references: Any) -> dict[str, Any] | None:
     if not isinstance(images, list) or not images:
         notes = references.get("provider_delivery_notes")
         if notes:
-            return {"n": references.get("count", 0), "deliv": notes}
+            return {"count": references.get("count", 0), "delivery_notes": notes}
         return None
     compact_images: list[dict[str, Any]] = []
     for index, entry in enumerate(images[:8], start=1):
@@ -594,17 +533,17 @@ def _compact_references(references: Any) -> dict[str, Any] | None:
             "file": _compact_text(entry.get("name") or f"reference {index}", 48),
         }
         if entry.get("label"):
-            item["lbl"] = _compact_text(entry.get("label"), 48)
+            item["label"] = _compact_text(entry.get("label"), 48)
         brief = entry.get("visual_brief")
         if isinstance(brief, dict):
             summary = brief.get("summary")
             if summary:
-                item["b"] = _compact_text(summary, 140)
+                item["visual_brief"] = _compact_text(summary, 140)
             else:
                 compact_brief = {
                     alias: brief.get(key)
                     for key, alias in (
-                        ("object_type", "obj"),
+                        ("object_type", "object_type"),
                         ("must_preserve", "keep"),
                         ("counts_patterns", "count"),
                         ("do_not_simplify", "no_simplify"),
@@ -612,10 +551,10 @@ def _compact_references(references: Any) -> dict[str, Any] | None:
                     if brief.get(key) not in (None, "", [], {})
                 }
                 if compact_brief:
-                    item["b"] = compact_brief
+                    item["visual_brief"] = compact_brief
         delivery = entry.get("provider_delivery")
         if isinstance(delivery, dict) and delivery.get("available") is False:
-            item["miss"] = _compact_text(
+            item["missing_delivery_reason"] = _compact_text(
                 delivery.get("reason") or "not delivered", 80
             )
         compact_images.append(
@@ -624,11 +563,11 @@ def _compact_references(references: Any) -> dict[str, Any] | None:
     if not compact_images:
         return None
     result: dict[str, Any] = {
-        "n": references.get("count", len(images)),
-        "imgs": compact_images,
+        "count": references.get("count", len(images)),
+        "images": compact_images,
     }
     if len(images) > len(compact_images):
-        result["omit"] = len(images) - len(compact_images)
+        result["omitted_count"] = len(images) - len(compact_images)
     return result
 
 
@@ -638,11 +577,11 @@ def _compact_loop(loop: Any) -> dict[str, Any] | None:
     result = {}
     for key, alias in (
         ("turn", "turn"),
-        ("workspace_mode", "mode"),
-        ("document_delta", "delta"),
-        ("document_object_count", "objs"),
-        ("screenshot_captured", "shot"),
-        ("visual_attention_flags", "flags"),
+        ("workspace_mode", "workspace_mode"),
+        ("document_delta", "document_delta"),
+        ("document_object_count", "document_object_count"),
+        ("screenshot_captured", "screenshot_captured"),
+        ("visual_attention_flags", "visual_attention_flags"),
     ):
         if key in loop:
             result[alias] = loop.get(key)
@@ -653,7 +592,7 @@ def _compact_loop(loop: Any) -> dict[str, Any] | None:
         ]
         omitted = max(0, len(trace) - 4)
         if omitted:
-            result["trace_om"] = omitted
+            result["trace_omitted_count"] = omitted
     return result
 
 
@@ -662,13 +601,13 @@ def _compact_trace_item(item: dict[str, Any]) -> dict[str, Any]:
     result = {
         "tool": provider_function_name(tool_name, tool_name),
         "ok": bool(item.get("ok")),
-        "wb": _compact_workbench_name(item.get("active_workbench")),
+        "active_workbench": _compact_workbench_name(item.get("active_workbench")),
     }
     payload = item.get("result")
     if isinstance(payload, dict):
         summary = _compact_provider_result(tool_name, payload)
         if summary:
-            result["r"] = summary
+            result["result"] = summary
     return {key: value for key, value in result.items() if value not in (None, "")}
 
 
@@ -677,11 +616,11 @@ def _compact_tool_scope(scope: Any) -> dict[str, Any] | None:
         return None
     visible_scope = {}
     for key, alias in (
-        ("workbench", "wb"),
+        ("workbench", "workbench"),
         ("stage", "stage"),
-        ("active_tool_count", "n"),
-        ("full_workbench_tool_count", "full"),
-        ("omitted_tool_count", "omit"),
+        ("active_tool_count", "active_tool_count"),
+        ("full_workbench_tool_count", "full_workbench_tool_count"),
+        ("omitted_tool_count", "omitted_tool_count"),
     ):
         if key in scope:
             visible_scope[alias] = scope.get(key)
@@ -694,8 +633,8 @@ def _compact_workspace(workspace: Any) -> dict[str, Any] | None:
     result = {}
     for key, alias in (
         ("mode", "mode"),
-        ("active_workbench", "wb"),
-        ("entered_workbench", "entered"),
+        ("active_workbench", "active_workbench"),
+        ("entered_workbench", "entered_workbench"),
     ):
         if key in workspace:
             result[alias] = workspace.get(key)
@@ -708,16 +647,16 @@ def _compact_tool_pack(tool_pack: Any) -> dict[str, Any] | None:
     pack = tool_pack.get("tool_pack")
     if not isinstance(pack, dict):
         return {
-            "wb": _compact_workbench_name(tool_pack.get("active_workbench")),
+            "active_workbench": _compact_workbench_name(tool_pack.get("active_workbench")),
             "pack": None,
         }
     return {
-        "wb": _compact_workbench_name(tool_pack.get("active_workbench")),
+        "active_workbench": _compact_workbench_name(tool_pack.get("active_workbench")),
         "pack": {
-            "wb": _compact_workbench_name(pack.get("workbench")),
+            "workbench": _compact_workbench_name(pack.get("workbench")),
             "domain": pack.get("domain"),
-            "on": pack.get("enabled"),
-            "n": len(pack.get("tool_names") or []),
+            "enabled": pack.get("enabled"),
+            "tool_count": len(pack.get("tool_names") or []),
         },
     }
 
@@ -751,8 +690,8 @@ def _compact_design_preflight(context: dict[str, Any]) -> dict[str, Any] | None:
             if question and answer:
                 compact_assumptions.append(
                     {
-                        "q": _compact_text(question, 96),
-                        "a": _compact_text(answer, 96),
+                        "question": _compact_text(question, 96),
+                        "answer": _compact_text(answer, 96),
                     }
                 )
         if compact_assumptions:
@@ -766,7 +705,7 @@ def _compact_design_preflight(context: dict[str, Any]) -> dict[str, Any] | None:
             question = str(item.get("question") or "").strip()
             if not question:
                 continue
-            entry: dict[str, Any] = {"q": _compact_text(question, 96)}
+            entry: dict[str, Any] = {"question": _compact_text(question, 96)}
             default = str(item.get("default_answer") or "").strip()
             if default:
                 entry["default"] = _compact_text(default, 80)
@@ -782,7 +721,7 @@ def _compact_design_preflight(context: dict[str, Any]) -> dict[str, Any] | None:
                     if clean:
                         compact_options.append(_compact_text(clean, 48))
                 if compact_options:
-                    entry["opts"] = compact_options
+                    entry["options"] = compact_options
             compact_questions.append(entry)
         if compact_questions:
             result["questions"] = compact_questions
@@ -797,25 +736,25 @@ def _compact_design_preflight(context: dict[str, Any]) -> dict[str, Any] | None:
             if question and answer:
                 compact_answers.append(
                     {
-                        "q": _compact_text(question, 96),
-                        "a": _compact_text(answer, 96),
+                        "question": _compact_text(question, 96),
+                        "answer": _compact_text(answer, 96),
                     }
                 )
         if compact_answers:
             result["answers"] = compact_answers
     if isinstance(plan, dict):
-        result["arch"] = _compact_text(plan.get("architecture"), 180)
-        for key, alias in (
-            ("bodies", "bodies"),
-            ("sketches_features", "feat"),
-            ("interfaces", "ifc"),
-            ("envelopes", "env"),
-            ("mechanisms", "mech"),
-            ("manufacturing_assumptions", "mfg"),
-            ("critical_geometry", "geom"),
-            ("construction_order", "order"),
-            ("verification_checks", "verify"),
-            ("forbidden_shortcuts", "no"),
+        result["architecture"] = _compact_text(plan.get("architecture"), 180)
+        for key in (
+            "bodies",
+            "sketches_features",
+            "interfaces",
+            "envelopes",
+            "mechanisms",
+            "manufacturing_assumptions",
+            "critical_geometry",
+            "construction_order",
+            "verification_checks",
+            "forbidden_shortcuts",
         ):
             values = plan.get(key)
             if isinstance(values, list):
@@ -825,7 +764,7 @@ def _compact_design_preflight(context: dict[str, Any]) -> dict[str, Any] | None:
                     if str(item or "").strip()
                 ]
                 if compact_values:
-                    result[alias] = compact_values
+                    result[key] = compact_values
     return {key: value for key, value in result.items() if value not in (None, "", [], {})}
 
 
@@ -856,7 +795,7 @@ def _compact_domain_keyed_value(key: str, value: Any) -> Any:
 
 
 def _domain_key_alias(key: str) -> str:
-    return _DOMAIN_KEY_ALIASES.get(key, key)
+    return key
 
 
 def _compact_domain_value(value: Any, *, key: str = "", depth: int = 0) -> Any:
@@ -941,7 +880,7 @@ def _domain_keys_for_context(context: dict[str, Any]) -> set[str]:
 
 
 def _visible_key(key: str) -> str:
-    return _TOP_LEVEL_ALIASES.get(key, key)
+    return key
 
 
 def _compact_errors(errors: Any) -> dict[str, Any] | None:
@@ -954,7 +893,7 @@ def _compact_errors(errors: Any) -> dict[str, Any] | None:
         _compact_text(item, 160)
         for item in (items if isinstance(items, list) else [items])[:6]
     ]
-    return {"n": len(items) if isinstance(items, list) else 1, "items": compact_items}
+    return {"count": len(items) if isinstance(items, list) else 1, "items": compact_items}
 
 
 def _compact_selection(selection: Any) -> dict[str, Any] | None:
@@ -970,16 +909,14 @@ def _compact_selection(selection: Any) -> dict[str, Any] | None:
     ]
     if not items:
         return None
-    result: dict[str, Any] = {"n": len(selected), "objs": items}
+    result: dict[str, Any] = {"count": len(selected), "objects": items}
     if len(selected) > len(items):
-        result["omit"] = len(selected) - len(items)
+        result["omitted_count"] = len(selected) - len(items)
     return result
 
 
 def _selected_sections(arguments: dict[str, Any]) -> set[str]:
-    sections = set(
-        _string_list(arguments.get("sections") or arguments.get("sec"), limit=20)
-    )
+    sections = set(_string_list(arguments.get("sections"), limit=20))
     if not sections:
         return set(_DEFAULT_SECTIONS)
     return sections
@@ -992,15 +929,9 @@ def _model_visible_context(
     args = _parse_arguments(arguments)
     sections = _selected_sections(args)
     max_objects = _int_arg(
-        args.get("max_objects", args.get("max")), 8, minimum=0, maximum=30
+        args.get("max_objects"), 8, minimum=0, maximum=30
     )
-    object_names = _string_list(
-        args.get("object_names")
-        or args.get("obj")
-        or args.get("objects")
-        or args.get("names"),
-        limit=50,
-    )
+    object_names = _string_list(args.get("object_names"), limit=50)
 
     visible: dict[str, Any] = {}
     if context.get("workbench"):
@@ -1029,11 +960,11 @@ def _model_visible_context(
         references = _compact_references(context.get("reference_images"))
         if references is not None:
             visible[_visible_key("reference_images")] = references
-    if "design_memory" in sections or "memory" in sections or "mem" in sections:
+    if "design_memory" in sections:
         memory = _compact_design_memory(context)
         if memory is not None:
             visible[_visible_key("design_memory")] = memory
-    if "design_preflight" in sections or "plan" in sections:
+    if "design_preflight" in sections:
         preflight = _compact_design_preflight(context)
         if preflight is not None:
             visible[_visible_key("design_preflight")] = preflight

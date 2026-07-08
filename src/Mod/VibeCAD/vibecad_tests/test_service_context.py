@@ -641,18 +641,30 @@ class TestVibeCADServiceContext(SettingsSnapshotTestCase):
             },
             {"object_names": ["TopHeadPlane", "TopHeadSketch", "Missing"], "max_objects": 1},
         )
-        self.assertIn("conv", visible)
-        self.assertEqual(visible["conv"]["items"][0]["content"], "large old prompt")
-        self.assertEqual(visible["conv"]["items"][1]["content"], "large old answer")
+        self.assertIn("conversation", visible)
+        self.assertEqual(
+            visible["conversation"]["items"][0]["content"],
+            "large old prompt",
+        )
+        self.assertEqual(
+            visible["conversation"]["items"][1]["content"],
+            "large old answer",
+        )
         self.assertNotIn("provider_tool_surface", visible)
-        self.assertEqual(len(visible["doc"]["objs"]), 1)
-        self.assertEqual(visible["doc"]["objs"][0]["name"], "TopHeadPlane")
-        self.assertNotIn("base", visible["doc"]["objs"][0])
-        self.assertNotIn("bound_box", visible["doc"]["objs"][0])
-        query = visible["q"]
+        self.assertEqual(len(visible["document"]["objects"]), 1)
+        self.assertEqual(visible["document"]["objects"][0]["name"], "TopHeadPlane")
+        self.assertNotIn("base", visible["document"]["objects"][0])
+        self.assertNotIn("bound_box", visible["document"]["objects"][0])
+        query = visible["object_query"]
         self.assertFalse(query["all"])
-        self.assertEqual([item["ok"] for item in query["q"]], [True, True, False])
-        self.assertEqual(query["q"][1]["m"][0]["lbl"], "TopHeadSketch")
+        self.assertEqual(
+            [item["ok"] for item in query["results"]],
+            [True, True, False],
+        )
+        self.assertEqual(
+            query["results"][1]["matches"][0]["label"],
+            "TopHeadSketch",
+        )
 
     def test_model_visible_context_conversation_section_returns_saved_turns(self):
         visible = _model_visible_context(
@@ -673,10 +685,10 @@ class TestVibeCADServiceContext(SettingsSnapshotTestCase):
             },
             {"sections": ["conversation"]},
         )
-        self.assertEqual(visible["conv"]["turns"], 1)
-        self.assertEqual(visible["conv"]["scope"]["document"], "PartDoc")
+        self.assertEqual(visible["conversation"]["turns"], 1)
+        self.assertEqual(visible["conversation"]["scope"]["document"], "PartDoc")
         self.assertEqual(
-            visible["conv"]["items"],
+            visible["conversation"]["items"],
             [{"role": "user", "content": "keep this requirement"}],
         )
 
@@ -1039,12 +1051,21 @@ class TestVibeCADServiceContext(SettingsSnapshotTestCase):
         self.assertIn("ACCEPTED DESIGN MEMORY", prompt)
         self.assertIn("Which profile should be used?: drop_point", prompt)
         visible = _model_visible_context(context, {"sections": ["design_preflight"]})
-        self.assertEqual(visible["plan"]["answers"][0]["a"], "drop_point")
-        self.assertEqual(visible["plan"]["feat"], ["profile sketch", "pad"])
-        self.assertEqual(visible["plan"]["mech"], ["pivot"])
-        self.assertEqual(visible["plan"]["mfg"], ["CNC"])
         self.assertEqual(
-            visible["plan"]["order"],
+            visible["design_preflight"]["answers"][0]["answer"],
+            "drop_point",
+        )
+        self.assertEqual(
+            visible["design_preflight"]["sketches_features"],
+            ["profile sketch", "pad"],
+        )
+        self.assertEqual(visible["design_preflight"]["mechanisms"], ["pivot"])
+        self.assertEqual(
+            visible["design_preflight"]["manufacturing_assumptions"],
+            ["CNC"],
+        )
+        self.assertEqual(
+            visible["design_preflight"]["construction_order"],
             ["sketch", "verify curves", "pad"],
         )
 
@@ -1098,7 +1119,10 @@ class TestVibeCADServiceContext(SettingsSnapshotTestCase):
         self.assertIn("Accepted assumptions", text)
         self.assertIn("CNC aluminum", text)
         visible = _model_visible_context(context, {"sections": ["design_preflight"]})
-        self.assertEqual(visible["plan"]["assumptions"][0]["a"], "CNC aluminum")
+        self.assertEqual(
+            visible["design_preflight"]["assumptions"][0]["answer"],
+            "CNC aluminum",
+        )
 
     def test_prompt_preamble_includes_hard_report_errors_as_repair_state(self):
         context = {
@@ -1883,7 +1907,7 @@ class TestVibeCADServiceContext(SettingsSnapshotTestCase):
             self.assertIn("no flat polygon placeholder", prompt)
 
             visible = _model_visible_context(context, {"sections": ["conversation"]})
-            visible_text = json.dumps(visible["conv"]["requirements"])
+            visible_text = json.dumps(visible["conversation"]["requirements"])
             self.assertIn("4.5 in folding blade", visible_text)
             self.assertIn("omitted", visible_text)
 
