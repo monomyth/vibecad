@@ -19,14 +19,10 @@ GEOMETRY_KINDS = ("line", "point", "arc", "circle", "ellipse", "bspline", "polyl
 TOOL_SPEC = {
     "name": "sketcher.add_geometry",
     "description": (
-        "Add one native Sketcher geometry element to an existing sketch. "
-        "kind selects the element: 'line' (points=[[x1,y1],[x2,y2]]), 'point' (points=[[x,y]]), "
-        "'arc' (center, radius, start_angle_degrees, end_angle_degrees), "
-        "'circle' (center, radius), 'ellipse' (center, major_radius, minor_radius, angle_degrees), "
-        "'bspline' (points, interpolate, periodic), "
-        "'polyline' (points, closed, constrain_points — adds connected line strokes with coincident "
-        "constraints and, by default, native DistanceX/DistanceY dimensional constraints so profiles "
-        "stay editable and solver-defined)."
+        "Add native Sketcher geometry. Use line/polyline only for straight "
+        "segments. Use arc, ellipse, or bspline for curved silhouettes, "
+        "airfoils, blades, choils, ergonomic profiles, and reference-image "
+        "curves; later fillets do not replace authored curve geometry."
     ),
     "contextual": True,
     "parameters": {
@@ -49,14 +45,14 @@ TOOL_SPEC = {
                     "minItems": 2,
                     "maxItems": 2,
                 },
-                "description": "2D points [[x,y],...] in mm. Used by kind=line (exactly 2), point (exactly 1), polyline (>=2), bspline (>=2).",
+                "description": "Canonical sketch-local 2D points [[x,y],...] in mm. Do not pass 3D/world points here; project them into the sketch plane first. Used by kind=line (exactly 2), point (exactly 1), polyline (>=2), bspline (>=2).",
             },
             "center": {
                 "type": "array",
                 "items": {"type": "number"},
                 "minItems": 2,
                 "maxItems": 2,
-                "description": "Center [x,y] in mm. Used by kind=arc, circle, ellipse.",
+                "description": "Canonical sketch-local center [x,y] in mm. Do not pass 3D/world points here; project them into the sketch plane first. Used by kind=arc, circle, ellipse.",
             },
             "radius": {
                 "type": "number",
@@ -110,7 +106,7 @@ def _error(message: str) -> dict[str, Any]:
 
 
 def _validated_points(
-    points: list[list[float]] | None,
+    points: list[Any] | None,
     kind: str,
     minimum: int,
     exact: int | None = None,
@@ -124,30 +120,34 @@ def _validated_points(
         return None, _error(
             f"kind='{kind}' requires at least {minimum} points in 'points'; got {len(values)}."
         )
+    normalized: list[list[float]] = []
     for index, raw in enumerate(values):
         if not isinstance(raw, (list, tuple)) or len(raw) != 2:
             return None, _error(
-                f"kind='{kind}' point {index} must be a two-number [x, y] pair."
+                f"kind='{kind}' point {index} must be exactly [x, y] in sketch-local mm. "
+                f"Got {raw!r}. Do not pass dicts or [x, y, z] to sketcher.add_geometry."
             )
         try:
-            float(raw[0])
-            float(raw[1])
+            normalized.append([float(raw[0]), float(raw[1])])
         except (TypeError, ValueError):
             return None, _error(
-                f"kind='{kind}' point {index} must contain numeric coordinates."
+                f"kind='{kind}' point {index} must contain numeric x and y coordinates."
             )
-    return [[float(raw[0]), float(raw[1])] for raw in values], None
+    return normalized, None
 
 
 def _validated_center(
-    center: list[float] | None, kind: str
+    center: Any, kind: str
 ) -> tuple[list[float] | None, dict[str, Any] | None]:
     if not isinstance(center, (list, tuple)) or len(center) != 2:
-        return None, _error(f"kind='{kind}' requires 'center' as a two-number [x, y] pair.")
+        return None, _error(
+            f"kind='{kind}' requires center=[x, y] in sketch-local mm. "
+            f"Got {center!r}. Do not pass dicts or [x, y, z] to sketcher.add_geometry."
+        )
     try:
         return [float(center[0]), float(center[1])], None
     except (TypeError, ValueError):
-        return None, _error(f"kind='{kind}' 'center' must contain numeric coordinates.")
+        return None, _error(f"kind='{kind}' center must contain numeric x and y coordinates.")
 
 
 def run(

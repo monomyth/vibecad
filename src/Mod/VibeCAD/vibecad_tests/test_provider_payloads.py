@@ -15,6 +15,7 @@ from VibeCADPreferences import (
 )
 from VibeCADProvider import (
     OPENAI_REQUEST_DUMP_DIR_ENV,
+    VIBECAD_SYSTEM_INSTRUCTIONS,
     _build_provider_function_tools,
     _model_visible_context,
     _openai_request_dump_dir,
@@ -22,7 +23,6 @@ from VibeCADProvider import (
     _write_openai_request_dump,
 )
 from VibeCADSession import (
-    _execution_contract_for_context,
     _refresh_provider_context,
     make_provider_tool_runner,
     provider_tool_scope_for_context,
@@ -30,6 +30,11 @@ from VibeCADSession import (
     run_prompt,
 )
 from VibeCADWorkbenchTools import WORKBENCH_TOOL_PACKS
+from provider_tools.base import (
+    PROVIDER_FUNCTION_NAMES,
+    PROVIDER_TOOL_DESCRIPTIONS,
+    _compact_provider_result,
+)
 
 from vibecad_tests.support import (
     SettingsSnapshotTestCase,
@@ -38,6 +43,99 @@ from vibecad_tests.support import (
 
 
 class TestVibeCADProviderPayloads(SettingsSnapshotTestCase):
+    def test_system_prompt_is_compact_production_cad_contract(self):
+        self.assertLessEqual(len(VIBECAD_SYSTEM_INSTRUCTIONS), 620)
+        self.assertNotIn("Before first geometry write", VIBECAD_SYSTEM_INSTRUCTIONS)
+        self.assertNotIn("state the customer's intended outcome", VIBECAD_SYSTEM_INSTRUCTIONS)
+        self.assertNotIn("Before geometry writes", VIBECAD_SYSTEM_INSTRUCTIONS)
+        self.assertIn("expert mechanical CAD", VIBECAD_SYSTEM_INSTRUCTIONS)
+        self.assertIn("manufacturable geometry", VIBECAD_SYSTEM_INSTRUCTIONS)
+        self.assertIn("fits, load paths", VIBECAD_SYSTEM_INSTRUCTIONS)
+        self.assertIn("No placeholders", VIBECAD_SYSTEM_INSTRUCTIONS)
+        self.assertIn("Fillets/chamfers finish edges", VIBECAD_SYSTEM_INSTRUCTIONS)
+        self.assertIn("curves are authored curves", VIBECAD_SYSTEM_INSTRUCTIONS)
+
+    def test_provider_tool_descriptions_are_single_compact_terms(self):
+        descriptions = list(PROVIDER_TOOL_DESCRIPTIONS.values())
+        self.assertLessEqual(sum(len(item) for item in descriptions), 425)
+        self.assertLessEqual(max(len(item) for item in descriptions), 10)
+        self.assertFalse([item for item in descriptions if " " in item])
+
+    def test_provider_function_names_are_compact_cad_terms(self):
+        names = list(PROVIDER_FUNCTION_NAMES.values())
+        self.assertLessEqual(sum(len(item) for item in names), 515)
+        self.assertLessEqual(max(len(item) for item in names), 8)
+        self.assertEqual(len(names), len(set(names)))
+        self.assertFalse([item for item in names if " " in item])
+
+    def test_provider_tool_results_use_compact_keys(self):
+        long_reason = " ".join(["profile validation explanation"] * 40)
+        compact = _compact_provider_result(
+            "partdesign.extrude",
+            {
+                "ok": True,
+                "error": long_reason,
+                "feature_effect": {
+                    "ok": True,
+                    "body_shape_delta": {
+                        "volume_delta": 12.5,
+                        "faces_delta": 2,
+                    },
+                },
+                "profile_status": {
+                    "fully_constrained": True,
+                    "degrees_of_freedom": 0,
+                    "ready_for_pad": True,
+                    "geometry_count": 4,
+                    "constraint_count": 8,
+                },
+                "mutation": {
+                    "created_geometry_indices": [0, 1, 2, 3],
+                    "created_constraint_indices": [0, 1, 2, 3],
+                },
+                "transaction": {
+                    "ok": True,
+                    "mutated_document": True,
+                    "result": {"feature": "Pad"},
+                },
+            },
+        )
+        self.assertIn("fx", compact)
+        self.assertIn("shape", compact["fx"])
+        self.assertEqual(compact["fx"]["shape"]["dV"], 12.5)
+        self.assertEqual(compact["profile"]["dof"], 0)
+        self.assertTrue(compact["profile"]["full"])
+        self.assertEqual(compact["profile"]["geom"], 4)
+        self.assertEqual(compact["profile"]["cons"], 8)
+        self.assertEqual(compact["edit"]["g_new"], [0, 1, 2, 3])
+        self.assertEqual(compact["edit"]["c_new"], [0, 1, 2, 3])
+        self.assertLessEqual(len(compact["err"]), 480)
+        self.assertNotIn("feature_effect", compact)
+        self.assertNotIn("body_shape_delta", str(compact))
+        self.assertNotIn("created_geometry_indices", str(compact))
+        self.assertNotIn("mutation", compact)
+
+    def test_sketch_inspect_result_does_not_silently_truncate_geometry(self):
+        geometry = [
+            {
+                "index": index,
+                "handle": f"geometry:{index}",
+                "type": "LineSegment",
+            }
+            for index in range(8)
+        ]
+        compact = _compact_provider_result(
+            "sketcher.inspect_sketch",
+            {
+                "ok": True,
+                "geometry_count": 8,
+                "geometry": geometry,
+            },
+        )
+        self.assertEqual(compact["geom"], 8)
+        self.assertEqual(len(compact["geometry"]), 8)
+        self.assertEqual(compact["geometry"][-1]["index"], 7)
+
     def test_run_prompt_includes_provider_tool_schemas(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = VibeCADService()
@@ -57,16 +155,12 @@ class TestVibeCADProviderPayloads(SettingsSnapshotTestCase):
                 self.assertNotIn("core.activate_workbench", provider_tool_names)
                 self.assertNotIn("partdesign.create_body", provider_tool_names)
                 self.assertNotIn("sketcher.add_geometry", provider_tool_names)
-                self.assertIn("workbench_tool_pack", response.context)
-                self.assertIn("workbench_commands", response.context)
-                self.assertIn("workbench_object_templates", response.context)
-                self.assertIn("workbench_objects", response.context)
                 self.assertIn("provider_tool_scope", response.context)
                 self.assertEqual(
                     response.context["provider_tool_scope"]["stage"], "workspace_planner"
                 )
                 self.assertIn("active_tool_count", response.context["provider_tool_scope"])
-                self.assertIn("active_tool_names", response.context["provider_tool_scope"])
+                self.assertNotIn("active_tool_names", response.context["provider_tool_scope"])
                 self.assertNotIn("omitted_tool_names", response.context["provider_tool_scope"])
                 self.assertEqual(response.context["vibecad_workspace"]["mode"], "planner")
                 self.assertEqual(
@@ -74,14 +168,10 @@ class TestVibeCADProviderPayloads(SettingsSnapshotTestCase):
                     sorted(WORKBENCH_TOOL_PACKS),
                 )
                 visible = _model_visible_context(response.context)
-                self.assertIn("provider_tool_scope", visible)
+                self.assertNotIn("provider_tool_scope", visible)
                 self.assertNotIn("provider_tool_schemas", visible)
                 self.assertNotIn("provider_tool_surface", visible)
-                self.assertNotIn("active_tool_names", visible["provider_tool_scope"])
-                self.assertIn("active_tool_name_count", visible["provider_tool_scope"])
-                self.assertNotIn("omitted_tool_names", visible["provider_tool_scope"])
                 self.assertNotIn("available_tools", response.context)
-                self.assertIn("provider_tool_surface", response.context)
                 self.assertIn("view_screenshot", response.context)
                 self.assertIn("task_panel", response.context)
                 self.assertIn("report_view_errors", response.context)
@@ -135,7 +225,7 @@ class TestVibeCADProviderPayloads(SettingsSnapshotTestCase):
                 self.assertIn("core.delete_object", names)
                 self.assertIn("partdesign.create_sketch", names)
                 self.assertIn("partdesign.extrude", names)
-                scope = context["provider_tool_surface"]["scope"]
+                scope = context["provider_tool_scope"]
                 self.assertNotIn("request_filter", scope)
             finally:
                 VibeCADProject._active_document_info = original
@@ -201,17 +291,17 @@ class TestVibeCADProviderPayloads(SettingsSnapshotTestCase):
         self.assertEqual(
             function_names,
             {
-                "core_get_active_document",
-                "partdesign_create_sketch",
-                "sketcher_draw_rectangle",
-                "partdesign_extrude",
+                "c_doc",
+                "pd_sk",
+                "sk_rect",
+                "pd_ext",
             },
         )
         self.assertNotIn("execute_vibecad_tool", function_names)
         for tool in request_tools:
             self.assertTrue(tool["callable"], tool)
             self.assertIsInstance(tool["description"], str)
-            self.assertIn("Native VibeCAD tool:", tool["description"])
+            self.assertTrue(tool["description"].strip())
             self.assertIsInstance(tool["params_json_schema"], dict)
             self.assertEqual(tool["params_json_schema"]["type"], "object")
             self.assertIn("properties", tool["params_json_schema"])
@@ -253,12 +343,12 @@ class TestVibeCADProviderPayloads(SettingsSnapshotTestCase):
         self.assertEqual(scope.stage, "workbench_pack")
         self.assertEqual(len(request_tools), len(scoped))
         self.assertLessEqual(len(request_tools), len(full))
-        self.assertIn("partdesign_create_body", function_names)
-        self.assertIn("partdesign_create_sketch", function_names)
-        self.assertIn("partdesign_extrude", function_names)
-        self.assertNotIn("sketcher_create_sketch", function_names)
+        self.assertIn("pd_body", function_names)
+        self.assertIn("pd_sk", function_names)
+        self.assertIn("pd_ext", function_names)
+        self.assertNotIn("sk_new", function_names)
         self.assertNotIn("execute_vibecad_tool", function_names)
-        self.assertEqual(len(context["provider_function_tools"]), len(scoped))
+        self.assertNotIn("provider_function_tools", context)
 
     def test_provider_context_tool_is_explicit_module_backed_function_tool(self):
         from provider_tools import create_context_tool, registered_tool_names
@@ -280,7 +370,14 @@ class TestVibeCADProviderPayloads(SettingsSnapshotTestCase):
 
         schema = {
             "name": "core.get_current_freecad_context",
-            "parameters": {"type": "object", "properties": {}},
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "object_names": {"type": "array", "items": {"type": "string"}},
+                    "sections": {"type": "array", "items": {"type": "string"}},
+                    "max_objects": {"type": "integer"},
+                },
+            },
             "workbench": "global",
             "safety": "read",
         }
@@ -292,7 +389,7 @@ class TestVibeCADProviderPayloads(SettingsSnapshotTestCase):
                 "available_tools_workbench": "PartWorkbench",
                 "provider_tool_schemas": [{"name": "part.set_placement"}],
                 "provider_function_tools": [
-                    {"tool_name": "core.get_active_document", "function_name": "core_get_active_document"}
+                    {"tool_name": "core.get_active_document", "function_name": "c_doc"}
                 ],
             },
             FakeFunctionTool,
@@ -300,9 +397,13 @@ class TestVibeCADProviderPayloads(SettingsSnapshotTestCase):
 
         self.assertIn("core.get_current_freecad_context", registered_tool_names())
         request_schema = _provider_tool_request_schema(tool)
-        self.assertEqual(request_schema["function_name"], "core_get_current_freecad_context")
+        self.assertEqual(request_schema["function_name"], "c_state")
         self.assertTrue(request_schema["callable"])
-        self.assertIn("not a generic CAD operation router", request_schema["description"])
+        self.assertEqual("state", request_schema["description"])
+        self.assertEqual(
+            {"obj", "sec", "max"},
+            set(request_schema["params_json_schema"]["properties"]),
+        )
 
     def test_openai_provider_has_no_inline_function_tool_context_helper(self):
         import VibeCADProvider
@@ -310,18 +411,6 @@ class TestVibeCADProviderPayloads(SettingsSnapshotTestCase):
         source = inspect.getsource(VibeCADProvider)
         self.assertNotIn("@function_tool", source)
         self.assertIn("create_context_tool", source)
-
-    def test_partdesign_execution_contract_requires_constrained_sketch_feature_order(self):
-        contract = _execution_contract_for_context({"workbench": "PartDesignWorkbench"})
-        self.assertEqual(contract["mode"], "parametric_partdesign")
-        required_order = " ".join(contract["required_order"])
-        self.assertIn("create sketch", required_order)
-        self.assertIn("fully constrain", required_order)
-        self.assertIn("DoF is 0", required_order)
-        self.assertIn("native PartDesign features", required_order)
-        gates = " ".join(contract["completion_gates"])
-        self.assertIn("under-constrained", gates)
-        self.assertIn("native PartDesign features built from constrained sketches", gates)
 
     def test_openai_request_dump_writes_full_provider_payload(self):
         old_dump_dir = os.environ.get(OPENAI_REQUEST_DUMP_DIR_ENV)
@@ -336,7 +425,7 @@ class TestVibeCADProviderPayloads(SettingsSnapshotTestCase):
                             "instructions": "full system instructions",
                             "tools": [
                                 {
-                                    "function_name": "partdesign_create_sketch",
+                                    "function_name": "pd_sk",
                                     "params_json_schema": {
                                         "type": "object",
                                         "properties": {"plane": {"type": "string"}},
@@ -353,7 +442,7 @@ class TestVibeCADProviderPayloads(SettingsSnapshotTestCase):
                 self.assertEqual(data["agent"]["instructions"], "full system instructions")
                 self.assertEqual(
                     data["agent"]["tools"][0]["function_name"],
-                    "partdesign_create_sketch",
+                    "pd_sk",
                 )
                 self.assertEqual(data["run"]["input"], "make a 10mm square")
                 latest = Path(directory) / "latest-openai-request.json"

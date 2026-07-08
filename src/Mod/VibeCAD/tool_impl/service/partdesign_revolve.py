@@ -17,11 +17,10 @@ from VibeCADTransactions import run_freecad_transaction
 TOOL_SPEC = {
     "contextual": True,
     "description": (
-        "Create a native PartDesign Revolution or Groove by rotating a sketch "
-        "around a Body origin axis. operation='revolve' adds material; "
-        "operation='groove' removes material. Use for axisymmetric parts — "
-        "shafts, hubs, flanges, pulleys, bottles. The profile must lie entirely "
-        "on one side of the axis."
+        "Create a native PartDesign Revolution/Groove by rotating a sketch "
+        "around a Body origin axis. Use for axisymmetric hubs, shafts, flanges, "
+        "pulleys, bosses, and turned profiles. Profile must stay on one side "
+        "of the axis."
     ),
     "name": "partdesign.revolve",
     "parameters": {

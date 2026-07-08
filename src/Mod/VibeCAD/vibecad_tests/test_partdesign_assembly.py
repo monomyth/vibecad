@@ -216,6 +216,84 @@ class TestVibeCADPartDesignAssembly(SettingsSnapshotTestCase):
         finally:
             App.closeDocument(doc.Name)
 
+    def test_create_partdesign_sketch_resolves_face_support_by_normal(self):
+        import FreeCAD as App
+
+        doc = App.newDocument("VibeCADPartDesignFaceNormalSketchTest")
+        try:
+            service = VibeCADService()
+            sketch_result = service.registry.call(
+                "partdesign.create_sketch",
+                label="Base Profile",
+            )
+            self.assertTrue(sketch_result["ok"], sketch_result)
+            sketch = doc.getObject(sketch_result["active_sketch"])
+            self.assertIsNotNone(sketch)
+            rectangle = service.registry.call(
+                "sketcher.draw_rectangle",
+                sketch_name=sketch.Name,
+                width=20,
+                height=12,
+            )
+            self.assertTrue(rectangle["ok"], rectangle)
+            pad_result = service.registry.call(
+                "partdesign.extrude",
+                operation="pad",
+                sketch_name=sketch.Name,
+                label="Base Pad",
+                length=5,
+            )
+            self.assertTrue(pad_result["ok"], pad_result)
+            pad_name = pad_result["transaction"]["result"]["feature"]
+
+            face_sketch = service.registry.call(
+                "partdesign.create_sketch",
+                label="Top Face Sketch",
+                support_type="face",
+                support_object=pad_name,
+                normal={"z": 1},
+            )
+            self.assertTrue(face_sketch["ok"], face_sketch)
+            created = doc.getObject(face_sketch["active_sketch"])
+            self.assertIsNotNone(created)
+            transaction_result = face_sketch["transaction"]["result"]
+            self.assertEqual(transaction_result["support_type"], "face")
+            self.assertRegex(transaction_result["subelement"], r"^Face\d+$")
+            self.assertEqual(
+                transaction_result["resolved_face"]["subelement"],
+                transaction_result["subelement"],
+            )
+            self.assertGreaterEqual(
+                transaction_result["resolved_face"]["candidate_count"],
+                1,
+            )
+
+            sketch_count_before_bad_request = len(
+                [obj for obj in doc.Objects if obj.TypeId == "Sketcher::SketchObject"]
+            )
+            mismatched = service.registry.call(
+                "partdesign.create_sketch",
+                label="Wrong Normal Sketch",
+                support_type="face",
+                support_object=pad_name,
+                subelement=transaction_result["subelement"],
+                normal={"z": -1},
+            )
+            self.assertFalse(mismatched["ok"], mismatched)
+            self.assertIn(
+                "does not match normal",
+                mismatched["transaction"]["error"],
+            )
+            sketch_count_after_bad_request = len(
+                [obj for obj in doc.Objects if obj.TypeId == "Sketcher::SketchObject"]
+            )
+            self.assertEqual(
+                sketch_count_after_bad_request,
+                sketch_count_before_bad_request,
+            )
+        finally:
+            App.closeDocument(doc.Name)
+
     def test_partdesign_create_body_allows_separate_component_sketches(self):
         import FreeCAD as App
 

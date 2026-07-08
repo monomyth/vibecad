@@ -39,13 +39,6 @@ def register_tools(registry: Any, service: Any) -> None:
         spec = module.TOOL_SPEC
         safety_name = spec.get("safety", "SAFE_WRITE")
         description = spec["description"]
-        if safety_name != "READ":
-            description = (
-                f"{description} Returns a normalized mutation payload with created, modified, "
-                "deleted geometry/constraint indices, old-to-new index maps when applicable, "
-                "full post-action Sketcher geometry/constraint summaries, solver status, and "
-                "profile validation."
-            )
         registry.register(
             VibeCADTool(
                 name=spec["name"],

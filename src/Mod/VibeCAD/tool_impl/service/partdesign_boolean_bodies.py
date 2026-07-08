@@ -11,10 +11,8 @@ from VibeCADTransactions import run_freecad_transaction
 
 
 TOOL_SPEC = {'contextual': True,
- 'description': 'Create a native PartDesign Boolean feature (fuse/cut/common) in a '
-                'target Body using other Bodies as tools. Use to combine or subtract '
-                'separately modeled components — e.g. cut a rotor cavity out of a '
-                'housing Body. Tool Bodies are consumed by the Boolean.',
+ 'description': 'Create a native PartDesign Boolean (fuse/cut/common) in a '
+                'target Body using other Bodies as consumed tools.',
  'name': 'partdesign.boolean_bodies',
  'parameters': {'properties': {'label': {'type': 'string'},
                                'operation': {'description': 'Boolean operation: fuse, cut, or common.',

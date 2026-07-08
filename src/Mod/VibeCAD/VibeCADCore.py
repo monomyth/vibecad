@@ -55,6 +55,7 @@ BUILD_SCRIPT_TOOL_NAME = "model.build_from_script"
 SCRIPT_MODE_ALLOWED_WRITE_TOOLS = {
     BUILD_SCRIPT_TOOL_NAME,
     "core.report_tool_shape_gap",
+    "core.update_design_memory",
     "core.undo_last_vibecad_action",
 }
 
@@ -187,6 +188,7 @@ class VibeCADService:
         self._registry = ToolRegistry()
         self._last_view_screenshot: dict[str, Any] | None = None
         self._reference_images: list[dict[str, Any]] = []
+        self._reference_cache_key: str | None = None
         self._conversation_cache: list[dict[str, Any]] = []
         self._conversation_cache_key: str | None = None
         self._local_session_id = uuid.uuid4().hex
@@ -507,12 +509,38 @@ class VibeCADService:
 
         try:
             active_dialog = bool(Gui.Control.activeDialog())
-            return {
+            result: dict[str, Any] = {
                 "available": True,
                 "active_dialog": active_dialog,
                 "widget_count": 0,
                 "widgets": [],
             }
+            edit_object = None
+            edit_reason = ""
+            try:
+                active_gui_doc = getattr(Gui, "ActiveDocument", None)
+                get_in_edit = getattr(active_gui_doc, "getInEdit", None)
+                if callable(get_in_edit):
+                    edit_object = get_in_edit()
+            except Exception as exc:
+                edit_reason = str(exc)
+            if isinstance(edit_object, (tuple, list)) and edit_object:
+                edit_object = edit_object[0]
+            provider_object = getattr(edit_object, "Object", None)
+            if provider_object is not None:
+                edit_object = provider_object
+            if edit_object is not None:
+                result["edit_mode"] = True
+                result["edit_object"] = self._object_summary(edit_object)
+                if getattr(edit_object, "TypeId", "") == "Sketcher::SketchObject":
+                    result["active_sketch"] = getattr(edit_object, "Name", "")
+                    result["profile_status"] = self._sketch_profile_status(edit_object)
+                    result["next_actions"] = self._sketch_next_actions(edit_object)
+            else:
+                result["edit_mode"] = False
+                if edit_reason:
+                    result["edit_state_reason"] = edit_reason
+            return result
         except Exception as exc:
             return {"available": False, "reason": str(exc), "widgets": []}
 
@@ -741,6 +769,127 @@ class VibeCADService:
             return Path(str(root)).expanduser() / "references"
         return vibecad_data_dir() / "references"
 
+    def _reference_state_path(self) -> Path:
+        return self._reference_artifact_dir().parent / "references.json"
+
+    @staticmethod
+    def reference_state_path_for_document_file(file_path: str | Path) -> Path:
+        return project_root_for_document_file(file_path) / "references.json"
+
+    @staticmethod
+    def _reference_artifact_dir_for_document_file(file_path: str | Path) -> Path:
+        return project_root_for_document_file(file_path) / "references"
+
+    @staticmethod
+    def _clean_reference_entry(entry: dict[str, Any]) -> dict[str, Any]:
+        allowed = {
+            "id",
+            "name",
+            "label",
+            "path",
+            "size_bytes",
+            "image_size",
+            "downscaled",
+            "format",
+            "artifact_role",
+            "attached_at",
+            "provider_delivery",
+            "visual_brief",
+            "visual_brief_updated_at",
+            "downscale_error",
+        }
+        clean = {key: entry.get(key) for key in allowed if key in entry}
+        clean["id"] = str(clean.get("id") or uuid.uuid4().hex[:12])
+        clean["name"] = str(clean.get("name") or clean.get("id") or "reference")
+        clean["label"] = str(clean.get("label") or "").strip()
+        clean["path"] = str(clean.get("path") or "").strip()
+        clean["artifact_role"] = "user_reference"
+        return clean
+
+    def _load_reference_images_for_active_project(self) -> None:
+        try:
+            path = self._reference_state_path()
+        except Exception:
+            path = vibecad_data_dir() / "references.json"
+        key = str(path)
+        if key == self._reference_cache_key:
+            return
+        loaded: list[dict[str, Any]] = []
+        try:
+            if path.exists():
+                data = json.loads(path.read_text(encoding="utf-8"))
+                raw_images = (
+                    data.get("reference_images", [])
+                    if isinstance(data, dict)
+                    else data
+                )
+                if isinstance(raw_images, list):
+                    loaded = [
+                        self._clean_reference_entry(item)
+                        for item in raw_images
+                        if isinstance(item, dict)
+                    ][:MAX_REFERENCE_IMAGES]
+        except Exception:
+            loaded = []
+        self._reference_cache_key = key
+        self._reference_images = loaded
+
+    def _write_reference_images(self) -> None:
+        try:
+            path = self._reference_state_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "format": "VibeCAD reference images",
+                "version": 1,
+                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "reference_images": [
+                    self._clean_reference_entry(item)
+                    for item in self._reference_images
+                    if isinstance(item, dict)
+                ][-MAX_REFERENCE_IMAGES:],
+            }
+            tmp = path.with_name(f"{path.name}.tmp")
+            tmp.write_text(
+                json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
+            )
+            tmp.replace(path)
+            self._reference_cache_key = str(path)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _reference_delivery_status(entry: dict[str, Any]) -> dict[str, Any]:
+        raw_path = str(entry.get("path") or "").strip()
+        if not raw_path:
+            return {"available": False, "reason": "reference image path is empty"}
+        path = Path(raw_path).expanduser()
+        try:
+            if not path.is_file():
+                return {
+                    "available": False,
+                    "reason": f"reference image file not found: {path}",
+                }
+            size = int(path.stat().st_size)
+        except OSError as exc:
+            return {"available": False, "reason": str(exc)}
+        if size <= 0:
+            return {"available": False, "reason": "reference image file is empty"}
+        if size > REFERENCE_IMAGE_MAX_BYTES:
+            return {
+                "available": False,
+                "reason": (
+                    f"reference image is {size} bytes; provider limit is "
+                    f"{REFERENCE_IMAGE_MAX_BYTES} bytes"
+                ),
+                "size_bytes": size,
+            }
+        return {"available": True, "size_bytes": size}
+
+    def _refresh_reference_delivery_status(self) -> None:
+        for entry in self._reference_images:
+            if isinstance(entry, dict):
+                entry["provider_delivery"] = self._reference_delivery_status(entry)
+
     def attach_reference_image(self, source_path: str, label: str = "") -> dict[str, Any]:
         """Copy a user-supplied reference image into the project artifact store.
 
@@ -750,6 +899,7 @@ class VibeCADService:
         raw = str(source_path or "").strip()
         if not raw:
             return {"ok": False, "error": "Reference image path cannot be empty."}
+        self._load_reference_images_for_active_project()
         source = Path(raw).expanduser()
         suffix = source.suffix.lower()
         if suffix not in REFERENCE_IMAGE_EXTENSIONS:
@@ -796,16 +946,22 @@ class VibeCADService:
             "artifact_role": "user_reference",
             "attached_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
+        if downscale.get("error"):
+            entry["downscale_error"] = str(downscale.get("error"))
+        entry["provider_delivery"] = self._reference_delivery_status(entry)
         self._reference_images.append(entry)
+        self._write_reference_images()
         return {"ok": True, "reference": dict(entry), "count": len(self._reference_images)}
 
     def remove_reference_image(self, reference_id: str) -> dict[str, Any]:
         ident = str(reference_id or "").strip()
         if not ident:
             return {"ok": False, "error": "Reference image id cannot be empty."}
+        self._load_reference_images_for_active_project()
         for index, entry in enumerate(self._reference_images):
             if entry.get("id") == ident or entry.get("name") == ident:
                 removed = self._reference_images.pop(index)
+                self._write_reference_images()
                 return {
                     "ok": True,
                     "removed": dict(removed),
@@ -814,15 +970,116 @@ class VibeCADService:
         return {"ok": False, "error": f"No attached reference image matches '{ident}'."}
 
     def clear_reference_images(self) -> dict[str, Any]:
+        self._load_reference_images_for_active_project()
         cleared = len(self._reference_images)
         self._reference_images = []
+        self._write_reference_images()
         return {"ok": True, "cleared": cleared}
 
     def reference_images_summary(self) -> dict[str, Any]:
+        self._load_reference_images_for_active_project()
+        self._refresh_reference_delivery_status()
         return {
             "count": len(self._reference_images),
             "images": [dict(entry) for entry in self._reference_images],
         }
+
+    @staticmethod
+    def _normalize_reference_visual_brief(raw: dict[str, Any]) -> dict[str, Any]:
+        def clean_text(value: Any, limit: int = 160) -> str:
+            text = str(value or "").strip()
+            return text[:limit]
+
+        def clean_list(value: Any, limit: int = 8) -> list[str]:
+            if isinstance(value, str):
+                items = [value]
+            elif isinstance(value, list):
+                items = value
+            else:
+                items = []
+            cleaned = [clean_text(item) for item in items]
+            return [item for item in cleaned if item][:limit]
+
+        brief = {
+            "object_type": clean_text(raw.get("object_type"), 80),
+            "must_preserve": clean_list(raw.get("must_preserve")),
+            "counts_patterns": clean_list(raw.get("counts_patterns")),
+            "proportion_notes": clean_list(raw.get("proportion_notes")),
+            "unknown_dimensions": clean_list(raw.get("unknown_dimensions")),
+            "do_not_simplify": clean_list(raw.get("do_not_simplify")),
+        }
+        summary = clean_text(raw.get("summary"), 240)
+        if summary:
+            brief["summary"] = summary
+        return {key: value for key, value in brief.items() if bool(value)}
+
+    def update_reference_visual_brief(
+        self, reference_ids: list[str] | None, brief: dict[str, Any]
+    ) -> dict[str, Any]:
+        self._load_reference_images_for_active_project()
+        normalized = self._normalize_reference_visual_brief(brief)
+        if not normalized:
+            return {"ok": False, "error": "Reference brief is empty."}
+        requested = {
+            str(item).strip()
+            for item in (reference_ids or [])
+            if str(item).strip()
+        }
+        changed = 0
+        timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        for entry in self._reference_images:
+            if not isinstance(entry, dict):
+                continue
+            if requested and str(entry.get("id") or "") not in requested:
+                continue
+            entry["visual_brief"] = dict(normalized)
+            entry["visual_brief_updated_at"] = timestamp
+            changed += 1
+        if changed:
+            self._write_reference_images()
+        return {
+            "ok": bool(changed),
+            "updated": changed,
+            "brief": dict(normalized),
+        }
+
+    def write_references_for_document_file(
+        self, file_path: str | Path, references: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        target_dir = self._reference_artifact_dir_for_document_file(file_path)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        saved: list[dict[str, Any]] = []
+        for raw_entry in references:
+            if not isinstance(raw_entry, dict):
+                continue
+            entry = self._clean_reference_entry(raw_entry)
+            source_path = Path(str(entry.get("path") or "")).expanduser()
+            if source_path.is_file() and source_path.parent != target_dir:
+                target_name = f"{entry['id']}-{_slug_filename(entry['name'])}"
+                target_path = target_dir / target_name
+                try:
+                    shutil.copyfile(source_path, target_path)
+                    entry["path"] = str(target_path)
+                    entry["size_bytes"] = target_path.stat().st_size
+                except OSError:
+                    pass
+            entry["provider_delivery"] = self._reference_delivery_status(entry)
+            saved.append(entry)
+        saved = saved[-MAX_REFERENCE_IMAGES:]
+        path = self.reference_state_path_for_document_file(file_path)
+        payload = {
+            "format": "VibeCAD reference images",
+            "version": 1,
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "reference_images": saved,
+        }
+        tmp = path.with_name(f"{path.name}.tmp")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        tmp.replace(path)
+        self._reference_images = [dict(item) for item in saved]
+        self._reference_cache_key = str(path)
+        return {"path": str(path), "count": len(saved), "reference_images": saved}
 
     def workbench_summary(self) -> dict[str, Any]:
         try:
@@ -1045,7 +1302,6 @@ class VibeCADService:
         radius = getattr(geometry, "Radius", None)
         major_radius = getattr(geometry, "MajorRadius", None)
         minor_radius = getattr(geometry, "MinorRadius", None)
-        poles = getattr(geometry, "Poles", None)
         if start is not None:
             item["start"] = [float(start.x), float(start.y), float(start.z)]
         if end is not None:
@@ -1054,16 +1310,66 @@ class VibeCADService:
             item["center"] = [float(center.x), float(center.y), float(center.z)]
         if radius is not None:
             item["radius"] = float(radius)
+            if abs(float(radius)) <= 1e-9:
+                item["degenerate"] = True
+                item["degenerate_reason"] = "zero_radius"
         if major_radius is not None:
             item["major_radius"] = float(major_radius)
         if minor_radius is not None:
             item["minor_radius"] = float(minor_radius)
+        poles = None
+        if hasattr(geometry, "getPoles"):
+            try:
+                poles = list(geometry.getPoles())
+            except Exception:
+                poles = None
+        elif hasattr(geometry, "Poles"):
+            try:
+                poles = list(getattr(geometry, "Poles"))
+            except Exception:
+                poles = None
         if poles:
             item["pole_count"] = len(poles)
             item["poles"] = [
                 [float(point.x), float(point.y), float(point.z)]
                 for point in list(poles)[:20]
             ]
+        if hasattr(geometry, "Degree"):
+            try:
+                item["degree"] = int(getattr(geometry, "Degree"))
+            except Exception:
+                pass
+        for method_name, output_key in (
+            ("getKnots", "knots"),
+            ("getMultiplicities", "multiplicities"),
+            ("getWeights", "weights"),
+        ):
+            if not hasattr(geometry, method_name):
+                continue
+            try:
+                values = list(getattr(geometry, method_name)())
+            except Exception:
+                continue
+            item[output_key] = [float(value) for value in values[:20]]
+            item[f"{output_key}_count"] = len(values)
+        for method_name, output_key in (
+            ("isPeriodic", "periodic"),
+            ("isRational", "rational"),
+        ):
+            if not hasattr(geometry, method_name):
+                continue
+            try:
+                item[output_key] = bool(getattr(geometry, method_name)())
+            except Exception:
+                pass
+        if sketch is not None and hasattr(sketch, "detectDegeneratedGeometries"):
+            try:
+                degenerate_count = int(sketch.detectDegeneratedGeometries(index))
+            except Exception:
+                degenerate_count = 0
+            item["internal_degenerate_geometry_count"] = degenerate_count
+            if degenerate_count > 0:
+                item["degenerate"] = True
         return item
 
     @staticmethod
@@ -1132,6 +1438,7 @@ class VibeCADService:
                 )
             if expression is not None:
                 item["expression"] = expression
+        internal_geometry = self._sketch_internal_geometry_summary(sketch, geometry)
         return {
             "found": True,
             "sketch": self._object_summary(sketch),
@@ -1142,8 +1449,69 @@ class VibeCADService:
                 for index, item in enumerate(geometry[:50])
             ],
             "constraints": constraint_summaries,
+            "internal_geometry": internal_geometry,
             "profile_status": self._sketch_profile_status(sketch),
             "next_actions": self._sketch_next_actions(sketch),
+        }
+
+    @staticmethod
+    def _sketch_internal_geometry_summary(
+        sketch: Any,
+        geometry: list[Any] | None = None,
+    ) -> dict[str, Any]:
+        geometry = list(geometry or getattr(sketch, "Geometry", []) or [])
+        try:
+            facades = list(getattr(sketch, "GeometryFacadeList", []) or [])
+        except Exception:
+            facades = []
+        dependent_parameters: list[dict[str, Any]] = []
+        if hasattr(sketch, "getGeometryWithDependentParameters"):
+            try:
+                raw_dependencies = list(sketch.getGeometryWithDependentParameters() or [])
+            except Exception:
+                raw_dependencies = []
+            for item in raw_dependencies[:80]:
+                try:
+                    dependent_parameters.append(
+                        {
+                            "geometry_index": int(item[0]),
+                            "parameter_index": int(item[1]),
+                        }
+                    )
+                except Exception:
+                    dependent_parameters.append({"raw": str(item)})
+        degenerate_geometry: list[dict[str, Any]] = []
+        if hasattr(sketch, "detectDegeneratedGeometries"):
+            for index in range(len(geometry)):
+                try:
+                    count = int(sketch.detectDegeneratedGeometries(index))
+                except Exception:
+                    continue
+                if count > 0:
+                    degenerate_geometry.append(
+                        {
+                            "geometry_index": index,
+                            "geometry_handle": f"geometry:{index}",
+                            "type": geometry[index].__class__.__name__,
+                            "degenerate_count": count,
+                        }
+                    )
+        return {
+            "geometry_count": len(geometry),
+            "geometry_facade_count": len(facades),
+            "dependent_parameter_count": len(dependent_parameters),
+            "dependent_parameters": dependent_parameters,
+            "degenerate_geometry_count": len(degenerate_geometry),
+            "degenerate_geometry": degenerate_geometry,
+            "has_internal_or_dependent_geometry": bool(
+                len(facades) != len(geometry)
+                or dependent_parameters
+                or degenerate_geometry
+            ),
+            "note": (
+                "Read-only internal Sketcher metadata. VibeCAD does not expose or delete "
+                "internal geometry during inspection."
+            ),
         }
 
     def _sketch_profile_status(self, sketch: Any | None) -> dict[str, Any]:
@@ -2130,6 +2498,18 @@ class VibeCADService:
     ) -> dict[str, Any]:
         return self._project_store.update_summary(title=title, summary=summary)
 
+    def update_design_preflight(self, preflight: dict[str, Any]) -> dict[str, Any]:
+        return self._project_store.update_design_preflight(preflight)
+
+    def update_design_memory(self, memory_update: dict[str, Any]) -> dict[str, Any]:
+        return self._project_store.update_design_memory(memory_update)
+
+    def record_design_preflight_answers(
+        self,
+        answers: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        return self._project_store.record_design_preflight_answers(answers)
+
     def queue_steering_message(self, text: str, source: str = "user") -> dict[str, Any]:
         clean = str(text or "").strip()
         if not clean:
@@ -2372,6 +2752,12 @@ class VibeCADService:
         self._conversation_cache = conversation
         self._conversation_cache_key = str(path)
         self._write_conversation(path, conversation)
+        if role == "user":
+            self._project_store.record_requirement_memory(
+                role=role,
+                content=clean_content,
+                metadata=metadata,
+            )
         return self.conversation_history()
 
     def report_view_errors(self) -> dict[str, Any]:
@@ -3092,25 +3478,14 @@ class VibeCADService:
     def provider_context_summary(self) -> dict[str, Any]:
         """Return the scoped context sent to the OpenAI CAD operator.
 
-        The general UI context intentionally contains summaries for every
-        supported workbench. The provider context must stay narrower: current
-        document, active workbench, visual/task state, conversation for this
-        document, and only the domain summaries relevant to the active
-        workbench. Direct function tools carry the callable surface.
+        The general UI context intentionally contains broad summaries. The
+        provider context stays narrow: current document, active workbench,
+        visual/reference state, conversation, and domain state for the active
+        workbench. Auth/model settings are resolved before this context is sent;
+        direct function tools carry the callable surface.
         """
-        auth = self.auth_state()
         active_workbench = self.active_workbench_name()
         context: dict[str, Any] = {
-            "auth": {
-                "status": auth.status.value,
-                "source": auth.source,
-                "configured": auth.can_call_provider,
-            },
-            "provider": {
-                "model": self.provider_model(),
-                "reasoning_effort": self.provider_reasoning_effort(),
-                "use_online_by_default": self.use_online_provider_by_default(),
-            },
             "workbench": active_workbench,
             "vibecad_project": self.project_context(),
             "human_steering": self.steering_state(),
@@ -3120,12 +3495,6 @@ class VibeCADService:
             "task_panel": self.task_panel_summary(),
             "view_screenshot": self.view_screenshot_summary(),
             "reference_images": self.reference_images_summary(),
-            "workbench_tool_pack": self.workbench_tool_pack_summary(),
-            "workbench_commands": self.workbench_command_summary(),
-            "workbench_object_templates": self.workbench_object_templates(),
-            "workbench_objects": self.workbench_object_summary(),
-            "provider_tool_surface": self.provider_tool_surface(active_workbench),
-            "tool_shape_report": self.tool_shape_report(active_workbench),
             "conversation": self.conversation_history(),
             "report_view_errors": self.report_view_errors(),
         }

@@ -9,6 +9,7 @@ Replaces the retired single-operation tools ``sketcher.trim_geometry``,
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from .common import (
@@ -26,16 +27,9 @@ OPERATIONS = ("trim", "extend", "split", "fillet")
 TOOL_SPEC = {
     "name": "sketcher.modify_geometry",
     "description": (
-        "Modify existing native Sketcher geometry in place with one of four operations. "
-        "operation='trim': trim one curve at the picked sketch-space point (requires x, y). "
-        "operation='extend': extend one line/arc endpoint by a signed increment (requires "
-        "endpoint, increment). "
-        "operation='split': split one curve at the picked sketch-space point (requires x, y). "
-        "operation='fillet': create a fillet or chamfer between two curves or at a coincident "
-        "endpoint (requires radius; two-curve mode also requires second_geometry plus "
-        "first/second reference points). Equivalent to Sketcher's trim/extend/split/fillet "
-        "workbench tools. Reshapes existing curves — use sketcher.transform_geometry to "
-        "move/copy/mirror/offset/array whole elements and sketcher.move_point to drag one point."
+        "Trim, extend, split, fillet, or chamfer existing Sketcher geometry. "
+        "Use to repair authored curves/segments; do not use fillets as a "
+        "substitute for drawing required base curves."
     ),
     "contextual": True,
     "parameters": {
@@ -294,6 +288,18 @@ def _run_fillet(
         invalid = validate_geometry_index(sketch, second_index)
         if invalid:
             return invalid
+    resolved_references = _resolve_fillet_references(
+        sketch,
+        first_index,
+        second_index,
+        first_reference_x,
+        first_reference_y,
+        second_reference_x,
+        second_reference_y,
+        float(radius),
+    )
+    if not resolved_references.get("ok"):
+        return resolved_references
 
     def _fillet() -> dict[str, Any]:
         import FreeCAD as App
@@ -314,21 +320,19 @@ def _run_fillet(
             )
             reference_mode = "coincident_point"
         else:
-            if None in (first_reference_x, first_reference_y, second_reference_x, second_reference_y):
-                raise ValueError(
-                    "first_reference_x/y and second_reference_x/y are required when second_geometry is provided."
-                )
+            first_ref = resolved_references["first_reference"]
+            second_ref = resolved_references["second_reference"]
             target.fillet(
                 first_index,
                 second_index,
-                App.Vector(float(first_reference_x), float(first_reference_y), 0.0),
-                App.Vector(float(second_reference_x), float(second_reference_y), 0.0),
+                App.Vector(float(first_ref[0]), float(first_ref[1]), 0.0),
+                App.Vector(float(second_ref[0]), float(second_ref[1]), 0.0),
                 float(radius),
                 int(bool(trim)),
                 bool(preserve_corner),
                 bool(chamfer),
             )
-            reference_mode = "two_curve_references"
+            reference_mode = str(resolved_references["reference_mode"])
         doc = App.ActiveDocument
         if doc is not None:
             doc.recompute()
@@ -347,6 +351,8 @@ def _run_fillet(
             "second_geometry_handle": second_geometry_handle
             or (f"geometry:{second_index}" if second_index is not None else None),
             "reference_mode": reference_mode,
+            "first_reference": resolved_references.get("first_reference"),
+            "second_reference": resolved_references.get("second_reference"),
             "radius": float(radius),
             "trim": bool(trim),
             "preserve_corner": bool(preserve_corner),
@@ -358,3 +364,132 @@ def _run_fillet(
         }
 
     return active_response(service, sketch, run_freecad_transaction("Create Sketcher fillet/chamfer", _fillet))
+
+
+def _point_xy(point: Any) -> tuple[float, float] | None:
+    try:
+        return (float(point.x), float(point.y))
+    except Exception:
+        return None
+
+
+def _geometry_endpoints(geometry: Any) -> list[dict[str, Any]]:
+    endpoints: list[dict[str, Any]] = []
+    for role, attr in (("start", "StartPoint"), ("end", "EndPoint")):
+        point = _point_xy(getattr(geometry, attr, None))
+        if point is not None:
+            endpoints.append({"role": role, "point": [point[0], point[1]]})
+    return endpoints
+
+
+def _distance2(a: list[float], b: list[float]) -> float:
+    return (float(a[0]) - float(b[0])) ** 2 + (float(a[1]) - float(b[1])) ** 2
+
+
+def _offset_reference_from_corner(geometry: Any, role: str, radius: float) -> list[float] | None:
+    start = _point_xy(getattr(geometry, "StartPoint", None))
+    end = _point_xy(getattr(geometry, "EndPoint", None))
+    if start is None or end is None:
+        return None
+    corner = start if role == "start" else end
+    opposite = end if role == "start" else start
+    dx = opposite[0] - corner[0]
+    dy = opposite[1] - corner[1]
+    length = math.hypot(dx, dy)
+    if length <= 1e-9:
+        return None
+    offset = min(max(float(radius) * 0.5, 0.01), length * 0.45)
+    return [
+        corner[0] + dx / length * offset,
+        corner[1] + dy / length * offset,
+    ]
+
+
+def _endpoint_candidates(sketch: Any, first_index: int, second_index: int | None) -> dict[str, Any]:
+    geometry = list(getattr(sketch, "Geometry", []) or [])
+    result: dict[str, Any] = {
+        "first_geometry": first_index,
+        "first_endpoints": _geometry_endpoints(geometry[first_index]) if 0 <= first_index < len(geometry) else [],
+    }
+    if second_index is not None:
+        result["second_geometry"] = second_index
+        result["second_endpoints"] = (
+            _geometry_endpoints(geometry[second_index]) if 0 <= second_index < len(geometry) else []
+        )
+    return result
+
+
+def _resolve_fillet_references(
+    sketch: Any,
+    first_index: int,
+    second_index: int | None,
+    first_reference_x: float | None,
+    first_reference_y: float | None,
+    second_reference_x: float | None,
+    second_reference_y: float | None,
+    radius: float,
+) -> dict[str, Any]:
+    if second_index is None:
+        return {"ok": True, "reference_mode": "coincident_point"}
+    if None not in (first_reference_x, first_reference_y, second_reference_x, second_reference_y):
+        return {
+            "ok": True,
+            "reference_mode": "two_curve_references",
+            "first_reference": [float(first_reference_x), float(first_reference_y)],
+            "second_reference": [float(second_reference_x), float(second_reference_y)],
+        }
+    geometry = list(getattr(sketch, "Geometry", []) or [])
+    first_geo = geometry[first_index]
+    second_geo = geometry[second_index]
+    first_endpoints = _geometry_endpoints(first_geo)
+    second_endpoints = _geometry_endpoints(second_geo)
+    pairs: list[dict[str, Any]] = []
+    tolerance2 = 1e-10
+    for first in first_endpoints:
+        for second in second_endpoints:
+            distance2 = _distance2(first["point"], second["point"])
+            if distance2 <= tolerance2:
+                pairs.append(
+                    {
+                        "first_role": first["role"],
+                        "second_role": second["role"],
+                        "point": first["point"],
+                        "distance": math.sqrt(distance2),
+                    }
+                )
+    if len(pairs) == 1:
+        pair = pairs[0]
+        first_ref = _offset_reference_from_corner(first_geo, str(pair["first_role"]), radius)
+        second_ref = _offset_reference_from_corner(second_geo, str(pair["second_role"]), radius)
+        if first_ref is not None and second_ref is not None:
+            return {
+                "ok": True,
+                "reference_mode": "inferred_shared_endpoint",
+                "shared_endpoint": pair,
+                "first_reference": first_ref,
+                "second_reference": second_ref,
+            }
+    return {
+        "ok": False,
+        "error": (
+            "operation='fillet' with second_geometry needs an unambiguous shared endpoint "
+            "or explicit first_reference_x/y and second_reference_x/y pick points."
+        ),
+        "reference_mode": "needs_explicit_two_curve_references",
+        "endpoint_candidates": _endpoint_candidates(sketch, first_index, second_index),
+        "required_next_action": {
+            "tool": "sketcher.modify_geometry",
+            "arguments": {
+                "operation": "fillet",
+                "sketch_name": getattr(sketch, "Name", None),
+                "first_geometry": first_index,
+                "second_geometry": second_index,
+                "first_reference_x": "<point on first curve near desired corner>",
+                "first_reference_y": "<point on first curve near desired corner>",
+                "second_reference_x": "<point on second curve near desired corner>",
+                "second_reference_y": "<point on second curve near desired corner>",
+                "radius": radius,
+            },
+            "why": "The tool cannot infer which side of the two curves to fillet.",
+        },
+    }

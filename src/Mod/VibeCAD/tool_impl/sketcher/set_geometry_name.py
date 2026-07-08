@@ -21,9 +21,8 @@ from .common import (
 TOOL_SPEC = {
     "name": "sketcher.set_geometry_name",
     "description": (
-        "Assign a semantic VibeCAD name to existing native Sketcher geometry. FreeCAD executes "
-        "geometry operations natively; this stores design-intent metadata so later tools can "
-        "target name:<name> and detect stale/ambiguous topology after edits."
+        "Assign a semantic name to existing Sketcher geometry so later tools "
+        "can target name:<name> and detect stale topology."
     ),
     "contextual": True,
     "parameters": {

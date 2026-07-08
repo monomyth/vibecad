@@ -149,8 +149,8 @@ class WorkbenchToolPack:
 WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
     "AssemblyWorkbench": WorkbenchToolPack(
         "AssemblyWorkbench",
-        "assembly constraints and product structure",
-        "Prefer assembly-aware inspection and joint commands before changing geometry.",
+        "assemblies",
+        "Components, joints, solve, clash.",
         ("Assembly_",),
         ("Assembly::AssemblyObject",),
         ({"name": "assembly", "object_type": "Assembly::AssemblyObject"},),
@@ -158,8 +158,8 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
     ),
     "BIMWorkbench": WorkbenchToolPack(
         "BIMWorkbench",
-        "building information modeling",
-        "Preserve IFC/BIM semantics and prefer non-destructive inspection when IFC support is unavailable.",
+        "BIM",
+        "Preserve BIM/IFC.",
         ("BIM_", "Arch_", "Draft_"),
         ("Arch::", "BIM::"),
         (
@@ -169,18 +169,8 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
     ),
     "CAMWorkbench": WorkbenchToolPack(
         "CAMWorkbench",
-        "toolpaths and manufacturing setup",
-        (
-            "Machine-first machining: define or select a saved machine (axis "
-            "limits, spindle, postprocessor) with cam.define_machine, create a "
-            "job bound to that machine with cam.create_job, add tool "
-            "controllers within the machine's spindle limits with "
-            "cam.add_tool, create machining operations with "
-            "cam.create_operation, then validate the job against the machine "
-            "with cam.validate_job before post-processing G-code with "
-            "cam.postprocess. Treat CAM operations as high-risk until "
-            "validated; never emit G-code from an unvalidated job."
-        ),
+        "CAM",
+        "Machine, job, toolpath, validate, post.",
         ("CAM_",),
         (),
         ({"name": "job_container", "object_type": "App::DocumentObjectGroup"},),
@@ -188,8 +178,8 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
     ),
     "DraftWorkbench": WorkbenchToolPack(
         "DraftWorkbench",
-        "2D drafting and annotation",
-        "Prefer Draft commands for 2D geometry, snaps, dimensions, and annotation.",
+        "drafting",
+        "2D/3D curves, arrays.",
         ("Draft_",),
         ("Part::Part2DObject",),
         (
@@ -200,8 +190,8 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
     ),
     "FemWorkbench": WorkbenchToolPack(
         "FemWorkbench",
-        "finite element analysis",
-        "Inspect materials, constraints, mesh, and solver setup before changing analysis data.",
+        "FEA",
+        "Loads, mesh, solve.",
         ("Fem_",),
         ("Fem::",),
         (
@@ -211,8 +201,8 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
     ),
     "InspectionWorkbench": WorkbenchToolPack(
         "InspectionWorkbench",
-        "measurement and inspection",
-        "Use inspection tools for measurement workflows and avoid geometry mutation by default.",
+        "inspection",
+        "Measure.",
         ("Inspection_",),
         (),
         ({"name": "inspection_group", "object_type": "App::DocumentObjectGroup"},),
@@ -220,7 +210,7 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
     "MaterialWorkbench": WorkbenchToolPack(
         "MaterialWorkbench",
         "materials",
-        "Preserve material-card structure and prefer explicit material assignment actions.",
+        "Material/appearance.",
         ("Material_", "Mat"),
         (),
         ({"name": "material_group", "object_type": "App::DocumentObjectGroup"},),
@@ -228,16 +218,16 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
     ),
     "MeshWorkbench": WorkbenchToolPack(
         "MeshWorkbench",
-        "mesh repair and editing",
-        "Treat mesh simplification and repair as destructive edits: inspect the mesh and state the intended repair before modifying it.",
+        "mesh",
+        "Inspect/repair mesh.",
         ("Mesh_",),
         ("Mesh::",),
         ({"name": "mesh_group", "object_type": "App::DocumentObjectGroup"},),
     ),
     "MeshPartWorkbench": WorkbenchToolPack(
         "MeshPartWorkbench",
-        "mesh/part conversion",
-        "Use MeshPart tessellation tools for explicit Part-to-mesh workflows; choose deviation/angle settings deliberately and verify the generated mesh against the source solid.",
+        "mesh conversion",
+        "Mesh<->BREP; verify source.",
         ("MeshPart_",),
         ("Mesh::", "Part::"),
         ({"name": "mesh_from_shape", "object_type": "Mesh::Feature"},),
@@ -245,37 +235,23 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
     "NoneWorkbench": WorkbenchToolPack(
         "NoneWorkbench",
         "no active workbench",
-        "Use core document, selection, and view tools until a modeling workbench is active.",
+        "Inspect; enter workspace.",
         (),
         (),
         ({"name": "context_group", "object_type": "App::DocumentObjectGroup"},),
     ),
     "OpenSCADWorkbench": WorkbenchToolPack(
         "OpenSCADWorkbench",
-        "OpenSCAD import and CSG operations",
-        "Inspect imported CSG trees before replacement or refinement operations.",
+        "CSG",
+        "Inspect CSG.",
         ("OpenSCAD_",),
         (),
         ({"name": "csg_group", "object_type": "App::DocumentObjectGroup"},),
     ),
     "PartDesignWorkbench": WorkbenchToolPack(
         "PartDesignWorkbench",
-        "parametric solid features",
-        (
-            "Model skeleton-first: create a Body, then a master layout sketch on an "
-            "origin or datum plane that carries the governing dimensions, axes, and "
-            "symmetry lines of the part. Downstream sketches reference that layout via "
-            "external geometry instead of re-typing values; derived dimensions use "
-            "constraint expressions so one governing change updates the whole part. "
-            "Choose each feature by the surface character it must produce: pad/pocket "
-            "for prismatic walls, revolve/groove for rotational bodies, loft_profiles "
-            "or sweep_profile for blades, fins, ducts, and other flow or transition "
-            "surfaces (never a straight pad), helix_profile for threads and springs. "
-            "Order the feature tree deliberately: datums, base feature, additive, "
-            "subtractive, patterns, dressups last. Fully constrain every sketch and "
-            "verify each feature's shape delta against the intended dimensions before "
-            "building on it."
-        ),
+        "solids",
+        "Body, sketch, feature. Match form; verify DoF/topology.",
         ("PartDesign_", "Sketcher_"),
         ("PartDesign::", "Sketcher::SketchObject"),
         (
@@ -286,8 +262,8 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
     ),
     "PartWorkbench": WorkbenchToolPack(
         "PartWorkbench",
-        "boundary-representation solids",
-        "Use Part operations for placement, holes, dressups, and boolean modeling; preserve object labels.",
+        "BREP",
+        "Direct BREP edit.",
         ("Part_",),
         ("Part::",),
         (
@@ -300,7 +276,7 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
     "PointsWorkbench": WorkbenchToolPack(
         "PointsWorkbench",
         "point clouds",
-        "Treat point-cloud modification as write operations and preserve original imports.",
+        "Preserve cloud.",
         ("Points_",),
         ("Points::",),
         ({"name": "points_group", "object_type": "App::DocumentObjectGroup"},),
@@ -308,7 +284,7 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
     "ReverseEngineeringWorkbench": WorkbenchToolPack(
         "ReverseEngineeringWorkbench",
         "reverse engineering",
-        "Prefer inspection and surface reconstruction actions over destructive mesh edits.",
+        "Reconstruct surfaces.",
         ("ReverseEngineering_",),
         (),
         ({"name": "reverse_engineering_group", "object_type": "App::DocumentObjectGroup"},),
@@ -316,22 +292,15 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
     "RobotWorkbench": WorkbenchToolPack(
         "RobotWorkbench",
         "robot simulation",
-        "Inspect trajectories and robot setup before changing simulation data.",
+        "Trajectories/setup.",
         ("Robot_",),
         ("Robot::",),
         ({"name": "robot_simulation_group", "object_type": "App::DocumentObjectGroup"},),
     ),
     "SketcherWorkbench": WorkbenchToolPack(
         "SketcherWorkbench",
-        "2D constrained sketches",
-        (
-            "Anchor every sketch to the origin and exploit symmetry about the axes. "
-            "Reuse existing model edges through external geometry instead of redrawing "
-            "or re-measuring them, and drive derived dimensions with constraint "
-            "expressions referencing the governing values. Fully constrain sketches "
-            "before they drive features; dimension from part function, not arbitrary "
-            "values, and use construction geometry for layout lines and centers."
-        ),
+        "sketching",
+        "Lines/arcs/splines/slots. Constrain; DoF 0.",
         ("Sketcher_",),
         ("Sketcher::SketchObject",),
         ({"name": "sketch", "object_type": "Sketcher::SketchObject"},),
@@ -339,8 +308,8 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
     ),
     "SpreadsheetWorkbench": WorkbenchToolPack(
         "SpreadsheetWorkbench",
-        "spreadsheet data",
-        "Treat cell edits as document writes and preserve alias/formula relationships.",
+        "spreadsheet",
+        "Aliases/formulas.",
         ("Spreadsheet_",),
         ("Spreadsheet::Sheet",),
         ({"name": "sheet", "object_type": "Spreadsheet::Sheet"},),
@@ -348,15 +317,8 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
     ),
     "SurfaceWorkbench": WorkbenchToolPack(
         "SurfaceWorkbench",
-        "surface modeling",
-        (
-            "Model surface-first: create boundary curves (sketches or 3D wires "
-            "via draft.create_wire), fill or loft surfaces between them with "
-            "surface.create_surface, then convert to a solid with "
-            "part.thicken_surface when a manufacturable part is the goal. "
-            "Inspect edge/face selection context before creating or changing "
-            "surface features."
-        ),
+        "surfaces",
+        "Curves, fills, sections, thicken.",
         ("Surface_",),
         ("Surface::",),
         (
@@ -368,8 +330,8 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
     ),
     "TechDrawWorkbench": WorkbenchToolPack(
         "TechDrawWorkbench",
-        "technical drawing pages and views",
-        "Prefer page/view/annotation commands and preserve drawing references.",
+        "drawings",
+        "Pages/views.",
         ("TechDraw_",),
         ("TechDraw::",),
         (
@@ -381,7 +343,7 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
     "TestWorkbench": WorkbenchToolPack(
         "TestWorkbench",
         "test framework",
-        "Prefer read-only inspection of test commands; run test commands only when the task explicitly calls for it.",
+        "Read-only.",
         ("Test_", "Std_Test"),
         (),
         ({"name": "test_group", "object_type": "App::DocumentObjectGroup"},),

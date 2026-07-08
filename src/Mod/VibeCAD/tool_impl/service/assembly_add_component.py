@@ -22,8 +22,8 @@ from .assembly_common import (
 from . import domain_runtime
 
 
-TOOL_SPEC = {'description': 'Add an existing document object (e.g. a PartDesign Body) to a '
-                'native Assembly as a component.',
+TOOL_SPEC = {'description': 'Add an existing Body or top-level part to a native Assembly. '
+                'Prefer the owning PartDesign Body over a nested feature object.',
  'name': 'assembly.add_component',
  'parameters': {'properties': {'assembly_name': {'description': 'Assembly name or label. Defaults to the first assembly in the document.',
                                                  'type': 'string'},

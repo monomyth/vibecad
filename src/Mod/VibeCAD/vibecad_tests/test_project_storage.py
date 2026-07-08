@@ -88,6 +88,43 @@ class TestVibeCADProject(unittest.TestCase):
             finally:
                 VibeCADProject._active_document_info = original
 
+    def test_design_memory_persists_in_project_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = VibeCADProjectStore(
+                f"unit-{time.time_ns()}",
+                index_path=root / "index.sqlite",
+            )
+            original = VibeCADProject._active_document_info
+            VibeCADProject._active_document_info = lambda: {
+                "document": "MemoryDoc",
+                "label": "Memory Doc",
+                "file_path": str(root / "Memory_Doc.FCStd"),
+                "saved": True,
+            }
+            try:
+                result = store.update_design_memory(
+                    {
+                        "user_intent": "Build a proper folding knife.",
+                        "known_failures": ["Blade belly could not close."],
+                        "verification_checks": ["Closed blade fits handle."],
+                    }
+                )
+                self.assertTrue(result["ok"])
+                context = store.context()
+                memory = context["design_memory"]
+                self.assertEqual(memory["user_intent"], "Build a proper folding knife.")
+                self.assertIn(
+                    "Blade belly could not close.",
+                    memory["known_failures"],
+                )
+                self.assertIn(
+                    "Closed blade fits handle.",
+                    memory["verification_checks"],
+                )
+            finally:
+                VibeCADProject._active_document_info = original
+
 
 
 class TestVibeCADStorageLayout(unittest.TestCase):

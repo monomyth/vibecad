@@ -18,16 +18,9 @@ from VibeCADTransactions import run_freecad_transaction
 TOOL_SPEC = {
     "contextual": True,
     "description": (
-        "Apply a native PartDesign dress-up feature to an existing PartDesign "
-        "feature. operation='fillet' rounds edges (radius, all edges by default "
-        "or explicit edge_names); operation='chamfer' bevels edges (size, all "
-        "edges by default or explicit edge_names); operation='draft' tapers "
-        "selected faces (face_names, neutral_plane_name, pull_direction_name, "
-        "angle); operation='thickness' shells the body: it hollows the solid "
-        "to a uniform wall thickness by removing the selected opening faces "
-        "(face_names, wall_thickness, inward). Use 'thickness' whenever the "
-        "design needs a shell, hollow interior, housing cavity, enclosure, or "
-        "manufacturable cast/molded wall-thickness control."
+        "Apply PartDesign fillet, chamfer, draft, or thickness after the base "
+        "shape is correct. Dressups refine edges/walls; they do not replace "
+        "missing curves, ribs, load paths, or mating geometry."
     ),
     "name": "partdesign.dressup",
     "parameters": {
@@ -153,6 +146,115 @@ def _validate_face_names(target: Any, selected_faces: list[str]) -> None:
             raise RuntimeError(f"Face name out of range for {target.Name}: {face_name}")
 
 
+def _shape_validity(obj: Any) -> dict[str, Any]:
+    shape = getattr(obj, "Shape", None)
+    if shape is None:
+        return {"available": False, "valid": None, "null": None}
+    try:
+        is_null = bool(shape.isNull())
+    except Exception:
+        is_null = None
+    try:
+        is_valid = None if is_null else bool(shape.isValid())
+    except Exception as exc:
+        return {
+            "available": True,
+            "valid": None,
+            "null": is_null,
+            "error": str(exc),
+        }
+    return {"available": True, "valid": is_valid, "null": is_null}
+
+
+def _invalid_base_response(
+    *,
+    operation: str,
+    feature_name: str,
+    feature: Any,
+    validity: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "error": (
+            f"Cannot apply PartDesign {operation}: base feature "
+            f"{getattr(feature, 'Name', feature_name)} has an invalid or null "
+            "shape. Re-picking edges or retrying the same dressup will not fix "
+            "this; repair the upstream feature/body first."
+        ),
+        "operation": operation,
+        "base_feature": getattr(feature, "Name", feature_name),
+        "base_feature_label": getattr(feature, "Label", feature_name),
+        "base_shape_validity": validity,
+        "recoverable": True,
+        "retry_same_call": False,
+        "required_state_before_retry": (
+            "The base feature and owning Body must recompute to a valid shape. "
+            "Inspect report-view errors and the source sketch/profile, repair "
+            "the upstream geometry, then find fresh edges and retry dressup "
+            "with corrected arguments."
+        ),
+    }
+
+
+def _is_invalid_geometry_failure(envelope: dict[str, Any]) -> bool:
+    chunks: list[str] = []
+    for key in ("error", "likely_cause"):
+        if envelope.get(key):
+            chunks.append(str(envelope[key]))
+    for line in envelope.get("recompute_errors", []) or []:
+        chunks.append(str(line))
+    transaction = envelope.get("transaction")
+    if isinstance(transaction, dict):
+        if transaction.get("error"):
+            chunks.append(str(transaction["error"]))
+        report = transaction.get("report_view_errors")
+        if isinstance(report, dict):
+            chunks.extend(str(item) for item in report.get("errors", []) or [])
+    text = " ".join(chunks).lower()
+    return any(
+        marker in text
+        for marker in (
+            "shape is invalid",
+            "brep_api",
+            "command not done",
+            "invalid edge link",
+            "result shape is null",
+            "failed to make face",
+        )
+    )
+
+
+def _mark_nonrepeatable_geometry_failure(
+    envelope: dict[str, Any],
+    *,
+    operation: str,
+    feature_name: str,
+) -> None:
+    envelope["recoverable"] = True
+    envelope["retry_same_call"] = False
+    envelope["base_feature"] = feature_name
+    envelope["required_state_before_retry"] = (
+        "Do not retry this same dressup call and do not keep re-picking edges "
+        "against the same invalid shape. First repair the upstream feature/body "
+        "until it recomputes as a valid solid, then run find_subelements again "
+        "and call partdesign.dressup with fresh edge/face names and corrected "
+        "radius/size."
+    )
+    envelope["required_next_action"] = {
+        "inspect": [
+            "core.get_report_view_errors",
+            "core.get_object_properties",
+        ],
+        "repair": "Fix or rebuild the upstream feature that made the Body invalid.",
+        "then": "Recompute, find fresh subelements, and retry partdesign.dressup.",
+    }
+    if envelope.get("error"):
+        envelope["error"] = (
+            f"PartDesign {operation} cannot proceed because the source geometry "
+            f"for {feature_name} is invalid. {envelope['error']}"
+        )
+
+
 def run(
     service: Any,
     operation: str = "",
@@ -184,6 +286,16 @@ def run(
         return {"ok": False, "error": f"PartDesign feature not found: {feature_name}"}
     if not str(getattr(feature, "TypeId", "")).startswith("PartDesign::"):
         return {"ok": False, "error": f"Object is not a PartDesign feature: {feature_name}"}
+    base_validity = _shape_validity(feature)
+    if base_validity.get("available") and (
+        base_validity.get("null") is True or base_validity.get("valid") is False
+    ):
+        return _invalid_base_response(
+            operation=op or str(operation or ""),
+            feature_name=feature_name,
+            feature=feature,
+            validity=base_validity,
+        )
 
     neutral_plane = None
     pull_direction = None
@@ -353,4 +465,10 @@ def run(
         # Dress-up failures (e.g. an impossible radius producing an invalid
         # shape) roll back cleanly and are retryable with adjusted parameters.
         envelope["recoverable"] = True
+        if _is_invalid_geometry_failure(envelope):
+            _mark_nonrepeatable_geometry_failure(
+                envelope,
+                operation=op,
+                feature_name=getattr(feature, "Name", feature_name),
+            )
     return envelope

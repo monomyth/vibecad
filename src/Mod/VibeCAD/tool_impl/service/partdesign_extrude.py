@@ -17,11 +17,9 @@ from VibeCADTransactions import run_freecad_transaction
 TOOL_SPEC = {
     "contextual": True,
     "description": (
-        "Create a native PartDesign Pad or Pocket from an existing sketch. "
-        "operation='pad' adds material; operation='pocket' removes material. "
-        "The default prismatic feature — for revolved shapes use "
-        "partdesign.revolve, for swept/lofted shapes use sweep_profile or "
-        "loft_profiles."
+        "Create a PartDesign Pad or Pocket from a closed sketch. Use only for "
+        "prismatic material; use revolve, sweep, or loft for curved, twisted, "
+        "blade, duct, or varying-section geometry."
     ),
     "name": "partdesign.extrude",
     "parameters": {

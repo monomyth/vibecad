@@ -9,6 +9,8 @@ from importlib import import_module
 
 TOOL_MODULES = {
     "core.get_current_freecad_context": "provider_tools.core_get_current_freecad_context",
+    "core.submit_design_preflight": "provider_tools.core_submit_design_preflight",
+    "core.update_design_memory": "provider_tools.core_update_design_memory",
     "core.get_active_document": "provider_tools.core_get_active_document",
     "core.get_selection": "provider_tools.core_get_selection",
     "core.get_view_state": "provider_tools.core_get_view_state",

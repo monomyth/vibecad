@@ -20,14 +20,10 @@ from .common import (
 TOOL_SPEC = {
     "name": "sketcher.edit_constraint",
     "description": (
-        "Edit or inspect one existing Sketcher constraint. Actions: 'set_value' changes a dimension "
-        "datum (Distance/DistanceX/DistanceY/Radius/Diameter in mm, Angle in degrees); 'set_name' "
-        "renames a constraint; 'set_driving' toggles driving/reference mode; 'set_expression' binds "
-        "or clears (empty string) a spreadsheet/parameter expression on a dimensional constraint; "
-        "'get' resolves a constraint to its index and full summary without mutating. The target "
-        "constraint may be addressed by constraint_index, constraint_name, or a constraint_handle "
-        "such as constraint:3 or name:width. Edits existing constraints only — use "
-        "sketcher.add_constraint to create new ones and sketcher.delete_items to remove them."
+        "Edit or inspect an existing Sketcher constraint. Use set_value, "
+        "set_name, set_driving, set_expression, or get. Address by index, "
+        "name, or handle. Creates nothing; use sketcher.add_constraint for "
+        "new constraints."
     ),
     "contextual": True,
     "parameters": {

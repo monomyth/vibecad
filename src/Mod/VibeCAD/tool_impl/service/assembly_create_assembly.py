@@ -22,8 +22,9 @@ from .assembly_common import (
 from . import domain_runtime
 
 
-TOOL_SPEC = {'description': 'Create a native Assembly container for positioning multiple '
-                'components together, optionally adding existing objects at creation.',
+TOOL_SPEC = {'description': 'Create a native Assembly container for real components. '
+                'Add owning Bodies or top-level parts, then ground and joint them; '
+                'raw placement is only layout.',
  'name': 'assembly.create_assembly',
  'parameters': {'properties': {'component_names': {'description': 'Existing object names or labels to add as components.',
                                                    'items': {'type': 'string'},

@@ -8,11 +8,8 @@ from VibeCADTransactions import run_freecad_transaction
 
 
 TOOL_SPEC = {'contextual': True,
- 'description': 'Fallback: run a registered FreeCAD GUI command by exact name, like a '
-                'human clicking that tool, and return resulting document and '
-                'task-panel state. Use only when no structured VibeCAD tool covers '
-                'the operation; find names via core.list_active_workbench_commands. '
-                'May open a task panel needing core.wait_for_user_gui_action.',
+ 'description': 'Fallback: run an exact FreeCAD GUI command. Use only when no '
+                'structured VibeCAD tool covers the operation; may open a task panel.',
  'name': 'core.run_workbench_command',
  'parameters': {'properties': {'command_name': {'description': 'Exact registered GUI '
                                                                'command name, e.g. '

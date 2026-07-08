@@ -18,13 +18,9 @@ from . import domain_runtime
 
 TOOL_SPEC = {
     "description": (
-        "Thicken an existing surface, shell, or face object into a solid by "
-        "offsetting it by the given thickness and filling the offset volume "
-        "(Part Offset with Fill). Use this to convert Surface workbench "
-        "features (surface.create_surface results) or other open shells "
-        "into manufacturable solids. Positive thickness offsets along the "
-        "surface normal, negative against it. For hollowing an existing "
-        "solid into a shell instead, use part.dressup operation='thickness'."
+        "Thicken a surface, shell, or face object into a solid by offsetting "
+        "and filling it. Use after surface modeling; use thickness dressup "
+        "instead to hollow an existing solid."
     ),
     "name": "part.thicken_surface",
     "parameters": {

@@ -23,17 +23,9 @@ SCRIPT_FILENAME = "<vibecad_build_script>"
 TOOL_SPEC = {
     "contextual": True,
     "description": (
-        "Author or modify a complete parametric model by executing one FreeCAD "
-        "Python script inside a single undoable transaction. The script runs with "
-        "App (FreeCAD), Gui (FreeCADGui, when available), Part, Sketcher, and math "
-        "pre-imported and the active document as `doc` (created automatically when "
-        "missing). Write the WHOLE design increment in one script: named "
-        "dimension parameters at the top, sketches with constraints, PartDesign "
-        "feature history, booleans, fillets/chamfers. On any exception the entire "
-        "transaction is rolled back and the error report includes the script "
-        "traceback with the failing line, so fix the script and resubmit. On "
-        "success the result includes created/changed objects, per-solid validity, "
-        "and captured stdout for print()-based self-checks."
+        "Execute one FreeCAD Python script as a single undoable transaction. "
+        "Use named dimensions, editable feature history, and self-checks. "
+        "Exceptions roll back and report the failing line."
     ),
     "name": "model.build_from_script",
     "parameters": {
@@ -189,17 +181,15 @@ def run(
         response["stderr"] = result.get("stderr", "")
         invalid = [item for item in response["solid_validity"] if not item.get("valid")]
         if invalid:
-            response["warnings"] = [
-                "Some solids are invalid; inspect and fix before reporting completion."
-            ]
+            response["warnings"] = ["Invalid solids; fix."]
         response["next_actions"] = [
             {
                 "tool": "model.get_geometry_report",
-                "why": "Verify dimensions, validity, and feature health of the built model.",
+                "why": "Verify geometry.",
             },
             {
                 "tool": "core.capture_view_screenshot",
-                "why": "Visually review the result from multiple views before continuing.",
+                "why": "Review view.",
             },
         ]
     else:

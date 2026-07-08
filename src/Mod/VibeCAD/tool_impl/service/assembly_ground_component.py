@@ -12,10 +12,8 @@ from .assembly_common import resolve_existing_component
 from . import domain_runtime
 
 
-TOOL_SPEC = {'description': 'Anchor one assembly component with a grounded joint so the '
-                'kinematic solver has a fixed reference. Every assembly with joints needs '
-                'exactly one grounded component; all other components are positioned '
-                'relative to it by joints.',
+TOOL_SPEC = {'description': 'Ground one assembly component as the fixed solver reference. '
+                'Use exactly one grounded component per jointed assembly.',
  'name': 'assembly.ground_component',
  'parameters': {'properties': {'assembly_name': {'description': 'Assembly name or label. Defaults to the first assembly in the document.',
                                                  'type': 'string'},

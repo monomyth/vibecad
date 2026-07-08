@@ -19,11 +19,8 @@ ORIENTATION_METHODS = {
 ALLOWED_ORIENTATIONS = tuple(ORIENTATION_METHODS) + ("none",)
 
 
-TOOL_SPEC = {'description': 'Frame the 3D view before inspecting or capturing it: set a '
-                'standard camera orientation, optionally fit all visible geometry, '
-                'and show/hide specific objects by name. Use before '
-                'core.capture_view_screenshot (with orientation=none there) to '
-                'control exactly what a screenshot shows.',
+TOOL_SPEC = {'description': 'Set camera orientation, visibility, and fit before '
+                'inspection or screenshot capture.',
  'name': 'core.set_view',
  'parameters': {'properties': {'orientation': {'description': 'Standard camera orientation: '
                 'front, top, right, rear, bottom, left, isometric, axometric, or '

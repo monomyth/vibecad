@@ -11,10 +11,8 @@ from . import cam_runtime
 
 TOOL_SPEC = {
     "description": (
-        "Define a CNC machine configuration and save it for use by CAM jobs: "
-        "axis travel limits, spindle RPM range and power, post-processor, and "
-        "tool-length-offset output. Saved machines can be assigned to jobs and "
-        "are enforced by cam.validate_job and cam.postprocess."
+        "Define a saved CNC machine: axis limits, spindle range, postprocessor, "
+        "and tool-length-offset behavior. CAM jobs validate against it."
     ),
     "name": "cam.define_machine",
     "parameters": {

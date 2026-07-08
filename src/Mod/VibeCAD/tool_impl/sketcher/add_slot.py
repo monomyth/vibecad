@@ -13,10 +13,8 @@ from .common import active_response, get_sketch, no_sketch, run_freecad_transact
 TOOL_SPEC = {
     "name": "sketcher.add_slot",
     "description": (
-        "Add one constrained native Sketcher slot profile using two straight segments "
-        "and two semicircular arcs. The legacy length parameter means overall "
-        "end-to-end slot length. Prefer explicit overall_length or center_distance "
-        "to avoid ambiguity."
+        "Add one constrained slot profile: two straight sides and two "
+        "semicircular ends. Prefer overall_length or center_distance."
     ),
     "contextual": True,
     "parameters": {

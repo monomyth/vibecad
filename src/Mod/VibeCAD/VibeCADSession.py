@@ -7,7 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import inspect
 import json
-import os
+import re
 import time
 from typing import Any, Callable
 
@@ -20,95 +20,186 @@ from VibeCADProvider import (
     ProviderUnavailable,
 )
 from VibeCADTools import SafetyLevel
-from VibeCADWorkbenchTools import WORKBENCH_TOOL_PACKS, get_tool_pack
+from VibeCADWorkbenchTools import get_tool_pack
+from provider_tools.base import provider_function_name
 
 MAX_AUTONOMOUS_PROVIDER_TURNS: int | None = None
 MAX_AUTONOMOUS_PROVIDER_SECONDS: float | None = None
-MAX_OPERATION_SCORE_PER_PROVIDER_TURN = 32
-MAX_OPERATION_SCORE_PER_PROVIDER_TURN_ENV = "VIBECAD_MAX_OPERATION_SCORE_PER_PROVIDER_TURN"
-MAX_MUTATING_TOOL_CALLS_PER_PROVIDER_TURN = MAX_OPERATION_SCORE_PER_PROVIDER_TURN
-MAX_MUTATING_TOOL_CALLS_PER_PROVIDER_TURN_ENV = (
-    "VIBECAD_MAX_MUTATING_TOOL_CALLS_PER_PROVIDER_TURN"
-)
+REFERENCE_BRIEF_MARKER = "REFERENCE_BRIEF_JSON:"
+DESIGN_PREFLIGHT_SCHEMA = "vibecad-design-preflight-v1"
+DESIGN_PREFLIGHT_BUILD_READY = "build_ready"
+DESIGN_PREFLIGHT_NEEDS_USER = "needs_user"
+DESIGN_PREFLIGHT_SUBMIT_TOOL = "core.submit_design_preflight"
+DESIGN_PREFLIGHT_CONTINUATION_PROMPTS = {
+    "continue",
+    "continue.",
+    "continue please",
+    "keep going",
+    "keep going please",
+    "proceed",
+    "proceed.",
+    "go on",
+    "go ahead",
+    "next",
+    "next step",
+    "resume",
+    "build it",
+    "do it",
+    "yes",
+    "yes.",
+    "ok",
+    "okay",
+}
+
+
+def _array_of_strings_schema(description: str) -> dict[str, Any]:
+    return {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": description,
+    }
+
+
+DESIGN_PREFLIGHT_SUBMIT_SCHEMA: dict[str, Any] = {
+    "name": DESIGN_PREFLIGHT_SUBMIT_TOOL,
+    "description": (
+        "Submit the structured design preflight state. This is the only way "
+        "to unlock CAD tools after requirement refinement, design drafting, "
+        "and adversarial review."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "schema": {"type": "string"},
+            "status": {
+                "type": "string",
+                "enum": [DESIGN_PREFLIGHT_BUILD_READY, DESIGN_PREFLIGHT_NEEDS_USER],
+            },
+            "user_intent": {"type": "string"},
+            "requirement_refinement": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "question": {"type": "string"},
+                        "model_answer": {"type": "string"},
+                        "assumption": {"type": "boolean"},
+                        "why_it_matters": {"type": "string"},
+                    },
+                    "required": [
+                        "question",
+                        "model_answer",
+                        "assumption",
+                        "why_it_matters",
+                    ],
+                },
+            },
+            "user_questions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "question": {"type": "string"},
+                        "default_answer": {"type": "string"},
+                        "why_it_matters": {"type": "string"},
+                        "options": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "label": {"type": "string"},
+                                    "answer": {"type": "string"},
+                                },
+                                "required": ["label", "answer"],
+                            },
+                        },
+                    },
+                    "required": ["question", "default_answer", "options"],
+                },
+            },
+            "design_intent_draft": {
+                "type": "object",
+                "properties": {
+                    "architecture": {"type": "string"},
+                    "bodies_components": _array_of_strings_schema(
+                        "Bodies/components in the intended design."
+                    ),
+                    "interfaces": _array_of_strings_schema(
+                        "Mechanical, geometric, or assembly interfaces."
+                    ),
+                    "mechanisms": _array_of_strings_schema(
+                        "Mechanisms and moving/contact behavior."
+                    ),
+                    "manufacturing_assumptions": _array_of_strings_schema(
+                        "Material/process assumptions."
+                    ),
+                    "non_negotiable_geometry": _array_of_strings_schema(
+                        "Geometry that must not be simplified away."
+                    ),
+                    "risks": _array_of_strings_schema(
+                        "Design risks found before CAD execution."
+                    ),
+                },
+            },
+            "adversarial_review": {
+                "type": "object",
+                "properties": {
+                    "blocking_issues": _array_of_strings_schema(
+                        "Issues that prevent CAD execution."
+                    ),
+                    "criticisms": _array_of_strings_schema(
+                        "Adversarial criticisms of the draft."
+                    ),
+                    "required_revisions": _array_of_strings_schema(
+                        "Revisions applied before final plan."
+                    ),
+                },
+            },
+            "final_build_plan": {
+                "type": "object",
+                "properties": {
+                    "architecture": {"type": "string"},
+                    "bodies": _array_of_strings_schema("Bodies to build."),
+                    "sketches_features": _array_of_strings_schema(
+                        "Sketches/features to create."
+                    ),
+                    "interfaces": _array_of_strings_schema(
+                        "Interfaces to verify."
+                    ),
+                    "mechanisms": _array_of_strings_schema(
+                        "Mechanisms to model/verify."
+                    ),
+                    "manufacturing_assumptions": _array_of_strings_schema(
+                        "Manufacturing assumptions."
+                    ),
+                    "critical_geometry": _array_of_strings_schema(
+                        "Critical geometry to verify."
+                    ),
+                    "construction_order": _array_of_strings_schema(
+                        "Ordered construction steps."
+                    ),
+                    "verification_checks": _array_of_strings_schema(
+                        "Checks required after/during construction."
+                    ),
+                    "forbidden_shortcuts": _array_of_strings_schema(
+                        "Shortcuts the CAD loop must not take."
+                    ),
+                },
+            },
+        },
+        "required": [
+            "schema",
+            "status",
+            "user_intent",
+            "requirement_refinement",
+        ],
+    },
+    "workbench": "global",
+    "safety": "safe_write",
+}
 ProgressCallback = Callable[[dict[str, Any]], None]
 CancellationCheck = Callable[[], bool]
 SteeringCheck = Callable[[], list[str]]
-
-_ZERO_SCORE_WRITE_TOOLS = {
-    "core.activate_workbench",
-    "core.create_new_document",
-    "core.open_document",
-    "core.report_tool_shape_gap",
-}
-
-_CHEAP_SKETCH_EDIT_TOOLS = {
-    "sketcher.add_constraint",
-    "sketcher.edit_constraint",
-    "sketcher.set_construction",
-    "sketcher.set_geometry_name",
-    "sketcher.move_point",
-    "sketcher.modify_geometry",
-    "sketcher.add_external_geometry",
-    "sketcher.remove_external_geometry",
-    "sketcher.open_sketch",
-    "sketcher.close_sketch",
-}
-
-_SKETCH_GEOMETRY_EDIT_TOOLS = {
-    "sketcher.add_geometry",
-    "sketcher.draw_rectangle",
-    "sketcher.add_slot",
-    "sketcher.add_hole_pattern",
-    "sketcher.transform_geometry",
-    "sketcher.delete_items",
-}
-
-_STRUCTURAL_SETUP_TOOLS = {
-    "sketcher.create_sketch",
-    "partdesign.create_body",
-    "partdesign.create_sketch",
-    "partdesign.create_datum_plane",
-    "partdesign.create_datum_line",
-    "assembly.create_assembly",
-    "assembly.add_component",
-    "assembly.ground_component",
-}
-
-_MODERATE_FEATURE_TOOLS = {
-    "partdesign.extrude",
-    "partdesign.hole_from_sketch",
-    "partdesign.revolve",
-    "partdesign.dressup",
-    "partdesign.set_feature_dimensions",
-    "part.set_placement",
-    "part.cut_cylindrical_hole",
-    "part.dressup",
-    "draft.create_wire",
-    "material.apply_appearance",
-    "assembly.set_component_placement",
-    "assembly.create_joint",
-    "techdraw.create_page",
-    "techdraw.add_view",
-}
-
-_HIGH_IMPACT_FEATURE_TOOLS = {
-    "partdesign.loft_profiles",
-    "partdesign.sweep_profile",
-    "partdesign.helix_profile",
-    "partdesign.pattern",
-    "partdesign.boolean_bodies",
-    "part.thicken_surface",
-    "draft.create_array",
-    "surface.create_surface",
-    "assembly.solve",
-    "cam.create_job",
-    "cam.define_machine",
-    "cam.add_tool",
-    "cam.create_operation",
-    "cam.postprocess",
-    "model.build_from_script",
-    "core.delete_object",
-}
 
 
 @dataclass(frozen=True)
@@ -124,7 +215,7 @@ class VibeCADResponse:
 class ProviderToolScope:
     workbench: str | None
     stage: str
-    reason: str
+    reason: str = ""
     tool_names: set[str] | None = None
 
 
@@ -138,7 +229,7 @@ PROVIDER_COMMAND_WRITE_TOOLS = {
     "core.create_new_document",
     "core.open_document",
     "core.delete_object",
-    "core.report_tool_shape_gap",
+    "core.update_design_memory",
     # Only surfaced when the user opts into script mode; see
     # VibeCADService.is_tool_enabled_for_provider.
     "model.build_from_script",
@@ -206,24 +297,45 @@ PROVIDER_QUEUE_TOOLS = {
     "core.clear_local_session",
 }
 
+SKETCH_EDIT_ALLOWED_TOOLS = {
+    "core.update_design_memory",
+    "sketcher.close_sketch",
+    "sketcher.inspect_sketch",
+    "sketcher.add_geometry",
+    "sketcher.add_constraint",
+    "sketcher.edit_constraint",
+    "sketcher.move_point",
+    "sketcher.modify_geometry",
+    "sketcher.transform_geometry",
+    "sketcher.delete_items",
+    "sketcher.set_construction",
+    "sketcher.set_geometry_name",
+    "sketcher.add_external_geometry",
+    "sketcher.remove_external_geometry",
+    "sketcher.resolve_geometry",
+    "sketcher.add_hole_pattern",
+    "sketcher.add_slot",
+    "sketcher.draw_rectangle",
+}
+
 # Session-internal tools that must never appear in a provider tool listing.
 # core.enter_workspace is the single model-facing workspace switcher;
 # core.activate_workbench remains callable for internal session flows only.
 INTERNAL_SESSION_TOOLS = {
     "core.activate_workbench",
+    "core.get_tool_shape_report",
+    "core.report_tool_shape_gap",
 }
 
 CORE_PROVIDER_TOOLS = {
     "core.get_active_document",
+    "core.update_design_memory",
     "core.capture_view_screenshot",
     "core.set_view",
     "core.get_report_view_errors",
-    "core.get_tool_shape_report",
-    "core.report_tool_shape_gap",
     "core.enter_workspace",
     "core.get_object_properties",
     "core.delete_object",
-    "core.list_workbench_objects",
     # Global script-mode write path; hidden unless the user enables script
     # mode in preferences (VibeCADService.is_tool_enabled_for_provider).
     "model.build_from_script",
@@ -231,20 +343,12 @@ CORE_PROVIDER_TOOLS = {
 
 PROVIDER_WORKSPACE_CONTROL_TOOLS = {
     "core.get_active_document",
+    "core.update_design_memory",
     "core.get_selection",
-    "core.get_view_state",
-    "core.get_task_panel",
     "core.capture_view_screenshot",
     "core.set_view",
     "core.get_report_view_errors",
-    "core.list_workbenches",
-    "core.get_active_workbench_tool_pack",
-    "core.list_workbench_tool_packs",
-    "core.list_workbench_object_templates",
-    "core.list_workbench_objects",
     "core.get_object_properties",
-    "core.get_tool_shape_report",
-    "core.report_tool_shape_gap",
     "core.enter_workspace",
 }
 
@@ -257,131 +361,6 @@ WORKBENCH_READ_TOOLS = {
     "MaterialWorkbench": {"core.list_workbench_objects"},
     "CAMWorkbench": {"core.list_workbench_objects"},
 }
-
-NON_GEOMETRY_PROVIDER_WRITE_TOOLS = {
-    "core.report_tool_shape_gap",
-}
-
-WORKBENCH_EXECUTION_CONTRACTS: dict[str, dict[str, Any]] = {
-    "PartDesignWorkbench": {
-        "mode": "parametric_partdesign",
-        "required_order": [
-            "create/select PartDesign body",
-            "create sketch on a deliberate plane/support",
-            "add native Sketcher geometry",
-            "fully constrain sketch geometry and dimensions",
-            "verify sketch DoF is 0 before pad/pocket/revolve/sweep/loft",
-            "create native PartDesign features",
-            "add requested detail features chosen by the model (fillets, chamfers, "
-            "drafts, and shell/hollow wall thickness via partdesign.dressup "
-            "operation='thickness' for housings, enclosures, and castings)",
-            "inspect document state and screenshot when visual judgement matters",
-        ],
-        "completion_gates": [
-            "no sketch with geometry may remain under-constrained",
-            "PartDesign solids require native PartDesign features built from constrained sketches",
-        ],
-    },
-    "SketcherWorkbench": {
-        "mode": "constrained_sketching",
-        "required_order": [
-            "create/select sketch",
-            "inspect solver/profile state before and after edits",
-            "add one or a small set of native geometry elements",
-            "add geometric and dimensional constraints",
-            "inspect geometry, constraints, profile status, and DoF",
-            "iterate until the sketch is closed when a profile is needed and DoF is 0 unless intentionally construction-only",
-        ],
-        "completion_gates": [
-            "requested dimensions must be constraints, not prose",
-            "closed profile requests require closed_profile=true",
-            "finished design sketches should be fully constrained",
-        ],
-    },
-    "PartWorkbench": {
-        "mode": "direct_solid_modeling",
-        "required_order": [
-            "select or import the solid to operate on",
-            "set exact dimensions and placement",
-            "apply boolean/detail operations when requested",
-            "inspect shape, bounds, volume, and visible result",
-        ],
-        "completion_gates": [
-            "Part boolean/dressup operations are not substitutes for PartDesign when a parametric sketch-feature workflow is expected",
-            "direct solids require verified dimensions and placement",
-        ],
-    },
-    "AssemblyWorkbench": {
-        "mode": "native_assembly",
-        "required_order": [
-            "verify component objects exist",
-            "create native assembly",
-            "add each component",
-            "ground exactly one base component with assembly.ground_component so "
-            "the solver has a fixed anchor",
-            "mate components with assembly.create_joint using geometry references "
-            "(faces/edges/vertices resolved via partdesign.find_subelements), "
-            "never by dead-reckoned raw placement",
-            "solve the assembly with assembly.solve and verify the resulting "
-            "component placements",
-            "inspect assembly components/joints and screenshot when visual "
-            "judgement matters",
-        ],
-        "completion_gates": [
-            "assemblies require real generated components, not missing placeholders",
-            "all requested components must be added to the assembly",
-            "an assembly with 2+ components requires one grounded component and "
-            "joints on referenced geometry; raw placement is layout, not mating",
-            "the assembly must solve successfully after joints are created",
-        ],
-    },
-    "TechDrawWorkbench": {
-        "mode": "drawing_documentation",
-        "required_order": [
-            "verify model objects exist",
-            "create TechDraw page",
-            "add views of target model objects",
-            "inspect page/view objects",
-        ],
-        "completion_gates": [
-            "TechDraw is downstream of model geometry",
-            "drawing requests require page and view objects",
-        ],
-    },
-    "MaterialWorkbench": {
-        "mode": "appearance_and_material_assignment",
-        "required_order": [
-            "verify target objects exist",
-            "apply requested appearance/material",
-            "inspect target object material/appearance state",
-        ],
-        "completion_gates": [
-            "appearance requests require changed target objects",
-        ],
-    },
-    "CAMWorkbench": {
-        "mode": "machine_validated_machining",
-        "required_order": [
-            "define or select a saved machine (axis limits, spindle, "
-            "postprocessor) with cam.define_machine",
-            "create a CAM job bound to that machine with cam.create_job",
-            "add tool controllers within the machine's spindle limits with "
-            "cam.add_tool",
-            "create machining operations with cam.create_operation and verify "
-            "they produce path commands",
-            "validate the job against the machine with cam.validate_job and "
-            "resolve error violations",
-            "post-process to G-code with cam.postprocess only after validation "
-            "passes",
-        ],
-        "completion_gates": [
-            "CAM jobs must be bound to a machine so limits can be enforced",
-            "G-code must come from a postprocess that carried a machine "
-            "validation result with no unresolved error violations",
-        ],
-    },
-}
-
 
 def is_provider_safe_tool(
     service: VibeCADService,
@@ -472,7 +451,7 @@ def _run_provider_with_optional_cancellation(
     provider: BaseProvider,
     prompt: str,
     context: dict[str, Any],
-    tool_runner: Callable[[str, str], dict[str, Any]],
+    tool_runner: Callable[[str, str], dict[str, Any]] | None,
     cancellation_check: CancellationCheck | None,
     progress_callback: ProgressCallback | None,
 ):
@@ -489,6 +468,865 @@ def _run_provider_with_optional_cancellation(
     return provider.run(prompt, context, **kwargs)
 
 
+def _design_preflight_state(context: dict[str, Any]) -> dict[str, Any]:
+    project = context.get("vibecad_project")
+    if not isinstance(project, dict):
+        return {}
+    preflight = project.get("design_preflight")
+    return preflight if isinstance(preflight, dict) else {}
+
+
+def _design_memory_state(context: dict[str, Any]) -> dict[str, Any]:
+    project = context.get("vibecad_project")
+    if not isinstance(project, dict):
+        return {}
+    memory = project.get("design_memory")
+    return memory if isinstance(memory, dict) else {}
+
+
+def _design_memory_has_signal(memory: dict[str, Any]) -> bool:
+    if not isinstance(memory, dict):
+        return False
+    for key, value in memory.items():
+        if key in {"schema", "status", "created_at", "updated_at", "source"}:
+            continue
+        if value not in (None, "", [], {}):
+            return True
+    return False
+
+
+def _design_memory_text_list(value: Any, limit: int = 8) -> list[str]:
+    if value in (None, "", [], {}):
+        return []
+    raw_items = value if isinstance(value, list) else [value]
+    result: list[str] = []
+    for raw in raw_items:
+        text = str(raw or "").strip()
+        if text:
+            result.append(text)
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _design_memory_from_preflight_for_prompt(preflight: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(preflight, dict) or not preflight:
+        return {}
+    plan = preflight.get("final_build_plan")
+    if not isinstance(plan, dict):
+        plan = {}
+    draft = preflight.get("design_intent_draft")
+    if not isinstance(draft, dict):
+        draft = {}
+    assumptions: list[str] = []
+    refinement = preflight.get("requirement_refinement")
+    if isinstance(refinement, list):
+        for item in refinement:
+            if not isinstance(item, dict) or item.get("assumption") is not True:
+                continue
+            question = str(item.get("question") or "").strip()
+            answer = str(item.get("model_answer") or "").strip()
+            if question and answer:
+                assumptions.append(f"{question}: {answer}")
+            elif answer:
+                assumptions.append(answer)
+    for item in _design_preflight_answers(preflight):
+        if not isinstance(item, dict):
+            continue
+        question = str(item.get("question") or "").strip()
+        answer = str(item.get("answer") or "").strip()
+        if question and answer:
+            assumptions.append(f"{question}: {answer}")
+    return {
+        "user_intent": preflight.get("user_intent")
+        or preflight.get("initial_user_prompt")
+        or preflight.get("source_prompt"),
+        "summary": plan.get("architecture") or draft.get("architecture"),
+        "accepted_assumptions": assumptions,
+        "components": plan.get("bodies") or draft.get("bodies_components"),
+        "sketches_features": plan.get("sketches_features"),
+        "interfaces": plan.get("interfaces") or draft.get("interfaces"),
+        "mechanisms": plan.get("mechanisms") or draft.get("mechanisms"),
+        "non_negotiable_product_behavior": draft.get("non_negotiable_geometry"),
+        "critical_geometry": plan.get("critical_geometry"),
+        "verification_checks": plan.get("verification_checks"),
+        "construction_order": plan.get("construction_order"),
+        "forbidden_shortcuts": plan.get("forbidden_shortcuts"),
+        "current_obligation": (
+            "Continue building or repairing CAD according to this accepted design "
+            "memory. Do not restart requirement refinement unless the user changes "
+            "the product."
+        ),
+    }
+
+
+def _accepted_design_memory(context: dict[str, Any]) -> dict[str, Any]:
+    memory = _design_memory_state(context)
+    if _design_memory_has_signal(memory):
+        return memory
+    preflight = _design_preflight_state(context)
+    if _design_preflight_build_ready(context):
+        return _design_memory_from_preflight_for_prompt(preflight)
+    return {}
+
+
+def _accepted_design_memory_present(context: dict[str, Any]) -> bool:
+    return _design_memory_has_signal(_accepted_design_memory(context))
+
+
+def _design_preflight_build_ready(context: dict[str, Any]) -> bool:
+    preflight = _design_preflight_state(context)
+    return (
+        preflight.get("schema") == DESIGN_PREFLIGHT_SCHEMA
+        and preflight.get("status") == DESIGN_PREFLIGHT_BUILD_READY
+        and isinstance(preflight.get("final_build_plan"), dict)
+        and bool(preflight.get("final_build_plan"))
+        and not _design_preflight_missing_fields(preflight)
+    )
+
+
+def _is_explicit_preflight_continuation_prompt(prompt: str) -> bool:
+    text = re.sub(r"\s+", " ", str(prompt or "").strip().lower())
+    return text in DESIGN_PREFLIGHT_CONTINUATION_PROMPTS
+
+
+def _design_preflight_required_for_prompt(
+    prompt: str,
+    context: dict[str, Any],
+) -> bool:
+    if _is_design_preflight_answer_prompt(prompt):
+        return True
+    if _accepted_design_memory_present(context):
+        return False
+    if not _design_preflight_build_ready(context):
+        return True
+    return False
+
+
+def _is_design_preflight_answer_prompt(prompt: str) -> bool:
+    return str(prompt or "").lstrip().lower().startswith("design preflight answers:")
+
+
+def _design_preflight_initial_prompt(
+    prompt: str,
+    existing: dict[str, Any],
+) -> str:
+    clean_prompt = str(prompt or "").strip()
+    existing_initial = str(existing.get("initial_user_prompt") or "").strip()
+    if _is_design_preflight_answer_prompt(clean_prompt) and existing_initial:
+        return existing_initial
+    existing_source = str(existing.get("source_prompt") or "").strip()
+    if _is_design_preflight_answer_prompt(clean_prompt) and existing_source:
+        return existing_source
+    return clean_prompt
+
+
+def _merge_persisted_design_preflight_fields(
+    payload: dict[str, Any],
+    existing: dict[str, Any],
+) -> dict[str, Any]:
+    merged = dict(payload)
+    for key in (
+        "user_questions",
+        "user_answer_rounds",
+        "last_user_answers",
+        "user_answers",
+        "initial_user_prompt",
+        "source_prompt",
+    ):
+        if merged.get(key) in (None, "", [], {}) and existing.get(key) not in (
+            None,
+            "",
+            [],
+            {},
+        ):
+            merged[key] = existing[key]
+    if merged.get("user_answers") in (None, "", [], {}) and merged.get(
+        "last_user_answers"
+    ) not in (None, "", [], {}):
+        merged["user_answers"] = merged["last_user_answers"]
+    return merged
+
+
+def _project_requirement_memory(context: dict[str, Any]) -> list[dict[str, Any]]:
+    project = context.get("vibecad_project")
+    if not isinstance(project, dict):
+        return []
+    memory = project.get("requirement_memory")
+    return [item for item in memory if isinstance(item, dict)] if isinstance(memory, list) else []
+
+
+def _requirement_memory_lines(context: dict[str, Any]) -> list[str]:
+    memory = _project_requirement_memory(context)
+    if not memory:
+        return []
+    visible = memory
+    omitted = 0
+    if len(memory) > 36:
+        head = memory[:12]
+        tail = memory[-24:]
+        visible = head + tail
+        omitted = len(memory) - len(visible)
+    lines = [
+        (
+            "Persistent requirement memory (authoritative customer asks and "
+            "corrections; never claim no requirements when this section is present):"
+        )
+    ]
+    for index, item in enumerate(visible, start=1):
+        role = str(item.get("role") or "user").upper()
+        source = str(item.get("source") or "").strip()
+        content = str(item.get("content") or "").strip()
+        if not content:
+            continue
+        source_text = f" source={_trace_text(source, 32)}" if source else ""
+        lines.append(
+            f"{index}. {role}{source_text}: {_trace_text(content, 420)}"
+        )
+    if omitted:
+        lines.insert(13, f"... {omitted} middle requirement-memory items omitted ...")
+    return lines
+
+
+def _design_preflight_user_questions_answered(preflight: dict[str, Any]) -> bool:
+    if not isinstance(preflight, dict):
+        return False
+    questions = preflight.get("user_questions")
+    if not isinstance(questions, list) or not questions:
+        return False
+    question_texts = {
+        str(item.get("question") or "").strip()
+        for item in questions
+        if isinstance(item, dict) and str(item.get("question") or "").strip()
+    }
+    if not question_texts:
+        return False
+    answers = _design_preflight_answers(preflight)
+    if not isinstance(answers, list) or not answers:
+        return False
+    answered_texts = {
+        str(item.get("question") or "").strip()
+        for item in answers
+        if isinstance(item, dict)
+        and str(item.get("question") or "").strip()
+        and str(item.get("answer") or "").strip()
+    }
+    return question_texts.issubset(answered_texts)
+
+
+def _design_preflight_answers(preflight: dict[str, Any]) -> list[dict[str, Any]]:
+    if not isinstance(preflight, dict):
+        return []
+    merged: dict[str, dict[str, Any]] = {}
+
+    def add_answers(raw_answers: Any) -> None:
+        if not isinstance(raw_answers, list):
+            return
+        for item in raw_answers:
+            if not isinstance(item, dict):
+                continue
+            question = str(item.get("question") or "").strip()
+            answer = str(item.get("answer") or "").strip()
+            if not question or not answer:
+                continue
+            merged[question] = dict(item)
+
+    add_answers(preflight.get("user_answers"))
+    rounds = preflight.get("user_answer_rounds")
+    if isinstance(rounds, list):
+        for answer_round in rounds:
+            if isinstance(answer_round, dict):
+                add_answers(answer_round.get("answers"))
+    add_answers(preflight.get("last_user_answers"))
+    return list(merged.values())
+
+
+def _design_preflight_existing_state_lines(preflight: dict[str, Any]) -> list[str]:
+    if not isinstance(preflight, dict) or not preflight:
+        return []
+    lines = ["Existing design preflight state (authoritative):"]
+    status = str(preflight.get("status") or "").strip()
+    if status:
+        lines.append(f"status: {_trace_text(status, 80)}")
+    initial_prompt = str(preflight.get("initial_user_prompt") or "").strip()
+    if initial_prompt:
+        lines.append(
+            f"initial_user_prompt: {_trace_text(initial_prompt, 260)}"
+        )
+    intent = str(preflight.get("user_intent") or "").strip()
+    if intent:
+        lines.append(f"user_intent: {_trace_text(intent, 220)}")
+
+    refinement = preflight.get("requirement_refinement")
+    if isinstance(refinement, list) and refinement:
+        lines.append("requirement_refinement:")
+        for index, item in enumerate(refinement[:12], start=1):
+            if not isinstance(item, dict):
+                continue
+            question = str(item.get("question") or "").strip()
+            answer = str(item.get("model_answer") or "").strip()
+            why = str(item.get("why_it_matters") or "").strip()
+            assumption = item.get("assumption")
+            parts = []
+            if question:
+                parts.append(f"q={_trace_text(question, 100)}")
+            if answer:
+                parts.append(f"model_answer={_trace_text(answer, 100)}")
+            if isinstance(assumption, bool):
+                parts.append(f"assumption={str(assumption).lower()}")
+            if why:
+                parts.append(f"why={_trace_text(why, 120)}")
+            if parts:
+                lines.append(f"- {index}. " + " | ".join(parts))
+
+    questions = preflight.get("user_questions")
+    if isinstance(questions, list) and questions:
+        questions_answered = _design_preflight_user_questions_answered(preflight)
+        lines.append(
+            "answered_user_questions:"
+            if questions_answered
+            else "pending_user_questions:"
+        )
+        for index, item in enumerate(questions[:12], start=1):
+            if not isinstance(item, dict):
+                continue
+            question = str(item.get("question") or "").strip()
+            default = str(item.get("default_answer") or "").strip()
+            options = item.get("options")
+            option_values: list[str] = []
+            if isinstance(options, list):
+                for option in options[:8]:
+                    if isinstance(option, dict):
+                        value = option.get("answer") or option.get("label")
+                    else:
+                        value = option
+                    clean = str(value or "").strip()
+                    if clean:
+                        option_values.append(_trace_text(clean, 50))
+            parts = []
+            if question:
+                parts.append(f"q={_trace_text(question, 100)}")
+            if default:
+                parts.append(f"default={_trace_text(default, 80)}")
+            if option_values:
+                parts.append(f"options={';'.join(option_values)}")
+            if parts:
+                lines.append(f"- {index}. " + " | ".join(parts))
+
+    answers = _design_preflight_answers(preflight)
+    if isinstance(answers, list) and answers:
+        lines.append(
+            "user_answers: use these as binding requirements; do not ask the "
+            "same answered questions again."
+        )
+        for index, item in enumerate(answers[:12], start=1):
+            if not isinstance(item, dict):
+                continue
+            question = str(item.get("question") or "").strip()
+            answer = str(item.get("answer") or "").strip()
+            source = str(item.get("source") or "").strip()
+            parts = []
+            if question:
+                parts.append(f"q={_trace_text(question, 100)}")
+            if answer:
+                parts.append(f"answer={_trace_text(answer, 100)}")
+            if source:
+                parts.append(f"source={_trace_text(source, 40)}")
+            if parts:
+                lines.append(f"- {index}. " + " | ".join(parts))
+
+    draft = preflight.get("design_intent_draft")
+    if isinstance(draft, dict) and draft:
+        lines.append("design_intent_draft:")
+        architecture = str(draft.get("architecture") or "").strip()
+        if architecture:
+            lines.append(f"- architecture={_trace_text(architecture, 160)}")
+        for key in (
+            "bodies_components",
+            "interfaces",
+            "mechanisms",
+            "manufacturing_assumptions",
+            "non_negotiable_geometry",
+            "risks",
+        ):
+            values = draft.get(key)
+            if isinstance(values, list) and values:
+                cleaned = [
+                    _trace_text(str(value), 70)
+                    for value in values[:8]
+                    if str(value).strip()
+                ]
+                if cleaned:
+                    lines.append(f"- {key}={';'.join(cleaned)}")
+
+    review = preflight.get("adversarial_review")
+    if isinstance(review, dict) and review:
+        lines.append("adversarial_review:")
+        for key in ("blocking_issues", "criticisms", "required_revisions"):
+            values = review.get(key)
+            if isinstance(values, list) and values:
+                cleaned = [
+                    _trace_text(str(value), 90)
+                    for value in values[:8]
+                    if str(value).strip()
+                ]
+                if cleaned:
+                    lines.append(f"- {key}={';'.join(cleaned)}")
+
+    plan = preflight.get("final_build_plan")
+    if isinstance(plan, dict) and plan:
+        lines.append("final_build_plan:")
+        architecture = str(plan.get("architecture") or "").strip()
+        if architecture:
+            lines.append(f"- architecture={_trace_text(architecture, 160)}")
+        for key in (
+            "bodies",
+            "sketches_features",
+            "interfaces",
+            "mechanisms",
+            "manufacturing_assumptions",
+            "critical_geometry",
+            "construction_order",
+            "verification_checks",
+            "forbidden_shortcuts",
+        ):
+            values = plan.get(key)
+            if isinstance(values, list) and values:
+                cleaned = [
+                    _trace_text(str(value), 70)
+                    for value in values[:8]
+                    if str(value).strip()
+                ]
+                if cleaned:
+                    lines.append(f"- {key}={';'.join(cleaned)}")
+    return lines
+
+
+def _design_preflight_prompt(prompt: str, context: dict[str, Any]) -> str:
+    existing = _design_preflight_state(context)
+    prior = "\n".join(_design_preflight_existing_state_lines(existing))
+    return "\n\n".join(
+        line
+        for line in (
+            "You are the VibeCAD design preflight author and reviewer.",
+            (
+                "Before any CAD geometry is created, refine the requirements, "
+                "draft the design intent in writing, adversarially review that "
+                "draft, revise it, and then either ask the user for blocking "
+                "answers or produce the final build plan."
+            ),
+            (
+                "The user-visible prose must start by restating the customer's "
+                "intended outcome in concrete terms, then explain any blocking "
+                "questions or accepted assumptions."
+            ),
+            (
+                "You must answer your own refinement questions using the user's "
+                "request, reference images, current CAD context, and explicit "
+                "engineering assumptions. Ask the user only for choices that "
+                "materially change the design and cannot be responsibly assumed."
+            ),
+            (
+                "The sequence is mandatory: user intent -> requirement refinement "
+                "with model answers/defaults -> design intent draft -> adversarial "
+                "review of that draft -> revised final build plan. Do not call "
+                "CAD tools. Do not start sketching. Do not produce placeholder "
+                "geometry instructions."
+            ),
+            (
+                "If an existing design preflight state is present, compare the "
+                "current user request against it. If the request changes the "
+                "target object, constraints, manufacturing assumptions, interfaces, "
+                "mechanisms, or quality bar, revise the preflight JSON for the "
+                "current request before CAD tools unlock. Reuse the existing final "
+                "plan only when the current request is clearly just continuation "
+                "of that same plan."
+            ),
+            (
+                "The final plan must apply to any domain: aerospace, knives, "
+                "automotive, drones, rockets, fixtures, enclosures, mechanisms. "
+                "It must name how parts fit together, interfaces, load paths, "
+                "materials/manufacturing assumptions, critical geometry, "
+                "verification checks, and forbidden shortcuts."
+            ),
+            (
+                "Do not embed JSON or machine state in your visible prose. "
+                f"Submit the machine-readable preflight by calling "
+                f"{DESIGN_PREFLIGHT_SUBMIT_TOOL}. Use status 'needs_user' only "
+                "when user input is truly blocking; otherwise use status "
+                "'build_ready'. After the tool call, respond to the user in "
+                "plain prose."
+            ),
+            (
+                "Required submit-tool shape: {"
+                f"\"schema\":\"{DESIGN_PREFLIGHT_SCHEMA}\", "
+                "\"status\":\"build_ready|needs_user\", "
+                "\"user_intent\":\"...\", "
+                "\"requirement_refinement\":[{\"question\":\"...\","
+                "\"model_answer\":\"...\",\"assumption\":true|false,"
+                "\"why_it_matters\":\"...\"}], "
+                "\"user_questions\":[{\"question\":\"...\","
+                "\"default_answer\":\"...\",\"options\":["
+                "{\"label\":\"...\",\"answer\":\"...\"}],"
+                "\"why_it_matters\":\"...\"}], "
+                "\"design_intent_draft\":{"
+                "\"architecture\":\"...\",\"bodies_components\":[],"
+                "\"interfaces\":[],\"mechanisms\":[],"
+                "\"manufacturing_assumptions\":[],"
+                "\"non_negotiable_geometry\":[],\"risks\":[]}, "
+                "\"adversarial_review\":{\"blocking_issues\":[],"
+                "\"criticisms\":[],\"required_revisions\":[]}, "
+                "\"final_build_plan\":{"
+                "\"architecture\":\"...\",\"bodies\":[],\"interfaces\":[],"
+                "\"sketches_features\":[],\"mechanisms\":[],"
+                "\"manufacturing_assumptions\":[],\"critical_geometry\":[],"
+                "\"construction_order\":[],"
+                "\"verification_checks\":[],\"forbidden_shortcuts\":[]}}"
+            ),
+            prior,
+            _prompt_with_conversation(prompt, context),
+        )
+        if line
+    )
+
+
+def _design_preflight_missing_fields(payload: dict[str, Any]) -> list[str]:
+    required = [
+        "schema",
+        "status",
+        "user_intent",
+        "requirement_refinement",
+    ]
+    missing = [key for key in required if payload.get(key) in (None, "", [], {})]
+    if payload.get("schema") != DESIGN_PREFLIGHT_SCHEMA:
+        missing.append("schema=vibecad-design-preflight-v1")
+    status = payload.get("status")
+    if status not in {DESIGN_PREFLIGHT_BUILD_READY, DESIGN_PREFLIGHT_NEEDS_USER}:
+        missing.append("status=build_ready|needs_user")
+
+    refinement = payload.get("requirement_refinement")
+    if isinstance(refinement, list):
+        for index, item in enumerate(refinement, start=1):
+            if not isinstance(item, dict):
+                missing.append(f"requirement_refinement[{index}]")
+                continue
+            if item.get("question") in (None, "", [], {}):
+                missing.append(f"requirement_refinement[{index}].question")
+            if item.get("model_answer") in (None, "", [], {}):
+                missing.append(f"requirement_refinement[{index}].model_answer")
+            if not isinstance(item.get("assumption"), bool):
+                missing.append(f"requirement_refinement[{index}].assumption")
+            if item.get("why_it_matters") in (None, "", [], {}):
+                missing.append(f"requirement_refinement[{index}].why_it_matters")
+    elif refinement not in (None, "", [], {}):
+        missing.append("requirement_refinement=list")
+
+    if status == DESIGN_PREFLIGHT_NEEDS_USER:
+        for key in ("design_intent_draft", "adversarial_review", "final_build_plan"):
+            if payload.get(key) not in (None, "", [], {}):
+                missing.append(f"{key}=not_allowed_for_needs_user")
+        questions = payload.get("user_questions")
+        if not isinstance(questions, list) or not questions:
+            missing.append("user_questions")
+        else:
+            for index, question in enumerate(questions, start=1):
+                if not isinstance(question, dict):
+                    missing.append(f"user_questions[{index}]")
+                    continue
+                if question.get("question") in (None, "", [], {}):
+                    missing.append(f"user_questions[{index}].question")
+                if question.get("default_answer") in (None, "", [], {}):
+                    missing.append(f"user_questions[{index}].default_answer")
+                options = question.get("options")
+                if not isinstance(options, list) or not options:
+                    missing.append(f"user_questions[{index}].options")
+                elif isinstance(options, list):
+                    for option_index, option in enumerate(options, start=1):
+                        if not isinstance(option, dict):
+                            missing.append(
+                                f"user_questions[{index}].options[{option_index}]"
+                            )
+                            continue
+                        if option.get("label") in (None, "", [], {}):
+                            missing.append(
+                                f"user_questions[{index}].options[{option_index}].label"
+                            )
+                        if option.get("answer") in (None, "", [], {}):
+                            missing.append(
+                                f"user_questions[{index}].options[{option_index}].answer"
+                            )
+        return sorted(set(missing))
+
+    if status == DESIGN_PREFLIGHT_BUILD_READY:
+        questions = payload.get("user_questions")
+        if questions not in (None, "", [], {}):
+            if not isinstance(questions, list):
+                missing.append("user_questions=list")
+            elif not _design_preflight_user_questions_answered(payload):
+                missing.append("user_questions.unanswered")
+        answers = _design_preflight_answers(payload)
+        answered_questions = {
+            str(item.get("question") or "").strip()
+            for item in answers
+            if isinstance(item, dict)
+            and str(item.get("question") or "").strip()
+            and str(item.get("answer") or "").strip()
+        } if isinstance(answers, list) else set()
+        if isinstance(refinement, list):
+            for index, item in enumerate(refinement, start=1):
+                if not isinstance(item, dict) or item.get("assumption") is not False:
+                    continue
+                question = str(item.get("question") or "").strip()
+                if not question or question not in answered_questions:
+                    missing.append(
+                        f"requirement_refinement[{index}].user_answer"
+                    )
+        for key in ("design_intent_draft", "adversarial_review", "final_build_plan"):
+            if payload.get(key) in (None, "", [], {}):
+                missing.append(key)
+        draft = payload.get("design_intent_draft")
+        if isinstance(draft, dict):
+            for key in (
+                "architecture",
+                "bodies_components",
+                "interfaces",
+                "mechanisms",
+                "manufacturing_assumptions",
+                "non_negotiable_geometry",
+                "risks",
+            ):
+                if draft.get(key) in (None, "", [], {}):
+                    missing.append(f"design_intent_draft.{key}")
+        review = payload.get("adversarial_review")
+        if isinstance(review, dict):
+            for key in ("blocking_issues", "required_revisions"):
+                if not isinstance(review.get(key), list):
+                    missing.append(f"adversarial_review.{key}")
+            if review.get("criticisms") in (None, "", [], {}):
+                missing.append("adversarial_review.criticisms")
+
+    plan = payload.get("final_build_plan")
+    if status == DESIGN_PREFLIGHT_BUILD_READY and isinstance(plan, dict):
+        for key in (
+            "architecture",
+            "bodies",
+            "sketches_features",
+            "interfaces",
+            "mechanisms",
+            "manufacturing_assumptions",
+            "critical_geometry",
+            "construction_order",
+            "verification_checks",
+            "forbidden_shortcuts",
+        ):
+            if plan.get(key) in (None, "", [], {}):
+                missing.append(f"final_build_plan.{key}")
+    return sorted(set(missing))
+
+
+def _persist_submitted_design_preflight(
+    service: VibeCADService,
+    payload: dict[str, Any],
+    *,
+    prompt: str,
+    provider_name: str,
+) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {
+            "ok": False,
+            "error": "Design preflight submission must be a JSON object.",
+        }
+    project_context = service.project_context()
+    existing_preflight = (
+        project_context.get("design_preflight")
+        if isinstance(project_context, dict)
+        else {}
+    )
+    if not isinstance(existing_preflight, dict):
+        existing_preflight = {}
+    submitted = _merge_persisted_design_preflight_fields(
+        dict(payload),
+        existing_preflight,
+    )
+    missing = _design_preflight_missing_fields(submitted)
+    if missing:
+        return {
+            "ok": False,
+            "error": (
+                "Design preflight submission is incomplete; CAD tools remain locked. "
+                f"Missing: {', '.join(missing)}"
+            ),
+            "preflight": submitted,
+            "missing": missing,
+        }
+    submitted.setdefault("schema", DESIGN_PREFLIGHT_SCHEMA)
+    initial_prompt = _design_preflight_initial_prompt(prompt, existing_preflight)
+    submitted["initial_user_prompt"] = initial_prompt
+    if _is_design_preflight_answer_prompt(prompt):
+        submitted["source_prompt"] = (
+            str(existing_preflight.get("source_prompt") or "").strip()
+            or initial_prompt
+        )
+    else:
+        submitted["source_prompt"] = prompt
+    submitted["latest_preflight_prompt"] = prompt
+    submitted["provider"] = provider_name
+    try:
+        saved = service.update_design_preflight(submitted)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": f"Design preflight could not be persisted: {exc}",
+            "preflight": submitted,
+        }
+    return {
+        "ok": True,
+        "preflight": saved.get("design_preflight") or submitted,
+    }
+
+
+def _make_design_preflight_tool_runner(
+    service: VibeCADService,
+    *,
+    prompt: str,
+    provider_name: str,
+    submission_box: dict[str, Any],
+) -> Callable[[str, str], dict[str, Any]]:
+    def _run(tool_name: str, arguments_json: str = "{}") -> dict[str, Any]:
+        if tool_name != DESIGN_PREFLIGHT_SUBMIT_TOOL:
+            return {
+                "ok": False,
+                "error": (
+                    "CAD tools are locked during design preflight. Submit the "
+                    f"preflight with {DESIGN_PREFLIGHT_SUBMIT_TOOL}."
+                ),
+                "cad_write_tools_locked": True,
+            }
+        try:
+            payload = json.loads(arguments_json or "{}")
+        except json.JSONDecodeError as exc:
+            return {
+                "ok": False,
+                "error": f"Design preflight submission arguments are invalid JSON: {exc}",
+                "cad_write_tools_locked": True,
+            }
+        result = _persist_submitted_design_preflight(
+            service,
+            payload,
+            prompt=prompt,
+            provider_name=provider_name,
+        )
+        if result.get("ok"):
+            submission_box["preflight"] = result.get("preflight")
+        return result
+
+    return _run
+
+
+def _ensure_design_preflight(
+    service: VibeCADService,
+    provider: BaseProvider,
+    provider_name: str,
+    prompt: str,
+    context: dict[str, Any],
+    cancellation_check: CancellationCheck | None,
+    progress_callback: ProgressCallback | None,
+) -> tuple[bool, str, dict[str, Any]]:
+    if not _design_preflight_required_for_prompt(prompt, context):
+        return True, "", context
+    preflight_context = dict(context)
+    preflight_context["provider_tool_schemas"] = [dict(DESIGN_PREFLIGHT_SUBMIT_SCHEMA)]
+    preflight_context["provider_tool_scope"] = {
+        "stage": "design_preflight",
+        "workbench": context.get("workbench"),
+        "active_tool_count": 1,
+        "cad_write_tools_locked": True,
+    }
+    preflight_context["vibecad_design_preflight"] = {
+        "required": True,
+        "cad_write_tools_locked": True,
+        "submit_tool": DESIGN_PREFLIGHT_SUBMIT_TOOL,
+        "existing_plan_requires_review": _design_preflight_build_ready(context),
+    }
+    _emit_progress(
+        progress_callback,
+        {
+            "event": "design_preflight_started",
+            "provider": provider_name,
+        },
+    )
+    submission_box: dict[str, Any] = {}
+    result = _run_provider_with_optional_cancellation(
+        provider,
+        _design_preflight_prompt(prompt, preflight_context),
+        preflight_context,
+        _make_design_preflight_tool_runner(
+            service,
+            prompt=prompt,
+            provider_name=provider_name,
+            submission_box=submission_box,
+        ),
+        cancellation_check,
+        progress_callback,
+    )
+    raw_output = str(result.final_output or "").strip()
+    displayed = raw_output
+    preflight = (
+        submission_box.get("preflight")
+        if isinstance(submission_box.get("preflight"), dict)
+        else {}
+    )
+    if not preflight:
+        message = "\n\n".join(
+            item
+            for item in (
+                displayed,
+                (
+                    "Design preflight failed: the provider did not submit "
+                    f"{DESIGN_PREFLIGHT_SUBMIT_TOOL}; CAD tools remain locked."
+                ),
+            )
+            if item
+        )
+        _emit_progress(
+            progress_callback,
+            {
+                "event": "provider_turn_output",
+                "provider": provider_name,
+                "turn": 0,
+                "text": message,
+            },
+        )
+        return False, message, context
+    status = preflight.get("status")
+    next_context = service.provider_context_summary()
+    _apply_provider_surface(
+        service,
+        next_context,
+        service.active_workbench_name(),
+    )
+    message = displayed
+    _emit_progress(
+        progress_callback,
+        {
+            "event": "design_preflight_completed",
+            "provider": provider_name,
+            "status": status,
+        },
+    )
+    if message:
+        _emit_progress(
+            progress_callback,
+            {
+                "event": "provider_turn_output",
+                "provider": provider_name,
+                "turn": 0,
+                "text": message,
+            },
+        )
+    return status == DESIGN_PREFLIGHT_BUILD_READY, message, next_context
+
+
 def run_prompt(
     prompt: str,
     service: VibeCADService | None = None,
@@ -496,7 +1334,6 @@ def run_prompt(
     provider: BaseProvider | None = None,
     progress_callback: ProgressCallback | None = None,
     max_provider_seconds: float | None = MAX_AUTONOMOUS_PROVIDER_SECONDS,
-    enforce_small_steps: bool | None = None,
     cancellation_check: CancellationCheck | None = None,
     steering_check: SteeringCheck | None = None,
 ) -> VibeCADResponse:
@@ -515,13 +1352,11 @@ def run_prompt(
         active_workbench,
     )
     tool_trace: list[dict[str, Any]] = []
-    visual_feedback_consumed = _context_has_satisfied_screenshot(context)
     context["vibecad_loop"] = _provider_loop_state(
         clean_prompt,
         context,
         tool_trace,
         turn=1,
-        visual_feedback_consumed=visual_feedback_consumed,
     )
     _emit_progress(
         progress_callback,
@@ -531,37 +1366,86 @@ def run_prompt(
             "active_workbench": active_workbench,
             "workspace_mode": context.get("vibecad_workspace", {}).get("mode"),
             "provider_tool_count": len(context["provider_tool_schemas"]),
-            "next_step": context["vibecad_loop"]["next_step"],
-            "remaining_outcomes": context["vibecad_loop"]["remaining_outcomes"],
         },
     )
     active_provider = provider or choose_provider(
         active_service, prefer_online=prefer_online
     )
     provider_name = active_provider.__class__.__name__
-    small_step_checkpoints = (
-        bool(enforce_small_steps)
-        if enforce_small_steps is not None
-        else isinstance(active_provider, (OpenAIAgentsProvider, AnthropicProvider))
-    )
-    tool_runner = make_provider_tool_runner(
-        active_service,
-        entered_workspace,
-        tool_trace=tool_trace,
-        progress_callback=progress_callback,
-        turn_state={} if small_step_checkpoints else None,
-        cancellation_check=cancellation_check,
-        steering_check=steering_check,
-    )
     started_at = time.monotonic()
 
     try:
         _inject_human_steering(context, _consume_steering(steering_check))
+        preflight_ready, preflight_output, context = _ensure_design_preflight(
+            active_service,
+            active_provider,
+            provider_name,
+            clean_prompt,
+            context,
+            cancellation_check,
+            progress_callback,
+        )
+        if not preflight_ready:
+            final_output = preflight_output.strip()
+            active_service.record_conversation_turn("user", clean_prompt)
+            active_service.record_conversation_turn(
+                "assistant",
+                final_output,
+                provider=provider_name,
+                tool_trace=tool_trace,
+                metadata={"design_preflight_waiting": True},
+            )
+            return VibeCADResponse(
+                provider=provider_name,
+                final_output=final_output,
+                context=context,
+                tool_trace=tool_trace,
+            )
+        context["vibecad_loop"] = _provider_loop_state(
+            clean_prompt,
+            context,
+            tool_trace,
+            turn=1,
+        )
+        active_workbench = active_service.active_workbench_name()
+        entered_workspace = (
+            str(context.get("workbench") or "").strip() or entered_workspace
+        )
+    except ProviderUnavailable as exc:
+        final_output = (
+            f"{provider_name} failed before returning a usable AI result: {exc}"
+        )
+        active_service.record_conversation_turn("user", clean_prompt)
+        active_service.record_conversation_turn(
+            "assistant",
+            final_output,
+            provider=provider_name,
+            tool_trace=tool_trace,
+            metadata={"provider_error": str(exc), "design_preflight": True},
+        )
+        return VibeCADResponse(
+            provider=provider_name,
+            final_output=final_output,
+            context=context,
+            tool_trace=tool_trace,
+            error=str(exc),
+        )
+
+    provider_workbench = (
+        str(context.get("workbench") or "").strip() or entered_workspace
+    )
+    tool_runner = make_provider_tool_runner(
+        active_service,
+        provider_workbench,
+        tool_trace=tool_trace,
+        progress_callback=progress_callback,
+        cancellation_check=cancellation_check,
+        steering_check=steering_check,
+    )
+
+    try:
         provider_prompt = _prompt_with_conversation(clean_prompt, context)
-        outputs: list[str] = []
-        turn_state = getattr(tool_runner, "_vibecad_turn_state", {})
-        unresolved_turn_signature: tuple[Any, ...] | None = None
-        unresolved_turn_repeat_count = 0
+        outputs: list[str] = [preflight_output] if preflight_output else []
         turn_index = 0
         while True:
             if cancellation_check is not None and cancellation_check():
@@ -613,7 +1497,6 @@ def run_prompt(
                     context,
                     tool_trace,
                     turn=turn_index + 1,
-                    visual_feedback_consumed=visual_feedback_consumed,
                 )
             _emit_progress(
                 progress_callback,
@@ -622,20 +1505,10 @@ def run_prompt(
                     "provider": provider_name,
                     "turn": turn_index + 1,
                     "tool_count": len(tool_trace),
-                    "next_step": context["vibecad_loop"]["next_step"],
-                    "remaining_outcomes": context["vibecad_loop"]["remaining_outcomes"],
                     "document_delta": context["vibecad_loop"].get("document_delta"),
                 },
             )
             trace_count_before_turn = len(tool_trace)
-            turn_started_with_visual_feedback = _context_has_satisfied_screenshot(
-                context
-            )
-            if isinstance(turn_state, dict):
-                turn_state["turn"] = turn_index + 1
-                turn_state["mutating_tool_calls"] = 0
-                turn_state["checkpoint_reached"] = False
-                turn_state["workbench_switch_reached"] = False
             try:
                 result = _run_provider_with_optional_cancellation(
                     active_provider,
@@ -646,8 +1519,6 @@ def run_prompt(
                     progress_callback,
                 )
             except ProviderUnavailable as exc:
-                if turn_started_with_visual_feedback:
-                    visual_feedback_consumed = True
                 _emit_progress(
                     progress_callback,
                     {
@@ -673,7 +1544,6 @@ def run_prompt(
                     clean_prompt,
                     tool_trace,
                     turn_index + 2,
-                    visual_feedback_consumed,
                     previous_context=context,
                     entered_workspace=entered_workspace,
                 )
@@ -683,7 +1553,6 @@ def run_prompt(
                     active_service,
                     tool_trace,
                     turn_index,
-                    visual_feedback_consumed,
                 ):
                     break
                 provider_prompt = _continuation_prompt(
@@ -694,7 +1563,10 @@ def run_prompt(
                 )
                 turn_index += 1
                 continue
-            turn_output = str(result.final_output or "").strip()
+            raw_turn_output = str(result.final_output or "").strip()
+            if raw_turn_output:
+                _capture_reference_briefs_from_output(active_service, raw_turn_output)
+            turn_output = _strip_reference_brief_json_blocks(raw_turn_output)
             if turn_output:
                 outputs.append(turn_output)
                 _emit_progress(
@@ -706,8 +1578,6 @@ def run_prompt(
                         "text": turn_output,
                     },
                 )
-            if turn_started_with_visual_feedback:
-                visual_feedback_consumed = True
             entered_workspace = _workspace_session_from_trace(
                 tool_trace,
                 entered_workspace,
@@ -717,15 +1587,8 @@ def run_prompt(
                 clean_prompt,
                 tool_trace,
                 turn_index + 2,
-                visual_feedback_consumed,
                 previous_context=context,
                 entered_workspace=entered_workspace,
-            )
-            post_turn_loop = post_turn_context.get("vibecad_loop", {})
-            post_turn_missing = tuple(
-                post_turn_loop.get("remaining_outcomes", [])
-                if isinstance(post_turn_loop, dict)
-                else []
             )
             _emit_progress(
                 progress_callback,
@@ -736,68 +1599,12 @@ def run_prompt(
                     "tool_count": len(tool_trace),
                 },
             )
-            if (
-                len(tool_trace) <= trace_count_before_turn
-                and post_turn_missing
-                and not (
-                    not turn_started_with_visual_feedback
-                    and _context_has_satisfied_screenshot(post_turn_context)
-                )
-            ):
-                _emit_progress(
-                    progress_callback,
-                    {
-                        "event": "provider_loop_stopped",
-                        "provider": provider_name,
-                        "turn": turn_index + 1,
-                        "reason": "no_tools_with_unresolved_requirements",
-                        "remaining_outcomes": list(post_turn_missing),
-                        "tool_count": len(tool_trace),
-                    },
-                )
-                context = post_turn_context
-                break
-            if post_turn_missing:
-                turn_tool_names = tuple(
-                    str(item.get("tool_name", ""))
-                    for item in tool_trace[trace_count_before_turn:]
-                    if isinstance(item, dict)
-                )
-                unresolved_signature = (
-                    post_turn_missing,
-                    turn_output.strip().lower(),
-                    turn_tool_names,
-                )
-                if unresolved_signature == unresolved_turn_signature:
-                    unresolved_turn_repeat_count += 1
-                else:
-                    unresolved_turn_signature = unresolved_signature
-                    unresolved_turn_repeat_count = 1
-                if unresolved_turn_repeat_count >= 3:
-                    _emit_progress(
-                        progress_callback,
-                        {
-                            "event": "provider_loop_stopped",
-                            "provider": provider_name,
-                            "turn": turn_index + 1,
-                            "reason": "repeated_unresolved_turn",
-                            "remaining_outcomes": list(post_turn_missing),
-                            "tool_count": len(tool_trace),
-                            "repeat_count": unresolved_turn_repeat_count,
-                        },
-                    )
-                    context = post_turn_context
-                    break
-            else:
-                unresolved_turn_signature = None
-                unresolved_turn_repeat_count = 0
             if not _should_continue_autonomously(
                 clean_prompt,
                 turn_output,
                 active_service,
                 tool_trace,
                 turn_index,
-                visual_feedback_consumed,
             ):
                 break
             context = post_turn_context
@@ -848,7 +1655,6 @@ def _refresh_provider_context(
     prompt: str | None = None,
     tool_trace: list[dict[str, Any]] | None = None,
     turn: int = 1,
-    visual_feedback_consumed: bool = False,
     previous_context: dict[str, Any] | None = None,
     entered_workspace: str | None = None,
 ) -> dict[str, Any]:
@@ -866,7 +1672,6 @@ def _refresh_provider_context(
             context,
             tool_trace or [],
             turn=turn,
-            visual_feedback_consumed=visual_feedback_consumed,
             previous_context=previous_context,
         )
     return context
@@ -891,10 +1696,18 @@ def _apply_provider_surface(
             entered_workspace,
         )
         return
-    _apply_planner_provider_surface(service, context, active_workbench)
+    if active_workbench and get_tool_pack(active_workbench) is not None:
+        _apply_entered_workspace_provider_surface(
+            service,
+            context,
+            active_workbench,
+            active_workbench,
+        )
+        return
+    _apply_core_provider_surface(service, context, active_workbench)
 
 
-def _apply_planner_provider_surface(
+def _apply_core_provider_surface(
     service: VibeCADService,
     context: dict[str, Any],
     active_workbench: str | None,
@@ -913,44 +1726,19 @@ def _apply_planner_provider_surface(
     )
     scope = {
         "workbench": None,
-        "stage": "workspace_planner",
-        "reason": (
-            "Small workspace-control surface. Choose one workspace explicitly "
-            "with core.enter_workspace to expose its concrete CAD authoring tools."
-        ),
+        "stage": "core",
         "active_tool_count": len(schemas),
         "full_workbench_tool_count": full_active_count,
         "omitted_tool_count": max(0, full_active_count - len(schemas)),
-        "active_tool_names": [schema["name"] for schema in schemas],
     }
     context["active_workbench"] = active_workbench
     context["workbench"] = None
     context["provider_tool_schemas"] = schemas
-    context["provider_tool_schemas_workbench"] = "workspace_planner"
     context["provider_tool_scope"] = scope
-    context["provider_tool_surface"] = _provider_tool_surface_from_schemas(
-        service,
-        None,
-        schemas,
-        full_tool_count=full_active_count,
-        scope=scope,
-    )
-    context["tool_shape_report"] = service.tool_shape_report(active_workbench)
     context["vibecad_workspace"] = {
-        "mode": "planner",
+        "mode": "core",
         "active_workbench": active_workbench,
         "entered_workbench": None,
-        "instruction": (
-            "Decide the next FreeCAD workspace from the user's goal and current "
-            "document state. Do not design from this control surface. For a new "
-            "design, first state a design brief: part function, real-world "
-            "reference dimensions with explicit assumptions, envelope, and an "
-            "ordered feature plan (datums/layout sketch -> base feature -> "
-            "additive -> subtractive -> patterns -> dressups last). Then call "
-            "core.enter_workspace with one workbench and a workspace-session "
-            "goal that carries the brief."
-        ),
-        "available_workspaces": sorted(WORKBENCH_TOOL_PACKS),
     }
 
 
@@ -975,60 +1763,20 @@ def _apply_entered_workspace_provider_surface(
     scope = {
         "workbench": workspace,
         "stage": "entered_workspace",
-        "reason": (
-            "The model explicitly entered a workspace. Expose the shared core "
-            "tools plus this workspace pack's tools immediately."
-        ),
         "active_tool_count": len(schemas),
         "full_workbench_tool_count": len(full_schemas),
         "omitted_tool_count": max(0, len(full_schemas) - len(schemas)),
-        "active_tool_names": [schema["name"] for schema in schemas],
     }
     context["active_workbench"] = active_workbench
     context["workbench"] = workspace
     context["provider_tool_schemas"] = schemas
-    context["provider_tool_schemas_workbench"] = workspace
     context["provider_tool_scope"] = scope
-    context["provider_tool_surface"] = _provider_tool_surface_from_schemas(
-        service,
-        workspace,
-        schemas,
-        full_tool_count=len(full_schemas),
-        scope=scope,
-    )
-    context["tool_shape_report"] = service.tool_shape_report(
-        workspace,
-        full_workspace=True,
-    )
     context.update(service._provider_domain_context(workspace))
     context["vibecad_workspace"] = {
         "mode": "workspace",
         "active_workbench": active_workbench,
         "entered_workbench": workspace,
-        "instruction": _workspace_operator_instruction(workspace),
     }
-
-
-def _workspace_operator_instruction(workspace: str | None) -> str:
-    pack = get_tool_pack(workspace)
-    base = (
-        "Execute your design brief with this workspace's concrete native tools. "
-        "Work parametrically by default: start nontrivial parts from a master "
-        "layout sketch on an origin/datum plane carrying the governing "
-        "dimensions, and make downstream sketches reference it instead of "
-        "repeating magic numbers. Match each operation to the surface "
-        "character the function demands (prismatic -> pad/pocket, rotational "
-        "-> revolve, blades/fins/ducts -> loft/sweep along curved paths, "
-        "helical -> helix); never substitute a straight pad for a curved "
-        "functional surface. After each feature, verify the returned shape "
-        "delta against the brief's dimensions and intended surface character "
-        "before building on it. You own the design choices, feature strategy, "
-        "dimensions, and naming; call core.enter_workspace when another "
-        "workspace is the better next place to work."
-    )
-    if pack is None:
-        return base
-    return f"{base} Workspace guidance: {pack.instructions}"
 
 
 def _workspace_session_from_trace(
@@ -1075,40 +1823,13 @@ def provider_tool_scope_for_context(
         return ProviderToolScope(
             workbench=workbench,
             stage="core_tools",
-            reason=(
-                "No workbench tool pack is registered for this workspace; "
-                "expose the shared core tools only."
-            ),
             tool_names=set(CORE_PROVIDER_TOOLS),
         )
     return ProviderToolScope(
         workbench=workbench,
         stage="workbench_pack",
-        reason=(
-            f"Expose the shared core tools plus the {pack.workbench} "
-            "tool pack. Switching workspaces swaps the pack."
-        ),
         tool_names=set(CORE_PROVIDER_TOOLS) | set(pack.tool_names),
     )
-
-
-def _provider_tool_surface_from_schemas(
-    service: VibeCADService,
-    workbench: str | None,
-    schemas: list[dict[str, Any]],
-    full_tool_count: int | None = None,
-    scope: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    return {
-        "active_workbench": workbench,
-        "tool_pack_enabled": service.is_workbench_tool_pack_enabled(workbench),
-        "tool_count": len(schemas),
-        "full_workbench_tool_count": full_tool_count
-        if full_tool_count is not None
-        else len(schemas),
-        "scope": scope or {},
-        "tools": schemas,
-    }
 
 
 def _provider_loop_state(
@@ -1116,11 +1837,8 @@ def _provider_loop_state(
     context: dict[str, Any],
     tool_trace: list[dict[str, Any]],
     turn: int,
-    visual_feedback_consumed: bool,
     previous_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    validation_notes = _missing_requirement_lines(prompt, context, tool_trace)
-    remaining: list[str] = list(validation_notes)
     workspace_state = (
         context.get("vibecad_workspace", {}) if isinstance(context, dict) else {}
     )
@@ -1136,7 +1854,7 @@ def _provider_loop_state(
             "active_workbench": item.get("active_workbench"),
             "result": item.get("result"),
         }
-        for item in tool_trace[-12:]
+        for item in tool_trace[-6:]
         if isinstance(item, dict)
     ]
     document = context.get("document", {}) if isinstance(context, dict) else {}
@@ -1154,102 +1872,15 @@ def _provider_loop_state(
     )
     return {
         "turn": max(1, int(turn)),
-        "mode": "autonomous_cad_operator",
         "workspace_mode": workspace_mode,
-        "execution_contract": _execution_contract_for_context(context),
-        "max_operation_score_per_turn": _max_operation_score_per_provider_turn(),
-        "max_mutating_tool_calls_per_turn": _max_mutating_tool_calls_per_provider_turn(),
-        "next_step": _next_loop_step(
-            remaining,
-            object_count,
-            bool(recent_trace),
-            workspace_mode=workspace_mode,
-        ),
-        "remaining_outcomes": remaining,
-        "state_validation_notes": validation_notes,
         "recent_tool_trace": recent_trace,
         "document_delta": _document_delta(previous_context, context),
         "document_object_count": object_count,
-        "visual_feedback_consumed": bool(visual_feedback_consumed),
         "screenshot_captured": bool(
             isinstance(screenshot, dict) and screenshot.get("captured")
         ),
         "visual_attention_flags": attention_flags,
-        "instruction": (
-            "Use the current workspace mode. In planner mode, state or restate "
-            "the design brief and choose a workspace with core.enter_workspace. "
-            "In workspace mode, advance the brief's feature plan with the "
-            "exposed native tools, verifying each shape delta against the "
-            "brief's dimensions and surface character. state_validation_notes "
-            "are observations, not deterministic instructions. The parent loop "
-            "will checkpoint after the operation score budget or workspace handoffs."
-        ),
     }
-
-
-def _execution_contract_for_context(context: dict[str, Any]) -> dict[str, Any]:
-    workbench = context.get("workbench") if isinstance(context, dict) else None
-    scope = context.get("provider_tool_scope", {}) if isinstance(context, dict) else {}
-    contract = WORKBENCH_EXECUTION_CONTRACTS.get(str(workbench or ""))
-    if contract is None:
-        return {
-            "mode": "generic_native_freecad",
-            "active_tool_stage": scope.get("stage")
-            if isinstance(scope, dict)
-            else None,
-            "active_tool_count": scope.get("active_tool_count")
-            if isinstance(scope, dict)
-            else None,
-            "required_order": [
-                "inspect active document/workbench state",
-                "use only direct native function tools exposed for the current provider turn",
-                "execute one or a small set of meaningful native operations",
-                "inspect returned state before claiming progress or completion",
-            ],
-            "completion_gates": [
-                "do not report completion from prose alone",
-                "requested geometry must exist in the FreeCAD document",
-            ],
-        }
-    return {
-        "workbench": workbench,
-        "mode": contract["mode"],
-        "active_tool_stage": scope.get("stage") if isinstance(scope, dict) else None,
-        "active_tool_scope_reason": scope.get("reason")
-        if isinstance(scope, dict)
-        else None,
-        "active_tool_count": scope.get("active_tool_count")
-        if isinstance(scope, dict)
-        else None,
-        "full_workbench_tool_count": scope.get("full_workbench_tool_count")
-        if isinstance(scope, dict)
-        else None,
-        "required_order": list(contract["required_order"]),
-        "completion_gates": list(contract["completion_gates"]),
-        "available_tool_count": scope.get("active_tool_count")
-        if isinstance(scope, dict)
-        else None,
-    }
-
-
-def _next_loop_step(
-    remaining: list[str],
-    object_count: int,
-    has_recent_trace: bool,
-    workspace_mode: str = "",
-) -> str:
-    if workspace_mode == "planner":
-        return "Inspect if useful, then explicitly enter the best workspace for the next CAD operation."
-    if workspace_mode == "workspace":
-        return "Use this workspace's native tools for the next CAD increment, or enter another workspace if needed."
-    if remaining:
-        first = remaining[0].lstrip("- ").strip()
-        return f"Resolve next verified gap: {first}"
-    if object_count <= 0:
-        return "Create the first meaningful FreeCAD object for the request."
-    if not has_recent_trace:
-        return "Inspect the current document, then make the first necessary edit."
-    return "Verified requirements are satisfied; report the completed FreeCAD changes."
 
 
 def _document_delta(
@@ -1379,78 +2010,218 @@ def _prompt_with_conversation(prompt: str, context: dict[str, Any]) -> str:
         else []
     )
     if not conversation:
-        return f"{session_preamble}\n\nCurrent user request: {prompt}".strip()
+        return "\n".join(line for line in (session_preamble, f"U: {prompt}") if line)
     scope = (
         conversation_context.get("scope", {})
         if isinstance(conversation_context, dict)
         else {}
     )
-    scope_kind = str(scope.get("kind") or "document_scoped")
     document = scope.get("document")
     file_path = scope.get("file_path")
-    scope_parts = [f"scope={scope_kind}"]
+    scope_parts: list[str] = []
     if document:
-        scope_parts.append(f"document={document}")
+        scope_parts.append(f"d={document}")
     if file_path:
-        scope_parts.append(f"file={file_path}")
-    lines = [
-        "Use this prior VibeCAD conversation only as current document/project memory. "
-        "It is scoped by VibeCAD conversation storage; do not treat unrelated documents, "
-        "other files, or global chat history as relevant.",
-        f"Conversation scope: {', '.join(scope_parts)}",
-        "",
-        "Conversation so far:",
-    ]
-    for item in conversation[-12:]:
-        role = str(item.get("role", "unknown"))
+        scope_parts.append(f"f={file_path}")
+    turn_lines: list[str] = []
+    if scope_parts:
+        header = (
+            "Saved conversation context "
+            f"({','.join(scope_parts)}; authoritative requirements and prior decisions):"
+        )
+    else:
+        header = (
+            "Saved conversation context "
+            "(authoritative requirements and prior decisions):"
+        )
+    current_prompt = str(prompt or "").strip()
+    last_index = len(conversation) - 1
+    for index, item in enumerate(conversation):
+        if not isinstance(item, dict):
+            continue
+        raw_role = str(item.get("role", "unknown")).lower()
+        if raw_role.startswith("user"):
+            role = "USER"
+        elif raw_role.startswith("assistant"):
+            role = "VIBECAD"
+        elif raw_role.startswith("system"):
+            role = "SYSTEM"
+        else:
+            role = raw_role.upper() or "UNKNOWN"
         content = str(item.get("content", "")).strip()
-        if content:
-            lines.append(f"{role}: {content}")
-    lines = [session_preamble, "", *lines]
-    lines.extend(["", f"Current user request: {prompt}"])
-    return "\n".join(lines)
+        if not content:
+            continue
+        if index == last_index and role == "USER" and content == current_prompt:
+            continue
+        turn_lines.append(f"{len(turn_lines) + 1}. {role}:\n{content}")
+    lines = [header, *turn_lines] if turn_lines else []
+    return "\n".join(
+        line for line in (session_preamble, *lines, f"U: {prompt}") if line
+    )
 
 
 def _session_prompt_preamble(context: dict[str, Any]) -> str:
     workspace = context.get("vibecad_workspace", {})
-    lines = [
-        "VibeCAD session contract:",
-        f"- workspace mode: {workspace.get('mode') if isinstance(workspace, dict) else 'unknown'}",
-        "- design contract: state a design brief (function, reference dimensions "
-        "with assumptions, envelope, ordered feature plan) before mutating "
-        "geometry on a new design; model parametrically from a master layout "
-        "sketch; verify each feature's shape delta against the brief before "
-        "building on it.",
-    ]
+    lines = []
+    if isinstance(workspace, dict):
+        workbench = workspace.get("entered_workbench") or workspace.get("active_workbench")
+        if workbench:
+            lines.append(f"W:{_prompt_workbench_label(workbench)}")
+        elif workspace.get("mode") == "core":
+            lines.append("W:core")
+    requirement_lines = _requirement_memory_lines(context)
+    if requirement_lines:
+        lines.extend(requirement_lines)
+    memory_lines = _accepted_design_memory_lines(context)
+    if memory_lines:
+        lines.extend(memory_lines)
+    edit_lines = _active_edit_prompt_lines(context)
+    if edit_lines:
+        lines.extend(edit_lines)
     steering = context.get("human_steering", {})
     if isinstance(steering, dict) and steering.get("active_messages"):
         lines.append(
-            "- live steering: "
-            + " | ".join(str(item) for item in steering["active_messages"][-4:])
+            "H: "
+            + " | ".join(
+                _trace_text(str(item), 80)
+                for item in steering["active_messages"][-3:]
+            )
         )
+    error_lines = _report_error_prompt_lines(context)
+    if error_lines:
+        lines.extend(error_lines)
     reference_lines = _reference_image_lines(context)
     if reference_lines:
-        lines.extend(
-            [
-                "- reference images: the user attached "
-                + (
-                    f"{len(reference_lines)} reference image"
-                    + ("s" if len(reference_lines) != 1 else "")
-                )
-                + " showing the TARGET design (labeled REFERENCE in the "
-                "message images); they are not current document geometry. "
-                "Extract topology and proportions from them, but never invent "
-                "dimensions: anchor scale from any user-stated dimension or a "
-                "visible standard feature (bolt hole, fastener, rail, coin), "
-                "state every dimensional assumption explicitly in the design "
-                "brief, and if scale is genuinely ambiguous ask the user for "
-                "one anchor dimension instead of guessing. Compare each "
-                "CURRENT VIEWPORT screenshot against the reference images and "
-                "correct drift before adding features.",
-                *reference_lines,
-            ]
-        )
+        lines.extend(reference_lines)
     return "\n".join(lines)
+
+
+def _active_edit_prompt_lines(context: dict[str, Any]) -> list[str]:
+    task = context.get("task_panel")
+    if not isinstance(task, dict) or not task.get("edit_mode"):
+        return []
+    edit_object = task.get("edit_object")
+    object_name = ""
+    object_type = ""
+    if isinstance(edit_object, dict):
+        object_name = str(
+            edit_object.get("label") or edit_object.get("name") or ""
+        ).strip()
+        object_type = str(edit_object.get("type") or "").strip()
+    active_sketch = str(task.get("active_sketch") or object_name).strip()
+    profile = task.get("profile_status")
+    if not isinstance(profile, dict):
+        return [
+            (
+                "EDIT: FreeCAD is currently editing "
+                f"{_trace_text(object_name or active_sketch or 'an object', 80)}"
+                + (f" ({_trace_text(object_type, 60)})" if object_type else "")
+                + "; close or finish the edit mode before unrelated PartDesign/Assembly operations."
+            )
+        ]
+    ready = bool(profile.get("ready_for_pad") or profile.get("ready_for_pocket"))
+    dof = profile.get("degrees_of_freedom")
+    closed = profile.get("closed_profile")
+    faces = profile.get("face_count")
+    reason = str(profile.get("reason") or "").strip()
+    action = (
+        "close with sketcher.close_sketch before creating PartDesign features"
+        if ready
+        else "repair/close the sketch before pad, pocket, dressup, or assembly operations"
+    )
+    return [
+        (
+            "EDIT: active sketch="
+            f"{_trace_text(active_sketch or object_name or 'unknown', 80)} "
+            f"ready={str(ready).lower()} closed={str(bool(closed)).lower()} "
+            f"dof={dof if dof is not None else '?'} faces={faces if faces is not None else '?'}; "
+            f"{action}; reason={_trace_text(reason, 180)}"
+        )
+    ]
+
+
+def _accepted_design_memory_lines(context: dict[str, Any]) -> list[str]:
+    memory = _accepted_design_memory(context)
+    if not _design_memory_has_signal(memory):
+        return []
+    lines = [
+        (
+            "ACCEPTED DESIGN MEMORY (standing project memory, not a phase): "
+            "use this as the controlling design intent for CAD choices."
+        )
+    ]
+    intent = str(memory.get("user_intent") or "").strip()
+    if intent:
+        lines.append(f"User intent: {_trace_text(intent, 260)}")
+    summary = str(memory.get("summary") or "").strip()
+    if summary:
+        lines.append(f"Accepted architecture: {_trace_text(summary, 260)}")
+
+    def add_list(label: str, key: str, *, limit: int = 8, item_limit: int = 180) -> None:
+        values = _design_memory_text_list(memory.get(key), limit=limit)
+        if values:
+            lines.append(
+                f"{label}: "
+                + " | ".join(_trace_text(item, item_limit) for item in values)
+            )
+
+    add_list("Accepted assumptions", "accepted_assumptions", limit=6, item_limit=160)
+    add_list("Components", "components", limit=8, item_limit=150)
+    add_list("Sketches/features", "sketches_features", limit=8, item_limit=160)
+    add_list("Interfaces", "interfaces", limit=8, item_limit=170)
+    add_list("Mechanisms", "mechanisms", limit=8, item_limit=180)
+    add_list(
+        "Non-negotiable product behavior",
+        "non_negotiable_product_behavior",
+        limit=10,
+        item_limit=180,
+    )
+    add_list("Critical geometry", "critical_geometry", limit=8, item_limit=170)
+    add_list("Verification checks", "verification_checks", limit=8, item_limit=180)
+    add_list("Construction order", "construction_order", limit=8, item_limit=170)
+    add_list("Forbidden shortcuts", "forbidden_shortcuts", limit=8, item_limit=170)
+    add_list("Known failures", "known_failures", limit=8, item_limit=190)
+    add_list("Corrections", "corrections", limit=8, item_limit=190)
+    add_list("Open questions", "open_questions", limit=5, item_limit=170)
+    obligation = str(memory.get("current_obligation") or "").strip()
+    if obligation:
+        lines.append(f"Current obligation: {_trace_text(obligation, 260)}")
+    lines.append(
+        "When the user corrects or changes the design, call "
+        "core.update_design_memory during the normal loop; do not restart "
+        "requirement refinement unless no accepted memory exists."
+    )
+    return lines
+
+
+def _report_error_prompt_lines(context: dict[str, Any]) -> list[str]:
+    report = context.get("report_view_errors")
+    if not isinstance(report, dict):
+        return []
+    raw_errors = report.get("errors")
+    if not isinstance(raw_errors, list) or not raw_errors:
+        return []
+    hard_errors = [
+        str(item).strip()
+        for item in raw_errors
+        if str(item).strip() and _is_hard_geometry_failure(str(item))
+    ]
+    if not hard_errors:
+        return []
+    visible = " | ".join(_trace_text(item, 140) for item in hard_errors[-4:])
+    return [
+        (
+            "ERRORS: unresolved hard FreeCAD geometry failures are present: "
+            f"{visible}. Before any new feature/assembly/dressup operation, "
+            "inspect the failed sketch/body, repair the upstream geometry, and "
+            "verify the corrected object."
+        )
+    ]
+
+
+def _prompt_workbench_label(value: Any) -> str:
+    text = str(value or "")
+    return text[: -len("Workbench")] if text.endswith("Workbench") else text
 
 
 def _reference_image_lines(context: dict[str, Any]) -> list[str]:
@@ -1466,9 +2237,149 @@ def _reference_image_lines(context: dict[str, Any]) -> list[str]:
             continue
         name = str(entry.get("name") or entry.get("id") or f"image {index}")
         label = str(entry.get("label") or "").strip()
-        suffix = f" — {label}" if label else ""
-        lines.append(f"  - reference {index}: {name}{suffix}")
+        suffixes = [label] if label else []
+        brief_summary = _reference_brief_summary(entry.get("visual_brief"))
+        if brief_summary:
+            suffixes.append(f"b={brief_summary}")
+        delivery = entry.get("provider_delivery")
+        if isinstance(delivery, dict) and delivery.get("available") is False:
+            reason = str(delivery.get("reason") or "not delivered").strip()
+            if reason:
+                suffixes.append(f"miss={_trace_text(reason, 60)}")
+        suffix = f"|{'|'.join(suffixes)}" if suffixes else ""
+        lines.append(f"R{index}:{_trace_text(name, 40)}{suffix}")
     return lines
+
+
+def _reference_brief_summary(raw: Any) -> str:
+    if not isinstance(raw, dict):
+        return ""
+    summary = str(raw.get("summary") or "").strip()
+    if summary:
+        return _trace_text(summary, 96)
+    parts: list[str] = []
+    object_type = str(raw.get("object_type") or "").strip()
+    if object_type:
+        parts.append(object_type)
+    for key in ("counts_patterns", "must_preserve", "unknown_dimensions"):
+        values = raw.get(key)
+        if isinstance(values, list):
+            cleaned = [str(item).strip() for item in values if str(item).strip()]
+            if cleaned:
+                label = {
+                    "counts_patterns": "c",
+                    "must_preserve": "p",
+                    "unknown_dimensions": "?",
+                }[key]
+                parts.append(f"{label}:{','.join(cleaned[:3])}")
+    return _trace_text(";".join(parts), 112)
+
+
+def _reference_brief_payload_matches(
+    text: str,
+) -> list[tuple[dict[str, Any], tuple[int, int]]]:
+    matches: list[tuple[dict[str, Any], tuple[int, int]]] = []
+    if not text:
+        return matches
+    decoder = json.JSONDecoder()
+    marker_pattern = re.compile(re.escape(REFERENCE_BRIEF_MARKER), re.IGNORECASE)
+    for marker in marker_pattern.finditer(text):
+        cursor = marker.end()
+        while cursor < len(text) and text[cursor].isspace():
+            cursor += 1
+        span_end: int | None = None
+        payload_text = ""
+        payload_offset = cursor
+        if text.startswith("```", cursor):
+            cursor += 3
+            while cursor < len(text) and text[cursor].isspace():
+                cursor += 1
+            if text[cursor : cursor + 4].lower() == "json":
+                cursor += 4
+            while cursor < len(text) and text[cursor].isspace():
+                cursor += 1
+            fence_end = text.find("```", cursor)
+            if fence_end < 0:
+                continue
+            payload_text = text[cursor:fence_end]
+            payload_offset = cursor
+            span_end = fence_end + 3
+            span_start = marker.start()
+            while span_start > 0 and text[span_start - 1] in " \t":
+                span_start -= 1
+            # If the marker began on a line by itself, remove that line break too.
+            if span_start > 0 and text[span_start - 1] == "\n":
+                span_start -= 1
+        else:
+            payload_text = text[cursor:]
+            payload_offset = cursor
+            span_start = marker.start()
+        try:
+            payload, consumed = decoder.raw_decode(payload_text)
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if span_end is None:
+            span_end = payload_offset + consumed
+            while span_end < len(text) and text[span_end] in " \t":
+                span_end += 1
+            if span_end < len(text) and text[span_end] == "\n":
+                span_end += 1
+        matches.append((payload, (span_start, span_end)))
+    return matches
+
+
+def _extract_reference_brief_payloads(text: str) -> list[dict[str, Any]]:
+    return [payload for payload, _span in _reference_brief_payload_matches(text)]
+
+
+def _strip_reference_brief_json_blocks(text: str) -> str:
+    if not text:
+        return ""
+    stripped = text
+    for _payload, (start, end) in reversed(_reference_brief_payload_matches(text)):
+        stripped = stripped[:start] + stripped[end:]
+    return re.sub(r"\n{3,}", "\n\n", stripped).strip()
+
+
+def _capture_reference_briefs_from_output(
+    service: VibeCADService, text: str
+) -> list[dict[str, Any]]:
+    captured: list[dict[str, Any]] = []
+    for payload in _extract_reference_brief_payloads(text):
+        raw_ids = payload.get("reference_ids") or payload.get("references") or []
+        reference_ids = (
+            [str(item).strip() for item in raw_ids if str(item).strip()]
+            if isinstance(raw_ids, list)
+            else []
+        )
+        brief = payload.get("brief") if isinstance(payload.get("brief"), dict) else payload
+        if not isinstance(brief, dict):
+            continue
+        try:
+            result = service.update_reference_visual_brief(reference_ids, brief)
+        except Exception:
+            continue
+        if isinstance(result, dict) and result.get("ok"):
+            captured.append(result)
+    return captured
+
+
+def _prompt_type_label(value: Any) -> str:
+    text = str(value or "")
+    if text == "Sketcher::SketchObject":
+        return "Sketch"
+    if "::" in text:
+        prefix, name = text.split("::", 1)
+        if prefix in {"PartDesign", "Part", "Assembly", "Surface", "TechDraw"} and name:
+            return name
+    return text
+
+
+def _prompt_tool_label(value: Any) -> str:
+    text = str(value or "")
+    return provider_function_name(text, text)
 
 
 def _continuation_prompt(
@@ -1477,87 +2388,35 @@ def _continuation_prompt(
     context: dict[str, Any],
     tool_trace: list[dict[str, Any]],
 ) -> str:
+    session_preamble = _session_prompt_preamble(context)
     objects = context.get("document", {}).get("objects", [])
     object_lines = [
-        f"- {item.get('label') or item.get('name')} ({item.get('type')})"
-        for item in objects[-20:]
+        f"{_trace_text(item.get('label') or item.get('name'), 40)}:{_prompt_type_label(item.get('type'))}"
+        for item in objects[-6:]
         if isinstance(item, dict)
     ]
     trace_lines = []
-    for item in tool_trace[-20:]:
+    for item in tool_trace[-3:]:
         if not isinstance(item, dict):
             continue
         result = item.get("result") if isinstance(item.get("result"), dict) else {}
         details = []
         if isinstance(result, dict):
-            if result.get("checkpoint"):
-                details.append(f"checkpoint={result.get('checkpoint')}")
+            if result.get("workspace_handoff"):
+                details.append(f"wh={result.get('workspace_handoff')}")
             if result.get("error"):
-                details.append(f"error={_trace_text(result.get('error'), 220)}")
-            if result.get("required_next_action"):
-                details.append(
-                    "required_next_action="
-                    + _trace_text(
-                        json.dumps(result.get("required_next_action"), default=str), 360
-                    )
-                )
-            elif result.get("next_action"):
-                details.append(
-                    f"next_action={_trace_text(result.get('next_action'), 240)}"
-                )
-        suffix = f" ({'; '.join(details)})" if details else ""
+                details.append(f"err={_trace_text(result.get('error'), 80)}")
+            for key, label in (
+                ("feature", "feat"),
+                ("label", "lbl"),
+                ("active_sketch", "sk"),
+            ):
+                if result.get(key):
+                    details.append(f"{label}={_trace_text(result.get(key), 48)}")
+        suffix = f"({';'.join(details)})" if details else ""
         trace_lines.append(
-            f"- {item.get('tool_name')}: {'ok' if item.get('ok') else 'failed'}{suffix}"
+            f"{_prompt_tool_label(item.get('tool_name'))}:{'ok' if item.get('ok') else 'fail'}{suffix}"
         )
-    loop_state = context.get("vibecad_loop", {})
-    missing_lines = (
-        list(loop_state.get("remaining_outcomes", []))
-        if isinstance(loop_state, dict)
-        else []
-    )
-    validation_lines = (
-        list(loop_state.get("state_validation_notes", []))
-        if isinstance(loop_state, dict)
-        else []
-    )
-    steering = context.get("human_steering", {})
-    steering_lines = []
-    if isinstance(steering, dict):
-        steering_lines = [
-            f"- {item}"
-            for item in steering.get("active_messages", [])[-8:]
-            if str(item).strip()
-        ]
-    loop_lines = []
-    if isinstance(loop_state, dict):
-        delta = loop_state.get("document_delta")
-        contract = loop_state.get("execution_contract")
-        loop_lines.extend(
-            [
-                f"- turn: {loop_state.get('turn')}",
-                f"- next step: {loop_state.get('next_step')}",
-                f"- document object count: {loop_state.get('document_object_count')}",
-                f"- document delta: {_format_document_delta(delta)}",
-                f"- screenshot captured: {loop_state.get('screenshot_captured')}",
-                f"- visual feedback consumed: {loop_state.get('visual_feedback_consumed')}",
-                f"- visual attention flags: {loop_state.get('visual_attention_flags', [])}",
-            ]
-        )
-        if isinstance(contract, dict):
-            loop_lines.append(f"- execution mode: {contract.get('mode')}")
-            required_order = contract.get("required_order")
-            if isinstance(required_order, list) and required_order:
-                loop_lines.append(
-                    "- required workflow order: "
-                    + " -> ".join(str(item) for item in required_order)
-                )
-            completion_gates = contract.get("completion_gates")
-            if isinstance(completion_gates, list) and completion_gates:
-                loop_lines.append(
-                    "- completion gates: "
-                    + "; ".join(str(item) for item in completion_gates)
-                )
-    reference_lines = _reference_image_lines(context)
     screenshot = context.get("view_screenshot", {})
     visual = (
         screenshot.get("visual_observation", {}) if isinstance(screenshot, dict) else {}
@@ -1566,80 +2425,23 @@ def _continuation_prompt(
     if isinstance(visual, dict) and visual.get("available"):
         visual_lines.extend(
             [
-                f"- captured: {bool(screenshot.get('captured'))}",
-                f"- foreground ratio: {visual.get('foreground_pixel_ratio')}",
-                f"- foreground bbox: {visual.get('foreground_bbox')}",
-                f"- foreground bbox coverage: {visual.get('foreground_bbox_coverage')}",
-                f"- foreground components: {visual.get('foreground_component_count')}",
-                f"- largest component ratio: {visual.get('largest_component_pixel_ratio')}",
-                f"- center offset: {visual.get('foreground_center_offset')}",
-                f"- attention flags: {visual.get('attention_flags', [])}",
-                f"- layout: {visual.get('layout_summary')}",
-                f"- summary: {visual.get('inspection_summary')}",
+                f"f:{visual.get('attention_flags', [])}",
+                f"v:{_trace_text(visual.get('inspection_summary'), 80)}",
             ]
         )
     elif isinstance(screenshot, dict) and screenshot.get("captured"):
-        visual_lines.append(
-            "- screenshot captured, but no provider-readable visual observation is available"
-        )
-    return "\n".join(
-        [
-            "Continue the same VibeCAD CAD job. First re-anchor to the design "
-            "brief: compare the most recent shape delta against the brief's "
-            "dimensions and intended surface character. If the last feature "
-            "drifted (wrong size, wrong plane, or a straight pad where the "
-            "brief calls for a curved loft/sweep surface), correct it before "
-            "adding anything on top of it. Do not ask follow-up questions, do "
-            "not stop at a plan, and do not report that work will happen later. "
-            "Create or modify real FreeCAD document objects with the direct "
-            "function tools exposed to this provider turn.",
-            "",
-            f"Original user request: {prompt}",
-            "",
-            "Previous assistant checkpoint output (context only; do not restate it):",
-            outputs[-1],
-            "",
-            "Recent tool trace:",
-            "\n".join(trace_lines) or "- none",
-            "",
-            "Current deliberate loop state:",
-            "\n".join(loop_lines) or "- unavailable",
-            "",
-            "Current document objects:",
-            "\n".join(object_lines) or "- none",
-            "",
-            "Current viewport visual observation:",
-            "\n".join(visual_lines) or "- no screenshot observation yet",
-            *(
-                [
-                    "",
-                    f"Attached user reference images ({len(reference_lines)}) — "
-                    "the TARGET design, not current geometry; keep comparing "
-                    "the viewport against them:",
-                    "\n".join(reference_lines),
-                ]
-                if reference_lines
-                else []
-            ),
-            "",
-            "Remaining state-based outcomes:",
-            "\n".join(missing_lines) or "- none detected from current FreeCAD state",
-            "",
-            "State validation observations:",
-            "\n".join(validation_lines) or "- none",
-            "",
-            "Live user steering messages:",
-            "\n".join(steering_lines) or "- none",
-            "",
-            "Proceed with the next feature in the brief's plan. Do not repeat "
-            "prior progress or the original brief in the user-facing answer; "
-            "report only the new delta from this turn and the next immediate "
-            "CAD action. Tool errors are secondary to design correctness: "
-            "recover from failures using the current document state, but never "
-            "let a retry replace a curved functional surface with a simpler "
-            "wrong shape.",
-        ]
-    )
+        visual_lines.append("shot:no_vision")
+    lines = []
+    if session_preamble:
+        lines.append(session_preamble)
+    lines.append(f"U: {prompt}")
+    if trace_lines:
+        lines.extend(["T:", "\n".join(trace_lines)])
+    if object_lines:
+        lines.extend(["O:", "\n".join(object_lines)])
+    if visual_lines:
+        lines.extend(["V:", "\n".join(visual_lines)])
+    return "\n".join(lines)
 
 
 def _should_continue_autonomously(
@@ -1648,459 +2450,26 @@ def _should_continue_autonomously(
     service: VibeCADService,
     tool_trace: list[dict[str, Any]],
     turn_index: int,
-    visual_feedback_consumed: bool = False,
 ) -> bool:
     if (
         MAX_AUTONOMOUS_PROVIDER_TURNS is not None
         and turn_index >= MAX_AUTONOMOUS_PROVIDER_TURNS - 1
     ):
         return False
-    if _tool_batch_checkpoint_reached(tool_trace):
-        return True
-    try:
-        current_context = service.provider_context_summary()
-        missing = _missing_requirement_lines(prompt, current_context, tool_trace)
-        if missing:
-            human_gate = any(
-                "materially ambiguous" in line
-                or "impossible" in line
-                or "destructive" in line
-                for line in missing
-            )
-            return not human_gate
-    except Exception:
-        pass
-    doc_count = int(service.document_summary().get("object_count", 0) or 0)
-    if doc_count > 0 and _provider_attempted_write(tool_trace):
-        return False
-    if doc_count == 0 and _provider_attempted_write(tool_trace):
+    if _tool_batch_workspace_handoff_reached(tool_trace):
         return True
     return False
 
 
-def _context_has_satisfied_screenshot(context: dict[str, Any]) -> bool:
-    screenshot = context.get("view_screenshot", {})
-    if not isinstance(screenshot, dict):
-        return False
-    return _screenshot_summary_is_visually_satisfied(screenshot)
-
-
-def _screenshot_requirement_satisfied(service: VibeCADService) -> bool:
-    try:
-        summary = service.view_screenshot_summary()
-    except Exception:
-        return False
-    return _screenshot_summary_is_visually_satisfied(summary)
-
-
-def _screenshot_summary_is_visually_satisfied(summary: dict[str, Any]) -> bool:
-    observation = summary.get("visual_observation")
-    return (
-        bool(summary.get("captured"))
-        and int(summary.get("file_size", 0) or 0) > 0
-        and isinstance(observation, dict)
-        and bool(observation.get("available"))
-        and not bool(observation.get("mostly_blank"))
-        and not _visual_attention_flags(observation)
-    )
-
-
-def _visual_attention_flags(observation: dict[str, Any]) -> list[str]:
-    raw_flags = observation.get("attention_flags", [])
-    if not isinstance(raw_flags, list):
-        return []
-    return [
-        str(flag)
-        for flag in raw_flags
-        if str(flag)
-        in {
-            "mostly_blank",
-            "tiny_visible_model",
-            "off_center_model",
-            "model_fills_view_edges",
-        }
-    ]
-
-
-def _native_partdesign_feature_count_from_context(context: dict[str, Any]) -> int:
-    excluded = {
-        "PartDesign::Body",
-        "PartDesign::CoordinateSystem",
-        "PartDesign::Origin",
-    }
-    partdesign = context.get("partdesign", {}) if isinstance(context, dict) else {}
-    bodies = partdesign.get("bodies", []) if isinstance(partdesign, dict) else []
-    count = 0
-    if isinstance(bodies, list):
-        for body in bodies:
-            if not isinstance(body, dict):
-                continue
-            features = body.get("features", [])
-            if not isinstance(features, list):
-                continue
-            for feature in features:
-                if not isinstance(feature, dict):
-                    continue
-                type_id = str(feature.get("type", ""))
-                if type_id.startswith("PartDesign::") and type_id not in excluded:
-                    count += 1
-    if count:
-        return count
-    document = context.get("document", {}) if isinstance(context, dict) else {}
-    objects = document.get("objects", []) if isinstance(document, dict) else []
-    if not isinstance(objects, list):
-        return 0
-    return sum(
-        1
-        for item in objects
-        if isinstance(item, dict)
-        and str(item.get("type", "")).startswith("PartDesign::")
-        and str(item.get("type", "")) not in excluded
-    )
-
-
-def _partdesign_body_count_from_context(context: dict[str, Any]) -> int:
-    partdesign = context.get("partdesign", {}) if isinstance(context, dict) else {}
-    if isinstance(partdesign, dict):
-        body_count = partdesign.get("body_count")
-        if body_count is not None:
-            try:
-                return max(0, int(body_count))
-            except (TypeError, ValueError):
-                pass
-        bodies = partdesign.get("bodies", [])
-        if isinstance(bodies, list) and bodies:
-            return len([item for item in bodies if isinstance(item, dict)])
-    document = context.get("document", {}) if isinstance(context, dict) else {}
-    objects = document.get("objects", []) if isinstance(document, dict) else []
-    if not isinstance(objects, list):
-        return 0
-    return sum(
-        1
-        for item in objects
-        if isinstance(item, dict) and str(item.get("type", "")) == "PartDesign::Body"
-    )
-
-
-def _assembly_state_from_context(context: dict[str, Any]) -> tuple[int, int]:
-    assembly = context.get("assembly", {}) if isinstance(context, dict) else {}
-    if not isinstance(assembly, dict):
-        return 0, 0
-    try:
-        assembly_count = max(0, int(assembly.get("assembly_count", 0) or 0))
-    except (TypeError, ValueError):
-        assembly_count = 0
-    assemblies = assembly.get("assemblies", [])
-    component_count = 0
-    if isinstance(assemblies, list):
-        for item in assemblies:
-            if not isinstance(item, dict):
-                continue
-            for key in ("components", "component_count", "component_children_count"):
-                if key not in item:
-                    continue
-                try:
-                    component_count = max(component_count, int(item.get(key) or 0))
-                except (TypeError, ValueError):
-                    pass
-            children = item.get("component_children")
-            if isinstance(children, list):
-                component_count = max(component_count, len(children))
-    return assembly_count, component_count
-
-
-def _assembly_kinematic_summaries_from_context(
-    context: dict[str, Any],
-) -> list[dict[str, Any]]:
-    """Per-assembly component/grounded/joint counts from the provider context."""
-    assembly = context.get("assembly", {}) if isinstance(context, dict) else {}
-    if not isinstance(assembly, dict):
-        return []
-    assemblies = assembly.get("assemblies", [])
-    if not isinstance(assemblies, list):
-        return []
-    summaries: list[dict[str, Any]] = []
-    for item in assemblies:
-        if not isinstance(item, dict):
-            continue
-
-        def _count(value: Any) -> int:
-            try:
-                return max(0, int(value or 0))
-            except (TypeError, ValueError):
-                return 0
-
-        summaries.append(
-            {
-                "name": str(item.get("name") or item.get("label") or "the assembly"),
-                "components": _count(item.get("components")),
-                "grounded_count": _count(item.get("grounded_count")),
-                "joints": _count(item.get("joints")),
-            }
-        )
-    return summaries
-
-
-def _missing_requirement_lines(
-    prompt: str,
-    context: dict[str, Any],
-    tool_trace: list[dict[str, Any]],
-) -> list[str]:
-    lines: list[str] = []
-    objects = context.get("document", {}).get("objects", [])
-    document = context.get("document", {})
-    object_count = (
-        int(document.get("object_count", 0) or 0) if isinstance(document, dict) else 0
-    )
-    if object_count <= 0:
-        object_count = len(objects) if isinstance(objects, list) else 0
-    if object_count <= 0 and _provider_attempted_write(tool_trace):
-        return [
-            "- create the first meaningful native FreeCAD geometry for the request "
-            "using the active workbench tools before reporting completion"
-        ]
-    sketcher = context.get("sketcher", {}) if isinstance(context, dict) else {}
-    profile_status = (
-        sketcher.get("profile_status", {}) if isinstance(sketcher, dict) else {}
-    )
-    if isinstance(profile_status, dict) and profile_status.get("found"):
-        geometry_count = int(profile_status.get("geometry_count", 0) or 0)
-        if geometry_count > 0 and not profile_status.get("closed_profile"):
-            sketch_name = profile_status.get("sketch") or "the active sketch"
-            return [
-                f"- finish {sketch_name} into a closed profile before reporting completion"
-            ]
-        if geometry_count > 0 and not profile_status.get("fully_constrained"):
-            sketch_name = profile_status.get("sketch") or "the active sketch"
-            dof = profile_status.get("degrees_of_freedom")
-            suffix = f" ({dof} degrees of freedom)" if dof is not None else ""
-            return [
-                f"- fully constrain {sketch_name}{suffix} before creating dependent features"
-            ]
-        feature_types = {
-            str(item.get("type", "")) for item in objects if isinstance(item, dict)
-        }
-        has_partdesign_feature = any(
-            item_type.startswith("PartDesign::")
-            and item_type not in {"PartDesign::Body", "PartDesign::CoordinateSystem"}
-            for item_type in feature_types
-        )
-        if (
-            geometry_count > 0
-            and profile_status.get("closed_profile")
-            and not has_partdesign_feature
-        ):
-            sketch_name = profile_status.get("sketch") or "the active sketch"
-            return [
-                f"- create a native PartDesign feature from {sketch_name} before reporting completion"
-            ]
-    body_count = _partdesign_body_count_from_context(context)
-    if body_count >= 2:
-        assembly_count, component_count = _assembly_state_from_context(context)
-        if assembly_count <= 0:
-            lines.append(
-                "- multi-body component geometry exists but no native Assembly object exists; "
-                "switch to AssemblyWorkbench, create a native assembly, and add the generated component bodies before reporting completion"
-            )
-        elif component_count < body_count:
-            lines.append(
-                "- native Assembly has fewer components than generated PartDesign bodies "
-                f"({component_count}/{body_count}); add the remaining generated component bodies before reporting completion"
-            )
-    for kinematic in _assembly_kinematic_summaries_from_context(context):
-        if kinematic["components"] < 2:
-            continue
-        if kinematic["grounded_count"] <= 0:
-            lines.append(
-                f"- assembly {kinematic['name']} has {kinematic['components']} "
-                "components but no grounded component; ground one base component "
-                "with assembly.ground_component so the solver has a fixed anchor"
-            )
-        elif kinematic["joints"] <= 0:
-            lines.append(
-                f"- assembly {kinematic['name']} has a grounded component but no "
-                "joints; mate the components with assembly.create_joint using "
-                "geometry references (faces/edges/vertices), then run "
-                "assembly.solve — raw placement is layout, not mating"
-            )
-    lines.extend(_cam_requirement_lines(context, tool_trace))
-    visual_lines: list[str] = []
-    screenshot = context.get("view_screenshot", {})
-    observation = (
-        screenshot.get("visual_observation") if isinstance(screenshot, dict) else None
-    )
-    if isinstance(screenshot, dict) and screenshot.get("captured"):
-        if not isinstance(observation, dict) or not observation.get("available"):
-            visual_lines.append(
-                "- captured viewport screenshot has no provider-readable visual observation; capture again"
-            )
-        elif observation.get("mostly_blank"):
-            visual_lines.append(
-                "- viewport screenshot observation is mostly blank; fit/view the model and capture again"
-            )
-        elif _visual_attention_flags(observation):
-            flags = ", ".join(_visual_attention_flags(observation))
-            visual_lines.append(
-                "- viewport visual observation needs correction before completion "
-                f"({flags}); revise/fit/organize the model, capture again, then inspect the new image"
-            )
-    if _needs_screenshot_after_latest_successful_write(tool_trace):
-        visual_lines.append(
-            "- capture and inspect a viewport screenshot after the latest geometry changes before reporting completion"
-        )
-    lines.extend(visual_lines)
-    return lines
-
-
-def _cam_requirement_lines(
-    context: dict[str, Any],
-    tool_trace: list[dict[str, Any]],
-) -> list[str]:
-    """CAM contract steering: machine binding and validated postprocess.
-
-    Produces steering lines when a CAM job is not bound to a machine (so no
-    limits can be enforced) and when G-code was post-processed without a
-    machine validation result or despite unresolved error violations.
-    Non-empty lines block autonomous completion, so an unvalidated
-    postprocess refuses completion until it is corrected.
-    """
-    lines: list[str] = []
-    unbound_jobs: list[str] = []
-    cam = context.get("cam", {}) if isinstance(context, dict) else {}
-    jobs = cam.get("jobs", []) if isinstance(cam, dict) else []
-    if isinstance(jobs, list):
-        for job in jobs:
-            if not isinstance(job, dict) or "machine" not in job:
-                continue
-            if not job.get("machine"):
-                unbound_jobs.append(
-                    str(job.get("name") or job.get("label") or "the CAM job")
-                )
-    for item in tool_trace:
-        if not isinstance(item, dict) or not item.get("ok"):
-            continue
-        if str(item.get("tool_name") or "") != "cam.create_job":
-            continue
-        result = item.get("result")
-        if not isinstance(result, dict):
-            continue
-        if not result.get("machine"):
-            job_name = str(result.get("job") or result.get("job_label") or "the CAM job")
-            if job_name not in unbound_jobs:
-                unbound_jobs.append(job_name)
-    for job_name in unbound_jobs:
-        lines.append(
-            f"- CAM job {job_name} is not bound to a machine; recreate the job "
-            "with cam.create_job machine_name=... (define one first with "
-            "cam.define_machine if needed) so cam.validate_job and "
-            "cam.postprocess can enforce axis, spindle, and feed limits"
-        )
-    latest_postprocess: dict[str, Any] | None = None
-    for item in tool_trace:
-        if not isinstance(item, dict) or not item.get("ok"):
-            continue
-        if str(item.get("tool_name") or "") != "cam.postprocess":
-            continue
-        result = item.get("result")
-        if isinstance(result, dict):
-            latest_postprocess = result
-    if latest_postprocess is not None:
-        validation = latest_postprocess.get("validation")
-        if not isinstance(validation, dict):
-            lines.append(
-                "- G-code was post-processed without a machine validation "
-                "result; run cam.validate_job against the job's machine and "
-                "re-run cam.postprocess before reporting completion"
-            )
-        elif validation.get("forced") or int(validation.get("error_count", 0) or 0) > 0:
-            lines.append(
-                "- G-code was post-processed despite unresolved machine "
-                "validation error violations; fix the violations (tools, "
-                "operations, or machine limits), re-run cam.validate_job, and "
-                "post-process again before reporting completion"
-            )
-    return lines
-
-
-def _active_sketch_or_task_requires_more_work(service: VibeCADService) -> bool:
-    try:
-        sketcher = service.sketcher_summary()
-    except Exception:
-        sketcher = {}
-    profile_status = (
-        sketcher.get("profile_status", {}) if isinstance(sketcher, dict) else {}
-    )
-    if isinstance(profile_status, dict) and profile_status.get("found"):
-        geometry_count = int(profile_status.get("geometry_count", 0) or 0)
-        if geometry_count > 0 and (
-            not profile_status.get("closed_profile")
-            or not profile_status.get("fully_constrained")
-        ):
-            return True
-    return False
-
-
-def _provider_attempted_write(tool_trace: list[dict[str, Any]]) -> bool:
-    for item in tool_trace:
-        if item.get("safety") == SafetyLevel.SAFE_WRITE.value:
-            return True
-    return False
-
-
-def _needs_screenshot_after_latest_successful_write(
-    tool_trace: list[dict[str, Any]],
-) -> bool:
-    latest_write_index = -1
-    latest_screenshot_terminal_index = -1
-    for index, item in enumerate(tool_trace):
-        if not isinstance(item, dict):
-            continue
-        tool_name = str(item.get("tool_name") or "")
-        if tool_name == "core.capture_view_screenshot":
-            if item.get("ok") or _screenshot_failure_is_terminal_for_process(item):
-                latest_screenshot_terminal_index = index
-            continue
-        if not item.get("ok"):
-            continue
-        if item.get("safety") == SafetyLevel.SAFE_WRITE.value:
-            latest_write_index = index
-    return (
-        latest_write_index >= 0
-        and latest_screenshot_terminal_index < latest_write_index
-    )
-
-
-def _screenshot_failure_is_terminal_for_process(item: dict[str, Any]) -> bool:
-    result = item.get("result")
-    error = ""
-    if isinstance(result, dict):
-        error = str(result.get("error") or "")
-    if not error:
-        error = str(item.get("error") or "")
-    lowered = error.lower()
-    return (
-        "freecadgui" in lowered
-        or "qapplication unavailable" in lowered
-        or "gui unavailable" in lowered
-        or "no active gui document" in lowered
-    )
-
-
-def _tool_batch_checkpoint_reached(tool_trace: list[dict[str, Any]]) -> bool:
+def _tool_batch_workspace_handoff_reached(tool_trace: list[dict[str, Any]]) -> bool:
     for item in reversed(tool_trace):
         result = item.get("result")
         if not isinstance(result, dict):
             continue
-        if result.get("checkpoint") in {
-            "small_step",
-            "workbench_switch",
-            "workspace_entry",
-        }:
-            return True
-        if result.get("status") == "deferred_checkpoint":
+        if result.get("workspace_handoff") in {"workbench_switch", "workspace_entry"}:
             return True
         error = str(result.get("error", "")).lower()
-        if "small-step checkpoint" in error or "workbench-switch checkpoint" in error:
+        if "workspace handoff" in error:
             return True
         if item.get("ok"):
             return False
@@ -2125,16 +2494,43 @@ def provider_safe_tool_schemas(
             apply_workbench_allowlist=apply_workbench_allowlist,
         ):
             schemas.append(
-                service.registry.get(tool_name).to_schema(active_workbench=workbench)
+                _lean_provider_tool_schema(
+                    service.registry.get(tool_name).to_schema(active_workbench=workbench)
+                )
             )
     return schemas
 
 
-def _is_geometry_write_tool(tool: Any) -> bool:
-    return (
-        getattr(tool, "safety", None) is SafetyLevel.SAFE_WRITE
-        and getattr(tool, "name", "") not in NON_GEOMETRY_PROVIDER_WRITE_TOOLS
-    )
+def _lean_provider_tool_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "name": schema.get("name"),
+        "parameters": _lean_provider_schema_value(schema.get("parameters")),
+    }
+
+
+def _lean_provider_schema_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            compact = _lean_provider_schema_value(item)
+            if key == "required" and compact == []:
+                continue
+            if key in {
+                "description",
+                "default",
+                "examples",
+                "maximum",
+                "maxItems",
+                "minimum",
+                "minItems",
+                "title",
+            }:
+                continue
+            result[str(key)] = compact
+        return result
+    if isinstance(value, list):
+        return [_lean_provider_schema_value(item) for item in value]
+    return value
 
 
 def _policy_tool_block(
@@ -2150,11 +2546,80 @@ def _policy_tool_block(
                 "Document creation/opening must be an explicit user/UI action."
             ),
             "recoverable": True,
-            "required_next_action": {
-                "why": "Keep the model in the current document unless the user explicitly starts document management.",
-            },
         }
     return None
+
+
+def _active_sketch_edit_tool_block(
+    service: VibeCADService,
+    tool: Any,
+    tool_name: str,
+    live_workbench: str | None,
+) -> dict[str, Any] | None:
+    if tool.safety in {SafetyLevel.READ, SafetyLevel.VIEW}:
+        return None
+    if tool_name in SKETCH_EDIT_ALLOWED_TOOLS:
+        return None
+    try:
+        task = service.task_panel_summary()
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": (
+                "Could not verify whether a sketch is currently open before "
+                f"executing {tool_name}: {exc}"
+            ),
+            "retry_same_call": False,
+            "recoverable": True,
+            "required_next_action": {
+                "tool": "core.get_task_panel",
+                "why": "Verify edit mode before running write tools.",
+            },
+            "active_workbench": live_workbench,
+            "tool_workbench": tool.workbench,
+        }
+    if (
+        not isinstance(task, dict)
+        or not task.get("edit_mode")
+        or not task.get("active_sketch")
+    ):
+        return None
+    profile_status = (
+        task.get("profile_status")
+        if isinstance(task.get("profile_status"), dict)
+        else {}
+    )
+    ready = bool(
+        profile_status.get("ready_for_pad")
+        or profile_status.get("ready_for_pocket")
+    )
+    reason = str(profile_status.get("reason") or "").strip()
+    return {
+        "ok": False,
+        "error": (
+            f"FreeCAD is still editing sketch {task.get('active_sketch')}. "
+            f"Close or repair that sketch before running {tool_name}."
+        ),
+        "retry_same_call": False,
+        "recoverable": True,
+        "active_workbench": live_workbench,
+        "tool_workbench": tool.workbench,
+        "active_sketch": task.get("active_sketch"),
+        "profile_status": profile_status,
+        "task_panel": task,
+        "required_next_action": {
+            "tool": "sketcher.close_sketch" if ready else "sketcher.inspect_sketch",
+            "arguments": {"sketch_name": task.get("active_sketch")},
+            "why": (
+                "The sketch is ready; close edit mode before PartDesign features."
+                if ready
+                else (
+                    "The active sketch is not ready for PartDesign features"
+                    + (f": {reason}" if reason else ".")
+                )
+            ),
+        },
+    }
 
 
 def _consume_steering(steering_check: SteeringCheck | None) -> list[str]:
@@ -2178,10 +2643,6 @@ def _inject_human_steering(context: dict[str, Any], messages: list[str]) -> None
     applied = list(existing.get("active_messages") or [])
     applied.extend(messages)
     existing["active_messages"] = applied[-12:]
-    existing["instruction"] = (
-        "These are live user steering messages. Treat them as newer than the "
-        "original prompt and adjust the next CAD action accordingly."
-    )
     context["human_steering"] = existing
 
 
@@ -2193,13 +2654,7 @@ def _attach_steering_to_tool_result(
     messages = _consume_steering(steering_check)
     if not messages:
         return
-    result["human_steering"] = {
-        "messages": messages,
-        "instruction": (
-            "The user added this guidance while the tool loop was running. "
-            "Apply it before choosing the next tool or claiming completion."
-        ),
-    }
+    result["human_steering"] = {"messages": messages}
     _emit_progress(
         progress_callback,
         {
@@ -2214,23 +2669,19 @@ def make_provider_tool_runner(
     workbench: str | None = None,
     tool_trace: list[dict[str, Any]] | None = None,
     progress_callback: ProgressCallback | None = None,
-    turn_state: dict[str, Any] | None = None,
     cancellation_check: CancellationCheck | None = None,
     steering_check: SteeringCheck | None = None,
 ):
-    enforce_small_step_checkpoint = turn_state is not None
-    active_turn_state = turn_state if turn_state is not None else {}
-    current_workbench = workbench
+    provider_workbench = str(workbench or "").strip() or None
 
     def _run(tool_name: str, arguments_json: str = "{}") -> dict[str, Any]:
-        nonlocal current_workbench
+        nonlocal provider_workbench
         actual_workbench = service.active_workbench_name()
-        if actual_workbench:
-            current_workbench = actual_workbench
-        live_workbench = current_workbench or actual_workbench
+        live_workbench = provider_workbench or actual_workbench
         trace_entry: dict[str, Any] = {
             "tool_name": tool_name,
             "active_workbench": live_workbench,
+            "gui_workbench": actual_workbench,
             "arguments_json": _trace_text(arguments_json or "{}"),
             "ok": False,
         }
@@ -2281,6 +2732,15 @@ def make_provider_tool_runner(
         if policy_block is not None:
             return _finalize_result(policy_block)
 
+        sketch_edit_block = _active_sketch_edit_tool_block(
+            service,
+            tool,
+            tool_name,
+            live_workbench,
+        )
+        if sketch_edit_block is not None:
+            return _finalize_result(sketch_edit_block)
+
         try:
             args = json.loads(arguments_json or "{}")
         except json.JSONDecodeError as exc:
@@ -2289,84 +2749,61 @@ def make_provider_tool_runner(
         if not isinstance(args, dict):
             result = {"ok": False, "error": "Tool arguments must be a JSON object."}
             return _finalize_result(result)
-
-        if enforce_small_step_checkpoint and active_turn_state.get(
-            "workbench_switch_reached"
-        ):
-            checkpoint_name = str(
-                active_turn_state.get("deferred_checkpoint") or "workbench_switch"
-            )
+        arguments_signature = _tool_call_signature(tool_name, args)
+        trace_entry["arguments_signature"] = arguments_signature
+        repeated_block = _repeated_hard_blocked_tool_result(
+            tool_trace,
+            tool_name,
+            arguments_signature,
+        )
+        if repeated_block is not None:
             result = {
                 "ok": False,
-                "status": "deferred_checkpoint",
-                "executed": False,
-                "mutated_document": False,
-                "active_workbench": live_workbench,
-                "tool_workbench": tool.workbench,
-                "checkpoint": checkpoint_name,
+                "error": (
+                    "This exact tool call already failed and was marked "
+                    "non-repeatable. Do not retry it unchanged; repair or "
+                    "inspect the referenced model state, then call the tool "
+                    "with corrected arguments."
+                ),
                 "blocked_tool": tool_name,
                 "blocked_arguments_json": _trace_text(arguments_json or "{}"),
+                "previous_failure": repeated_block,
+                "retry_same_call": False,
                 "recoverable": True,
-                "required_next_action": {
-                    "finish_current_turn": True,
-                    "retry_tool_next_turn": tool_name,
-                    "retry_arguments_json": _trace_text(arguments_json or "{}"),
-                    "why": (
-                        "VibeCAD paused before running this tool so the active "
-                        "workbench tool surface can refresh."
-                    ),
-                },
-                "turn": active_turn_state.get("turn"),
+                "active_workbench": live_workbench,
+                "tool_workbench": tool.workbench,
             }
-            _emit_progress(
-                progress_callback,
-                {
-                    "event": "tool_workbench_switch_checkpoint_reached",
-                    "tool_name": tool_name,
-                    "active_workbench": live_workbench,
-                    "turn": active_turn_state.get("turn"),
-                },
-            )
             return _finalize_result(result)
 
-        if not _is_tool_available_in_live_context(service, tool, live_workbench):
-            auto_switched = _try_auto_activate_tool_workbench(
-                service, tool, live_workbench
-            )
-            if auto_switched:
-                live_workbench = service.active_workbench_name()
-                current_workbench = live_workbench
-                trace_entry["active_workbench"] = live_workbench
-                _emit_progress(
-                    progress_callback,
+        resolved_tool_workbench = _provider_scope_workbench_for_tool(
+            service,
+            tool,
+            live_workbench,
+        )
+        if resolved_tool_workbench is None:
+            result = {
+                "ok": False,
+                "error": (
+                    f"Tool is not available for the selected workspace: {tool_name}"
+                ),
+                "selected_workbench": live_workbench,
+                "active_workbench": actual_workbench,
+                "tool_workbench": tool.workbench,
+                "recoverable": True,
+                "required_next_action": (
                     {
-                        "event": "tool_workbench_auto_activated",
-                        "tool_name": tool_name,
-                        "active_workbench": live_workbench,
-                        "tool_workbench": tool.workbench,
-                    },
-                )
-            if not _is_tool_available_in_live_context(service, tool, live_workbench):
-                result = {
-                    "ok": False,
-                    "error": (
-                        f"Tool is not available for the active workbench: {tool_name}"
-                    ),
-                    "active_workbench": live_workbench,
-                    "tool_workbench": tool.workbench,
-                    "recoverable": True,
-                    "required_next_action": (
-                        {
-                            "tool": "core.enter_workspace",
-                            "arguments": {"name": tool.workbench},
-                            "then_retry_tool": tool_name,
-                            "why": "Enter the workspace that owns this human-equivalent FreeCAD tool, then retry.",
-                        }
-                        if tool.workbench
-                        else None
-                    ),
-                }
-                return _finalize_result(result)
+                        "tool": "core.enter_workspace",
+                        "arguments": {"name": tool.workbench},
+                        "then_retry_tool": tool_name,
+                    }
+                    if tool.workbench
+                    else None
+                ),
+            }
+            return _finalize_result(result)
+        if resolved_tool_workbench != live_workbench:
+            live_workbench = resolved_tool_workbench
+            trace_entry["active_workbench"] = live_workbench
 
         if not service.is_tool_enabled_for_provider(tool, live_workbench):
             script_mode = False
@@ -2398,69 +2835,6 @@ def make_provider_tool_runner(
             }
             return _finalize_result(result)
 
-        operation_score = _operation_score_for_tool(tool.name, tool.safety)
-        if (
-            enforce_small_step_checkpoint
-            and operation_score > 0
-            and _operation_score_checkpoint_reached(
-                active_turn_state,
-                next_operation_score=operation_score,
-            )
-        ):
-            result = {
-                "ok": False,
-                "status": "deferred_checkpoint",
-                "executed": False,
-                "mutated_document": False,
-                "active_workbench": live_workbench,
-                "tool_workbench": tool.workbench,
-                "checkpoint": "small_step",
-                "blocked_tool": tool_name,
-                "blocked_arguments_json": _trace_text(arguments_json or "{}"),
-                "recoverable": True,
-                "required_next_action": {
-                    "finish_current_turn": True,
-                    "retry_tool_next_turn": tool_name,
-                    "retry_arguments_json": _trace_text(arguments_json or "{}"),
-                    "inspect_first": [
-                        "core.get_active_document",
-                        "core.capture_view_screenshot",
-                    ],
-                },
-                "turn": active_turn_state.get("turn"),
-                "mutating_tool_calls": active_turn_state.get("mutating_tool_calls", 0),
-                "operation_score": active_turn_state.get("operation_score", 0),
-                "next_operation_score": operation_score,
-                "limit": _max_operation_score_per_provider_turn(),
-                "score_limit": _max_operation_score_per_provider_turn(),
-            }
-            active_turn_state["checkpoint_reached"] = True
-            _emit_progress(
-                progress_callback,
-                {
-                    "event": "tool_batch_checkpoint_reached",
-                    "tool_name": tool_name,
-                    "active_workbench": live_workbench,
-                    "turn": active_turn_state.get("turn"),
-                    "mutating_tool_calls": active_turn_state.get(
-                        "mutating_tool_calls", 0
-                    ),
-                    "operation_score": active_turn_state.get("operation_score", 0),
-                    "next_operation_score": operation_score,
-                    "limit": _max_operation_score_per_provider_turn(),
-                },
-            )
-            return _finalize_result(result)
-
-        if enforce_small_step_checkpoint and operation_score > 0:
-            active_turn_state["mutating_tool_calls"] = (
-                int(active_turn_state.get("mutating_tool_calls", 0) or 0) + 1
-            )
-            active_turn_state["operation_score"] = (
-                int(active_turn_state.get("operation_score", 0) or 0)
-                + operation_score
-            )
-
         try:
             if cancellation_check is not None and cancellation_check():
                 result = {
@@ -2471,167 +2845,91 @@ def make_provider_tool_runner(
                     "tool_workbench": tool.workbench,
                 }
                 return _finalize_result(result, attach_steering=False)
+            activation = _ensure_tool_execution_workbench(
+                service,
+                tool,
+                actual_workbench,
+                live_workbench,
+            )
+            if activation is not None:
+                if not activation.get("ok"):
+                    result = {
+                        "ok": False,
+                        "error": activation.get("error")
+                        or (
+                            "Could not activate the FreeCAD workbench required "
+                            f"to execute {tool_name}."
+                        ),
+                        "active_workbench": actual_workbench,
+                        "selected_workbench": live_workbench,
+                        "tool_workbench": tool.workbench,
+                        "recoverable": True,
+                    }
+                    return _finalize_result(result)
+                actual_workbench = str(
+                    activation.get("active_workbench")
+                    or activation.get("active")
+                    or tool.workbench
+                    or ""
+                ).strip() or actual_workbench
+                trace_entry["gui_workbench"] = actual_workbench
+                _emit_progress(
+                    progress_callback,
+                    {
+                        "event": "tool_execution_workbench_activated",
+                        "tool_name": tool_name,
+                        "active_workbench": actual_workbench,
+                        "selected_workbench": live_workbench,
+                        "tool_workbench": tool.workbench,
+                    },
+                )
             payload = service.registry.call(tool_name, **args)
             result = {
                 "ok": not (isinstance(payload, dict) and payload.get("ok") is False),
                 "result": payload,
             }
+            hard_failure = _result_hard_geometry_failure_text(payload)
+            if hard_failure:
+                result.update(_hard_geometry_failure_result(hard_failure))
             if result["ok"] and tool_name in {
                 "core.activate_workbench",
                 "core.enter_workspace",
             }:
                 requested_workbench = str(args.get("name", "") or "").strip()
-                should_checkpoint = bool(requested_workbench) and (
+                resolved_workbench = requested_workbench
+                if isinstance(payload, dict):
+                    resolved_workbench = str(
+                        payload.get("workspace")
+                        or payload.get("active_workbench")
+                        or requested_workbench
+                    ).strip()
+                should_handoff = bool(resolved_workbench) and (
                     tool_name == "core.enter_workspace"
-                    or requested_workbench != live_workbench
+                    or resolved_workbench != live_workbench
                 )
-                if should_checkpoint:
-                    checkpoint_name = (
+                if should_handoff:
+                    handoff_name = (
                         "workspace_entry"
                         if tool_name == "core.enter_workspace"
                         else "workbench_switch"
                     )
-                    current_workbench = requested_workbench
-                    trace_entry["active_workbench"] = requested_workbench
-                    result["checkpoint"] = checkpoint_name
-                    result["next_step"] = (
-                        "Return progress now so VibeCAD can refresh provider "
-                        f"function tools for {requested_workbench}."
-                    )
-                    result["required_next_action"] = {
-                        "finish_current_turn": True,
-                        "next_turn_workbench": requested_workbench,
-                        "why": (
-                            "The model explicitly entered a workspace; concrete "
-                            "workspace tools are exposed on the next provider turn."
-                        ),
-                    }
-                    if enforce_small_step_checkpoint:
-                        active_turn_state["workbench_switch_reached"] = True
-                        active_turn_state["deferred_checkpoint"] = checkpoint_name
+                    provider_workbench = resolved_workbench
+                    trace_entry["active_workbench"] = resolved_workbench
+                    result["workspace_handoff"] = handoff_name
                     _emit_progress(
                         progress_callback,
                         {
-                            "event": "tool_workbench_switch_checkpoint_reached",
+                            "event": "tool_workspace_handoff_reached",
                             "tool_name": tool_name,
-                            "active_workbench": requested_workbench,
-                            "turn": active_turn_state.get("turn"),
+                            "active_workbench": resolved_workbench,
                         },
                     )
-            if (
-                result["ok"]
-                and enforce_small_step_checkpoint
-                and _counts_toward_small_step_checkpoint(tool.name, tool.safety)
-                and _mutating_tool_checkpoint_reached(active_turn_state)
-            ):
-                active_turn_state["checkpoint_reached"] = True
-                result["checkpoint"] = "small_step"
-                result["next_step"] = (
-                    "Return concise progress now so VibeCAD can inspect the updated "
-                    "document state before more edits."
-                )
-                result["required_next_action"] = {
-                    "finish_current_turn": True,
-                    "inspect_first": [
-                        "core.get_active_document",
-                        "core.capture_view_screenshot",
-                    ],
-                    "why": (
-                        "A bounded batch of native FreeCAD mutations completed. "
-                        "The parent loop will refresh context and continue if work remains."
-                    ),
-                }
-                result["mutating_tool_calls"] = active_turn_state.get(
-                    "mutating_tool_calls", 0
-                )
-                result["operation_score"] = active_turn_state.get("operation_score", 0)
-                result["operation_score_delta"] = operation_score
-                result["limit"] = _max_operation_score_per_provider_turn()
-                result["score_limit"] = _max_operation_score_per_provider_turn()
-                _emit_progress(
-                    progress_callback,
-                    {
-                        "event": "tool_batch_checkpoint_reached",
-                        "tool_name": tool_name,
-                        "active_workbench": live_workbench,
-                        "turn": active_turn_state.get("turn"),
-                        "mutating_tool_calls": active_turn_state.get(
-                            "mutating_tool_calls", 0
-                        ),
-                        "operation_score": active_turn_state.get(
-                            "operation_score", 0
-                        ),
-                        "operation_score_delta": operation_score,
-                        "limit": _max_operation_score_per_provider_turn(),
-                    },
-                )
         except Exception as exc:
             result = {"ok": False, "error": str(exc)}
+            if _is_hard_geometry_failure(str(exc)):
+                result.update(_hard_geometry_failure_result(str(exc)))
         return _finalize_result(result)
-
-    setattr(_run, "_vibecad_turn_state", active_turn_state)
     return _run
-
-
-def _operation_score_checkpoint_reached(
-    turn_state: dict[str, Any],
-    *,
-    next_operation_score: int = 0,
-) -> bool:
-    current_score = int(turn_state.get("operation_score", 0) or 0)
-    projected_score = current_score + max(0, int(next_operation_score or 0))
-    if current_score <= 0 and next_operation_score > 0:
-        return False
-    return projected_score > _max_operation_score_per_provider_turn()
-
-
-def _operation_score_for_tool(tool_name: str, safety: SafetyLevel) -> int:
-    if safety is not SafetyLevel.SAFE_WRITE:
-        return 0
-    if tool_name in _ZERO_SCORE_WRITE_TOOLS:
-        return 0
-    if tool_name in _CHEAP_SKETCH_EDIT_TOOLS:
-        return 1
-    if tool_name in _SKETCH_GEOMETRY_EDIT_TOOLS:
-        return 2
-    if tool_name in _STRUCTURAL_SETUP_TOOLS:
-        return 3
-    if tool_name in _MODERATE_FEATURE_TOOLS:
-        return 5
-    if tool_name in _HIGH_IMPACT_FEATURE_TOOLS:
-        return 8
-    if tool_name.startswith("sketcher."):
-        return 2
-    return 5
-
-
-def _mutating_tool_checkpoint_reached(turn_state: dict[str, Any]) -> bool:
-    return (
-        int(turn_state.get("operation_score", 0) or 0)
-        >= _max_operation_score_per_provider_turn()
-    )
-
-
-def _max_operation_score_per_provider_turn() -> int:
-    for env_name in (
-        MAX_OPERATION_SCORE_PER_PROVIDER_TURN_ENV,
-        MAX_MUTATING_TOOL_CALLS_PER_PROVIDER_TURN_ENV,
-    ):
-        raw = os.environ.get(env_name)
-        if raw is not None and raw.strip():
-            try:
-                return max(1, int(raw))
-            except ValueError:
-                return MAX_OPERATION_SCORE_PER_PROVIDER_TURN
-    return MAX_OPERATION_SCORE_PER_PROVIDER_TURN
-
-
-def _max_mutating_tool_calls_per_provider_turn() -> int:
-    return _max_operation_score_per_provider_turn()
-
-
-def _counts_toward_small_step_checkpoint(tool_name: str, safety: SafetyLevel) -> bool:
-    return _operation_score_for_tool(tool_name, safety) > 0
 
 
 def _provider_time_exceeded(
@@ -2642,6 +2940,24 @@ def _provider_time_exceeded(
         and max_provider_seconds > 0
         and time.monotonic() - started_at >= max_provider_seconds
     )
+
+
+def _is_tool_available_in_provider_scope(
+    service: VibeCADService,
+    tool: Any,
+    workbench: str | None,
+) -> bool:
+    return _is_tool_available_for_provider_context(service, tool, workbench)
+
+
+def _provider_scope_workbench_for_tool(
+    service: VibeCADService,
+    tool: Any,
+    selected_workbench: str | None,
+) -> str | None:
+    if _is_tool_available_in_provider_scope(service, tool, selected_workbench):
+        return selected_workbench
+    return None
 
 
 def _is_tool_available_in_live_context(
@@ -2661,18 +2977,139 @@ def _is_tool_available_in_live_context(
     return False
 
 
-def _try_auto_activate_tool_workbench(
+def _tool_call_signature(tool_name: str, args: dict[str, Any]) -> str:
+    try:
+        encoded = json.dumps(args, sort_keys=True, separators=(",", ":"), default=str)
+    except Exception:
+        encoded = str(args)
+    return f"{tool_name}:{encoded}"
+
+
+def _repeated_hard_blocked_tool_result(
+    tool_trace: list[dict[str, Any]] | None,
+    tool_name: str,
+    arguments_signature: str,
+) -> dict[str, Any] | None:
+    if not tool_trace:
+        return None
+    for item in reversed(tool_trace[-30:]):
+        if not isinstance(item, dict):
+            continue
+        if item.get("ok") and item.get("safety") in {
+            SafetyLevel.SAFE_WRITE.value,
+            SafetyLevel.WRITE.value,
+            SafetyLevel.DESTRUCTIVE.value,
+        }:
+            return None
+        if (
+            item.get("tool_name") == tool_name
+            and item.get("arguments_signature") == arguments_signature
+        ):
+            result = item.get("result")
+            if isinstance(result, dict) and result.get("retry_same_call") is False:
+                return result
+            return None
+    return None
+
+
+def _hard_geometry_failure_result(error: str) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "error": str(error or "Hard FreeCAD geometry failure."),
+        "retry_same_call": False,
+        "recoverable": True,
+        "required_state_before_retry": (
+            "Repair or rebuild the invalid upstream geometry, recompute "
+            "successfully, then retry with corrected arguments. Do not repeat "
+            "the same call unchanged."
+        ),
+        "required_next_action": {
+            "tool": "core.get_report_view_errors",
+            "arguments": {"include_stale": True},
+            "why": (
+                "Read the hard FreeCAD errors, then inspect the failed sketch, "
+                "feature, body, or referenced subelement before another write."
+            ),
+        },
+    }
+
+
+def _result_hard_geometry_failure_text(value: Any) -> str:
+    if isinstance(value, dict):
+        for key in ("error", "reason", "message"):
+            text = str(value.get(key) or "").strip()
+            if text and _is_hard_geometry_failure(text):
+                return text
+        report = value.get("report_view_errors")
+        if isinstance(report, dict):
+            for item in report.get("errors") or []:
+                text = str(item or "").strip()
+                if text and _is_hard_geometry_failure(text):
+                    return text
+        transaction = value.get("transaction")
+        if isinstance(transaction, dict):
+            text = _result_hard_geometry_failure_text(transaction)
+            if text:
+                return text
+        for key in ("verification", "feature_effect", "body_shape_after", "feature_shape"):
+            nested = value.get(key)
+            if isinstance(nested, dict):
+                text = _result_hard_geometry_failure_text(nested)
+                if text:
+                    return text
+        return ""
+    if isinstance(value, list):
+        for item in value:
+            text = _result_hard_geometry_failure_text(item)
+            if text:
+                return text
+    return ""
+
+
+def _is_hard_geometry_failure(error: str) -> bool:
+    text = str(error or "").lower()
+    return any(
+        marker in text
+        for marker in (
+            "shape is invalid",
+            "brep_api",
+            "command not done",
+            "invalid edge link",
+            "result shape is null",
+            "failed to make face",
+            "wire is not closed",
+            "links are out of scope",
+            "out of scope links",
+            "graph must be a dag",
+            "tip shape is empty",
+            "shape is empty",
+        )
+    )
+
+
+def _ensure_tool_execution_workbench(
     service: VibeCADService,
     tool: Any,
-    current_workbench: str | None,
-) -> bool:
-    """Provider workbench changes must be explicit tool calls.
-
-    Hidden activation makes the model's tool loop diverge from the human UI
-    flow and leaves the next workbench-scoped tool surface stale.
-    """
-    return False
-    return False
+    actual_workbench: str | None,
+    provider_workbench: str | None,
+) -> dict[str, Any] | None:
+    target = str(tool.workbench or "").strip()
+    if not target or target == actual_workbench:
+        return None
+    if target == "SketcherWorkbench" and provider_workbench == "PartDesignWorkbench":
+        if actual_workbench == "PartDesignWorkbench":
+            return None
+    try:
+        result = service.activate_workbench(target)
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    active = str(result.get("active") or result.get("active_workbench") or "").strip()
+    ok = bool(result.get("activated")) and (not active or active == target)
+    return {
+        "ok": ok,
+        "active_workbench": active or target,
+        **({"error": result["error"]} if result.get("error") else {}),
+    }
 
 
 def _trace_text(value: Any, limit: int = 500) -> str:
@@ -2696,7 +3133,7 @@ def _result_summary(result: dict[str, Any]) -> dict[str, Any]:
     for key in (
         "status",
         "error",
-        "checkpoint",
+        "workspace_handoff",
         "blocked_tool",
         "blocked_arguments_json",
         "required_next_action",
@@ -2704,15 +3141,12 @@ def _result_summary(result: dict[str, Any]) -> dict[str, Any]:
         "active_workbench",
         "tool_workbench",
         "recoverable",
+        "retry_same_call",
         "executed",
         "mutated_document",
         "rolled_back_feature",
-        "operation_score",
-        "operation_score_delta",
-        "next_operation_score",
-        "score_limit",
-        "limit",
-        "mutating_tool_calls",
+        "selected_workbench",
+        "gui_workbench",
     ):
         if key in result:
             summary[key] = _summary_value(result[key])
@@ -2749,6 +3183,8 @@ def _result_summary(result: dict[str, Any]) -> dict[str, Any]:
             "rolled_back_feature",
             "body_shape_after_rollback",
             "recoverable",
+            "retry_same_call",
+            "required_state_before_retry",
             "error",
         ):
             if key in payload:

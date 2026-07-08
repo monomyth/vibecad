@@ -109,7 +109,7 @@ class TestVibeCADLiveAcceptance(SettingsSnapshotTestCase):
                         {
                             "schema": "vibecad-openai-agents-request-v1",
                             "model": DEFAULT_MODEL,
-                            "agent": {"tools": [{"function_name": "core_get_active_document"}]},
+                            "agent": {"tools": [{"function_name": "c_doc"}]},
                             "model_visible_context": {"workbench": "PartDesignWorkbench"},
                         }
                     ),
@@ -141,7 +141,7 @@ class TestVibeCADLiveAcceptance(SettingsSnapshotTestCase):
                             "model_visible_context": {
                                 "workbench": "PartDesignWorkbench",
                                 "available_tools": [{"name": "partdesign.create_sketch"}],
-                                "provider_function_tools": ["partdesign_create_sketch"],
+                                "provider_function_tools": ["pd_sk"],
                                 "provider_tool_surface": {"tools": ["partdesign.create_sketch"]},
                                 "tool_shape_report": {"provider_visible_tool_count": 1},
                             },
@@ -183,11 +183,11 @@ class TestVibeCADLiveAcceptance(SettingsSnapshotTestCase):
         )
         self.assertIn("timeout", reasons)
 
-    def test_live_provider_acceptance_allows_prior_checkpoint_before_completion(self):
+    def test_live_provider_acceptance_allows_prior_refresh_before_completion(self):
         script = _repo_tool_script("vibecad_live_provider_acceptance.py")
         data = runpy.run_path(str(script), run_name="vibecad_live_provider_acceptance_test")
         reasons = data["_final_output_unresolved_reasons"](
-            "Progress checkpoint: I will continue after refresh. "
+            "Workspace refreshed: I will continue with the current tool surface. "
             "Completed a coherent first-pass aerospace wing-rib CAD model. "
             "Captured and inspected the viewport screenshot; the model is visible."
         )
@@ -501,7 +501,7 @@ class TestVibeCADLiveAcceptance(SettingsSnapshotTestCase):
                 json.dumps(
                     {
                         "schema": "vibecad-openai-agents-request-v1",
-                        "agent": {"tools": [{"function_name": "partdesign_create_sketch"}]},
+                        "agent": {"tools": [{"function_name": "pd_sk"}]},
                         "model_visible_context": {"workbench": "PartDesignWorkbench"},
                     }
                 ),

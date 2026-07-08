@@ -11,7 +11,7 @@ from .common import profile_validation, run_freecad_transaction, solver_status
 
 TOOL_SPEC = {
     "name": "sketcher.create_sketch",
-    "description": "Create a standalone native Sketcher sketch outside any PartDesign Body. In PartDesign workflows use partdesign.create_sketch instead so the sketch lives inside a Body (it supports origin planes, datum planes, and faces too).",
+    "description": "Create a standalone Sketcher sketch. In PartDesign workflows use partdesign.create_sketch so the sketch lives inside a Body.",
     "contextual": True,
     "parameters": {
         "type": "object",

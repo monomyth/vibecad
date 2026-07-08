@@ -11,11 +11,9 @@ from VibeCADTransactions import run_freecad_transaction
 
 
 TOOL_SPEC = {'contextual': True,
- 'description': 'Create a native PartDesign AdditiveHelix or SubtractiveHelix by '
-                'sweeping a profile sketch along a helical path around a sketch '
-                'axis. Use for threads, springs, coils, worm gears, and auger '
-                'flights: additive builds the helix as material, subtractive cuts '
-                'a helical groove (e.g. thread relief) from the body.',
+ 'description': 'Create a native PartDesign AdditiveHelix/SubtractiveHelix by '
+                'sweeping a profile along a helical path. Use for threads, '
+                'springs, coils, worm gears, and auger flights.',
  'name': 'partdesign.helix_profile',
  'parameters': {'properties': {'angle': {'description': 'Helix taper angle in degrees (default 0 = constant radius).',
                                          'type': 'number'},

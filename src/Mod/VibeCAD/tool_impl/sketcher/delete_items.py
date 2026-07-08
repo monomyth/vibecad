@@ -25,13 +25,9 @@ from .common import (
 TOOL_SPEC = {
     "name": "sketcher.delete_items",
     "description": (
-        "Delete Sketcher geometry and/or constraints in one call. Accepts single items, bulk "
-        "lists, or all_geometry/all_constraints for full cleanup. Geometry items may be integer "
-        "indices or geometry handles (geometry:N / name:X); constraint items may be integer "
-        "indices, constraint handles (constraint:N), or constraint names. Returns old-to-new "
-        "index maps so follow-up edits can re-target surviving items. Removes items entirely — "
-        "use sketcher.edit_constraint to change a constraint's value or name instead of "
-        "deleting and re-adding it."
+        "Delete Sketcher geometry and/or constraints by index, name, or handle. "
+        "Supports bulk lists and all_geometry/all_constraints. Returns "
+        "old-to-new index maps for surviving items."
     ),
     "contextual": True,
     "workbench": "SketcherWorkbench",

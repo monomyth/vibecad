@@ -7,22 +7,17 @@ from __future__ import annotations
 from typing import Any
 
 from .common import active_response, get_sketch, no_sketch, resolve_geometry_index, run_freecad_transaction
-from .constrain_common import optional_point_position
+from .constrain_common import optional_point_position, point_role_enum
 
 
-POINT_ROLE_ENUM = ["whole", "start", "end", "center", "midpoint", "origin"]
+POINT_ROLE_ENUM = point_role_enum()
 
 TOOL_SPEC = {
     "name": "sketcher.add_constraint",
     "description": (
-        "Add one native Sketcher constraint to an existing sketch. Supports every core human Sketcher "
-        "constraint: Coincident, PointOnObject, Horizontal, Vertical, Parallel, Perpendicular, Tangent, "
-        "Equal, Symmetric, Block, Distance (on one element or between two points), DistanceX, DistanceY, "
-        "Radius, Diameter, Angle (on one curve or between two), and Lock (pin a point to exact x/y). "
-        "Point attachments accept either raw *_pos integers or semantic *_point roles "
-        "(start/end/center/midpoint/origin). Geometry targets accept indices or handles such as "
-        "geometry:0, name:edge, origin, axis:H, axis:V, external:0. Creates new constraints only — "
-        "use sketcher.edit_constraint to change existing ones and sketcher.delete_items to remove them."
+        "Add one Sketcher constraint. Use dimensional constraints for sizes "
+        "and locations, geometric constraints for relationships, and inspect "
+        "solver/DoF before downstream features."
     ),
     "contextual": True,
     "parameters": {
@@ -149,17 +144,20 @@ def _constraint_indices(raw_value: Any) -> int | list[int]:
 
 
 def _resolve_point_roles(
+    sketch: Any,
     constraint_type: str,
     first_pos: int | None,
     first_point: str | None,
     first_geometry_handle: str | None,
+    first_geometry: int | None,
     second_pos: int | None,
     second_point: str | None,
     second_geometry_handle: str | None,
+    second_geometry: int | None,
     third_pos: int | None,
     third_point: str | None,
     third_geometry_handle: str | None,
-    second_geometry: int | None,
+    third_geometry: int | None,
 ) -> tuple[int | None, int | None, int | None]:
     """Resolve semantic point roles (start/end/center/...) into raw Sketcher pos ints.
 
@@ -186,14 +184,46 @@ def _resolve_point_roles(
         constraint_type not in {"Distance", "Angle"} or first_point is not None or has_second
     )
     if first_pos is None and (first_point is not None or first_needs_default):
-        first_pos = optional_point_position(first_point, first_geometry_handle, first_default or "start")
+        first_pos = optional_point_position(
+            first_point,
+            first_geometry_handle,
+            _geometry_default_role(sketch, first_geometry, first_default or "start"),
+            _geometry_kind(sketch, first_geometry),
+        )
     if second_pos is None and (
         second_point is not None or (second_default is not None and has_second)
     ):
-        second_pos = optional_point_position(second_point, second_geometry_handle, second_default or "start")
+        second_pos = optional_point_position(
+            second_point,
+            second_geometry_handle,
+            _geometry_default_role(sketch, second_geometry, second_default or "start"),
+            _geometry_kind(sketch, second_geometry),
+        )
     if third_pos is None and (third_point is not None or third_default is not None):
-        third_pos = optional_point_position(third_point, third_geometry_handle, third_default or "whole")
+        third_pos = optional_point_position(
+            third_point,
+            third_geometry_handle,
+            _geometry_default_role(sketch, third_geometry, third_default or "whole"),
+            _geometry_kind(sketch, third_geometry),
+        )
     return first_pos, second_pos, third_pos
+
+
+def _geometry_kind(sketch: Any, geometry_index: int | None) -> str | None:
+    if geometry_index is None or int(geometry_index) < 0:
+        return None
+    geometry = list(getattr(sketch, "Geometry", []) or [])
+    index = int(geometry_index)
+    if index >= len(geometry):
+        return None
+    return geometry[index].__class__.__name__
+
+
+def _geometry_default_role(sketch: Any, geometry_index: int | None, default: str) -> str:
+    kind = str(_geometry_kind(sketch, geometry_index) or "").lower()
+    if kind in {"circle", "part::geomcircle", "ellipse", "part::geomellipse"} and default in {"start", "end"}:
+        return "center"
+    return default
 
 
 def run(
@@ -227,22 +257,6 @@ def run(
             "supported": sorted(SUPPORTED_CONSTRAINTS),
         }
     try:
-        first_pos, second_pos, third_pos = _resolve_point_roles(
-            clean_type,
-            first_pos,
-            first_point,
-            first_geometry_handle,
-            second_pos,
-            second_point,
-            second_geometry_handle,
-            third_pos,
-            third_point,
-            third_geometry_handle,
-            second_geometry,
-        )
-    except ValueError as exc:
-        return {"ok": False, "error": str(exc), "constraint_type": clean_type}
-    try:
         first_geometry = resolve_geometry_index(service, sketch, first_geometry, first_geometry_handle)
         if second_geometry is not None or second_geometry_handle:
             second_geometry = resolve_geometry_index(service, sketch, second_geometry, second_geometry_handle)
@@ -258,6 +272,37 @@ def run(
             "second_geometry_handle": second_geometry_handle,
             "third_geometry": third_geometry,
             "third_geometry_handle": third_geometry_handle,
+        }
+    try:
+        first_pos, second_pos, third_pos = _resolve_point_roles(
+            sketch,
+            clean_type,
+            first_pos,
+            first_point,
+            first_geometry_handle,
+            first_geometry,
+            second_pos,
+            second_point,
+            second_geometry_handle,
+            second_geometry,
+            third_pos,
+            third_point,
+            third_geometry_handle,
+            third_geometry,
+        )
+    except ValueError as exc:
+        return {
+            "ok": False,
+            "error": str(exc),
+            "constraint_type": clean_type,
+            "first_geometry": first_geometry,
+            "second_geometry": second_geometry,
+            "third_geometry": third_geometry,
+            "required_next_action": {
+                "tool": "sketcher.inspect_sketch",
+                "arguments": {"sketch_name": sketch.Name, "include": ["geometry"]},
+                "why": "Inspect geometry types and use a valid point role such as start/end for lines or center for circles.",
+            },
         }
 
     def _make_constraint():

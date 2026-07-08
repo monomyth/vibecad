@@ -19,10 +19,8 @@ from .common import (
 TOOL_SPEC = {
     "name": "sketcher.add_external_geometry",
     "description": (
-        "Add one native Sketcher external geometry reference from an existing document object "
-        "subelement, equivalent to the Sketcher external geometry tool. Use to constrain sketch "
-        "geometry against edges/vertices of existing solids or other sketches; find candidates "
-        "with sketcher.inspect_sketch include=['reference_geometry']."
+        "Add one Sketcher external-geometry reference from an existing object "
+        "subelement. Use to constrain sketches to existing edges/vertices."
     ),
     "contextual": True,
     "parameters": {

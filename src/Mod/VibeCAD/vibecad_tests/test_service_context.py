@@ -6,6 +6,7 @@ import json
 import re
 from pathlib import Path
 import tempfile
+from typing import Any
 
 from VibeCADCore import (
     VibeCADService,
@@ -16,13 +17,25 @@ from VibeCADPreferences import (
     save_settings,
 )
 from VibeCADProvider import (
+    BaseProvider,
     OfflineProvider,
+    ProviderResult,
     _agents_input_from_context,
     _model_visible_context,
 )
 from VibeCADSession import (
+    DESIGN_PREFLIGHT_SUBMIT_TOOL,
+    _design_preflight_build_ready,
+    _design_preflight_existing_state_lines,
+    _design_preflight_missing_fields,
+    _design_preflight_prompt,
+    _design_preflight_user_questions_answered,
+    _accepted_design_memory_lines,
+    _continuation_prompt,
+    _persist_submitted_design_preflight,
     _prompt_with_conversation,
     provider_safe_tool_schemas,
+    run_prompt,
 )
 
 from vibecad_tests.support import (
@@ -32,6 +45,52 @@ from vibecad_tests.support import (
 
 
 class TestVibeCADServiceContext(SettingsSnapshotTestCase):
+    def _build_ready_preflight_payload(
+        self,
+        *,
+        intent: str = "Make a functional part.",
+        architecture: str = "single solid body",
+    ) -> dict[str, Any]:
+        return {
+            "schema": "vibecad-design-preflight-v1",
+            "status": "build_ready",
+            "user_intent": intent,
+            "requirement_refinement": [
+                {
+                    "question": "Which material?",
+                    "model_answer": "CNC aluminum",
+                    "assumption": True,
+                    "why_it_matters": "It drives wall thickness and load path.",
+                }
+            ],
+            "design_intent_draft": {
+                "architecture": architecture,
+                "bodies_components": ["Primary body"],
+                "interfaces": ["mounting face"],
+                "mechanisms": ["none"],
+                "manufacturing_assumptions": ["CNC aluminum"],
+                "non_negotiable_geometry": ["mounting face"],
+                "risks": ["placeholder geometry"],
+            },
+            "adversarial_review": {
+                "blocking_issues": [],
+                "criticisms": ["Load path and manufacturing method must be explicit."],
+                "required_revisions": [],
+            },
+            "final_build_plan": {
+                "architecture": architecture,
+                "bodies": ["Primary body"],
+                "sketches_features": ["master sketch", "pad"],
+                "interfaces": ["mounting face"],
+                "mechanisms": ["none"],
+                "manufacturing_assumptions": ["CNC aluminum"],
+                "critical_geometry": ["mounting face"],
+                "construction_order": ["sketch", "pad", "verify"],
+                "verification_checks": ["inspect dimensions"],
+                "forbidden_shortcuts": ["placeholder box"],
+            },
+        }
+
     def test_service_has_core_read_tools(self):
         service = VibeCADService()
         names = set(service.registry.names())
@@ -355,11 +414,8 @@ class TestVibeCADServiceContext(SettingsSnapshotTestCase):
         self.assertEqual(context["workbench"], "PartDesignWorkbench")
         self.assertIn("partdesign", context)
         self.assertIn("sketcher", context)
-        self.assertIn("provider_tool_surface", context)
-        self.assertEqual(
-            context["provider_tool_surface"]["active_workbench"],
-            "PartDesignWorkbench",
-        )
+        self.assertNotIn("provider_tool_surface", context)
+        self.assertNotIn("tool_shape_report", context)
         for unrelated in (
             "mesh",
             "points",
@@ -391,22 +447,98 @@ class TestVibeCADServiceContext(SettingsSnapshotTestCase):
             self.assertNotIn(unrelated, context)
 
     def test_model_visible_context_uses_scoped_provider_context(self):
+        import FreeCAD as App
+
+        doc = App.newDocument("VibeCADScopedProviderContextTest")
         service = VibeCADService()
         service.active_workbench_name = lambda: "PartDesignWorkbench"
-        context = service.provider_context_summary()
-        context["provider_tool_schemas"] = provider_safe_tool_schemas(
-            service,
-            "PartDesignWorkbench",
-        )
-        context["provider_tool_schemas_workbench"] = "PartDesignWorkbench"
+        try:
+            doc.addObject("PartDesign::Body", "Body")
+            doc.addObject("Sketcher::SketchObject", "Sketch")
+            doc.recompute()
+            context = service.provider_context_summary()
+            context["provider_tool_schemas"] = provider_safe_tool_schemas(
+                service,
+                "PartDesignWorkbench",
+            )
+            context["provider_tool_schemas_workbench"] = "PartDesignWorkbench"
 
-        visible = _model_visible_context(context)
-        self.assertIn("partdesign", visible)
-        self.assertIn("sketcher", visible)
+            visible = _model_visible_context(context, {"sections": ["domain"]})
+            self.assertIn("partdesign", visible)
+            self.assertIn("sketcher", visible)
+            self.assertNotIn("provider_tool_schemas", visible)
+            self.assertNotIn("mesh", visible)
+            self.assertNotIn("bim", visible)
+            self.assertNotIn("robot", visible)
+        finally:
+            App.closeDocument(doc.Name)
+
+    def test_model_visible_domain_context_is_compact(self):
+        long_reason = " ".join(["long validation text"] * 30)
+        visible = _model_visible_context(
+            {
+                "workbench": "PartDesignWorkbench",
+                "partdesign": {
+                    "document": "Doc",
+                    "requested": None,
+                    "body_count": 1,
+                    "selected": {
+                        "name": "Body",
+                        "label": "Body",
+                        "type": "PartDesign::Body",
+                        "features": [
+                            {
+                                "name": f"Pad{i}",
+                                "label": f"Pad {i}",
+                                "type": "PartDesign::Pad",
+                                "reason": long_reason,
+                            }
+                            for i in range(25)
+                        ],
+                    },
+                },
+                "sketcher": {
+                    "found": True,
+                    "geometry": [
+                        {
+                            "index": i,
+                            "type": "LineSegment",
+                            "construction": False,
+                            "start": [1.123456789, 2.0, 0.0],
+                        }
+                        for i in range(30)
+                    ],
+                    "profile_status": {
+                        "degrees_of_freedom": 16,
+                        "ready_for_pad": False,
+                        "reason": long_reason,
+                    },
+                },
+                "provider_tool_schemas": [{"name": "partdesign.create_sketch"}],
+            },
+            {"sections": ["domain"]},
+        )
+
+        partdesign = visible["partdesign"]
+        self.assertNotIn("document", partdesign)
+        self.assertNotIn("requested", partdesign)
+        features = partdesign["selected"]["features"]
+        self.assertEqual(len(features), 12)
+        self.assertEqual(partdesign["selected"]["features_omitted"], 13)
+        self.assertEqual(features[0]["type"], "Pad")
+        self.assertLessEqual(len(features[0]["reason"]), 120)
+
+        sketcher = visible["sketcher"]
+        geometry = sketcher["geometry"]
+        self.assertEqual(len(geometry), 16)
+        self.assertEqual(sketcher["geometry_omitted"], 14)
+        self.assertEqual(geometry[0]["type"], "LineSegment")
+        self.assertNotIn("construction", geometry[0])
+        self.assertEqual(
+            sketcher["profile_status"]["degrees_of_freedom"],
+            16,
+        )
         self.assertNotIn("provider_tool_schemas", visible)
-        self.assertNotIn("mesh", visible)
-        self.assertNotIn("bim", visible)
-        self.assertNotIn("robot", visible)
 
     def test_provider_api_key_reads_dotenv_without_exposing_context(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -454,7 +586,7 @@ class TestVibeCADServiceContext(SettingsSnapshotTestCase):
                 "provider_function_tools": [
                     {
                         "tool_name": "partdesign.create_sketch",
-                        "function_name": "partdesign_create_sketch",
+                        "function_name": "pd_sk",
                     }
                 ],
                 "provider_tool_surface": {"tools": ["partdesign.create_sketch"]},
@@ -513,35 +645,44 @@ class TestVibeCADServiceContext(SettingsSnapshotTestCase):
             },
             {"object_names": ["TopHeadPlane", "TopHeadSketch", "Missing"], "max_objects": 1},
         )
-        self.assertEqual(visible["context_kind"], "compact_current_freecad_context")
-        self.assertNotIn("conversation", visible)
+        self.assertIn("conv", visible)
+        self.assertEqual(visible["conv"]["items"][0]["content"], "large old prompt")
+        self.assertEqual(visible["conv"]["items"][1]["content"], "large old answer")
         self.assertNotIn("provider_tool_surface", visible)
-        self.assertEqual(len(visible["document"]["objects"]), 1)
-        self.assertEqual(visible["document"]["objects"][0]["name"], "TopHeadPlane")
-        self.assertNotIn("base", visible["document"]["objects"][0])
-        query = visible["object_query"]
-        self.assertFalse(query["all_found"])
-        self.assertEqual([item["exists"] for item in query["queries"]], [True, True, False])
-        self.assertEqual(query["queries"][1]["matches"][0]["label"], "TopHeadSketch")
-        self.assertEqual(
-            visible["workbench_tool_pack"]["tool_pack"]["tool_count"],
-            3,
-        )
+        self.assertEqual(len(visible["doc"]["objs"]), 1)
+        self.assertEqual(visible["doc"]["objs"][0]["name"], "TopHeadPlane")
+        self.assertNotIn("base", visible["doc"]["objs"][0])
+        self.assertNotIn("bound_box", visible["doc"]["objs"][0])
+        query = visible["q"]
+        self.assertFalse(query["all"])
+        self.assertEqual([item["ok"] for item in query["q"]], [True, True, False])
+        self.assertEqual(query["q"][1]["m"][0]["lbl"], "TopHeadSketch")
 
-    def test_model_visible_context_conversation_section_returns_metadata_only(self):
+    def test_model_visible_context_conversation_section_returns_saved_turns(self):
         visible = _model_visible_context(
             {
                 "workbench": "PartDesignWorkbench",
                 "conversation": {
-                    "conversation": [{"role": "user", "content": "do not dump this"}],
+                    "conversation": [
+                        {"role": "user", "content": "keep this requirement"}
+                    ],
+                    "scope": {
+                        "kind": "saved_document",
+                        "document": "PartDoc",
+                        "file_path": "/tmp/part.FCStd",
+                        "persistent": True,
+                    },
                     "path": "/tmp/conversation.json",
                 },
             },
             {"sections": ["conversation"]},
         )
-        self.assertEqual(visible["conversation"]["turn_count"], 1)
-        self.assertTrue(visible["conversation"]["content_omitted"])
-        self.assertNotIn("do not dump this", str(visible))
+        self.assertEqual(visible["conv"]["turns"], 1)
+        self.assertEqual(visible["conv"]["scope"]["document"], "PartDoc")
+        self.assertEqual(
+            visible["conv"]["items"],
+            [{"role": "user", "content": "keep this requirement"}],
+        )
 
     def test_conversation_history_is_scoped_to_active_document(self):
         import FreeCAD as App
@@ -614,6 +755,1075 @@ class TestVibeCADServiceContext(SettingsSnapshotTestCase):
                 for document in list(App.listDocuments().values()):
                     App.closeDocument(document.Name)
 
+    def test_design_preflight_answers_preserve_presented_options(self):
+        with _temporary_vibecad_home():
+            service = VibeCADService()
+            service.update_design_preflight(
+                {
+                    "schema": "vibecad-design-preflight-v1",
+                    "status": "needs_user",
+                    "user_intent": "Make a functional part.",
+                    "requirement_refinement": [
+                        {
+                            "question": "Which profile?",
+                            "model_answer": "clip point",
+                            "assumption": True,
+                            "why_it_matters": "The profile controls the curve geometry.",
+                        }
+                    ],
+                    "user_questions": [
+                        {
+                            "question": "Which profile should be used?",
+                            "default_answer": "clip_point",
+                            "options": [
+                                {"label": "Clip point", "answer": "clip_point"},
+                                {"label": "Drop point", "answer": "drop_point"},
+                            ],
+                        }
+                    ],
+                }
+            )
+
+            result = service.record_design_preflight_answers(
+                [
+                    {
+                        "question": "Which profile should be used?",
+                        "answer": "drop_point",
+                        "source": "choice",
+                        "default_answer": "clip_point",
+                        "options": [
+                            {"label": "Clip point", "answer": "clip_point"},
+                            {"label": "Drop point", "answer": "drop_point"},
+                        ],
+                    }
+                ]
+            )
+
+        saved = result["design_preflight"]["last_user_answers"][0]
+        self.assertEqual(saved["answer"], "drop_point")
+        self.assertEqual(
+            saved["options"],
+            [
+                {"label": "Clip point", "answer": "clip_point"},
+                {"label": "Drop point", "answer": "drop_point"},
+            ],
+        )
+
+    def test_design_preflight_update_preserves_answer_rounds_for_build_plan(self):
+        with _temporary_vibecad_home():
+            service = VibeCADService()
+            service.update_design_preflight(
+                {
+                    "schema": "vibecad-design-preflight-v1",
+                    "status": "needs_user",
+                    "user_intent": "Make a functional part.",
+                    "requirement_refinement": [
+                        {
+                            "question": "Which profile?",
+                            "model_answer": "clip point",
+                            "assumption": True,
+                            "why_it_matters": "The profile controls the curve geometry.",
+                        }
+                    ],
+                    "user_questions": [
+                        {
+                            "question": "Which profile should be used?",
+                            "default_answer": "clip_point",
+                            "options": [
+                                {"label": "Clip point", "answer": "clip_point"},
+                                {"label": "Drop point", "answer": "drop_point"},
+                            ],
+                        }
+                    ],
+                }
+            )
+            service.record_design_preflight_answers(
+                [
+                    {
+                        "question": "Which profile should be used?",
+                        "answer": "drop_point",
+                        "source": "choice",
+                        "default_answer": "clip_point",
+                        "options": [
+                            {"label": "Clip point", "answer": "clip_point"},
+                            {"label": "Drop point", "answer": "drop_point"},
+                        ],
+                    }
+                ]
+            )
+
+            result = service.update_design_preflight(
+                {
+                    "schema": "vibecad-design-preflight-v1",
+                    "status": "build_ready",
+                    "user_intent": "Make a functional part.",
+                    "requirement_refinement": [
+                        {
+                            "question": "Which profile?",
+                            "model_answer": "drop point",
+                            "assumption": False,
+                            "why_it_matters": "The user answer controls the curve geometry.",
+                        }
+                    ],
+                    "design_intent_draft": {
+                        "architecture": "curved blade body",
+                        "bodies_components": ["Blade"],
+                        "interfaces": ["pivot bore"],
+                        "mechanisms": ["pivot"],
+                        "manufacturing_assumptions": ["CNC"],
+                        "non_negotiable_geometry": ["drop-point curve"],
+                        "risks": ["straight placeholder profile"],
+                    },
+                    "adversarial_review": {
+                        "blocking_issues": [],
+                        "criticisms": ["no straight placeholder"],
+                        "required_revisions": [],
+                    },
+                    "final_build_plan": {
+                        "architecture": "curved blade body",
+                        "bodies": ["Blade"],
+                        "sketches_features": ["profile sketch", "pad"],
+                        "interfaces": ["pivot bore"],
+                        "mechanisms": ["pivot"],
+                        "manufacturing_assumptions": ["CNC"],
+                        "critical_geometry": ["drop-point curve"],
+                        "construction_order": ["sketch", "verify curves", "pad"],
+                        "verification_checks": ["inspect geometry types"],
+                        "forbidden_shortcuts": ["straight polygon profile"],
+                    },
+                }
+            )
+
+        preflight = result["design_preflight"]
+        self.assertEqual(
+            preflight["last_user_answers"][0]["answer"],
+            "drop_point",
+        )
+        self.assertEqual(
+            preflight["user_answers"][0]["answer"],
+            "drop_point",
+        )
+        self.assertEqual(len(preflight["user_answer_rounds"]), 1)
+
+    def test_design_preflight_answer_rounds_accumulate_across_questions(self):
+        with _temporary_vibecad_home():
+            service = VibeCADService()
+            service.update_design_preflight(
+                {
+                    "schema": "vibecad-design-preflight-v1",
+                    "status": "needs_user",
+                    "user_intent": "Make a folding knife.",
+                    "requirement_refinement": [
+                        {
+                            "question": "What tip type?",
+                            "model_answer": "Drop point",
+                            "assumption": False,
+                            "why_it_matters": "The tip drives the blade curve.",
+                        },
+                        {
+                            "question": "What lock?",
+                            "model_answer": "Liner lock",
+                            "assumption": False,
+                            "why_it_matters": "The lock drives the mechanism.",
+                        },
+                    ],
+                    "user_questions": [
+                        {
+                            "question": "What tip type?",
+                            "default_answer": "drop_point",
+                            "options": [
+                                {"label": "Drop point", "answer": "drop_point"}
+                            ],
+                        },
+                        {
+                            "question": "What lock?",
+                            "default_answer": "liner_lock",
+                            "options": [
+                                {"label": "Liner lock", "answer": "liner_lock"}
+                            ],
+                        },
+                    ],
+                }
+            )
+            service.record_design_preflight_answers(
+                [
+                    {
+                        "question": "What tip type?",
+                        "answer": "drop_point",
+                        "source": "choice",
+                    }
+                ]
+            )
+            result = service.record_design_preflight_answers(
+                [
+                    {
+                        "question": "What lock?",
+                        "answer": "liner_lock",
+                        "source": "choice",
+                    }
+                ]
+            )
+
+        preflight = result["design_preflight"]
+        answers = {item["question"]: item["answer"] for item in preflight["user_answers"]}
+        self.assertEqual(
+            answers,
+            {
+                "What tip type?": "drop_point",
+                "What lock?": "liner_lock",
+            },
+        )
+        self.assertEqual(len(preflight["user_answer_rounds"]), 2)
+
+    def test_design_preflight_prompt_and_context_include_answers(self):
+        context = {
+            "vibecad_project": {
+                "design_preflight": {
+                    "schema": "vibecad-design-preflight-v1",
+                    "status": "build_ready",
+                    "user_intent": "Make a functional part.",
+                    "requirement_refinement": [
+                        {
+                            "question": "Which material?",
+                            "model_answer": "CNC aluminum",
+                            "assumption": True,
+                            "why_it_matters": "It drives wall thickness.",
+                        }
+                    ],
+                    "last_user_answers": [
+                        {
+                            "question": "Which profile should be used?",
+                            "answer": "drop_point",
+                        }
+                    ],
+                    "design_intent_draft": {
+                        "architecture": "curved blade body",
+                        "bodies_components": ["Blade"],
+                        "interfaces": ["pivot bore"],
+                        "mechanisms": ["pivot"],
+                        "manufacturing_assumptions": ["CNC"],
+                        "non_negotiable_geometry": ["drop-point curve"],
+                        "risks": ["straight placeholder profile"],
+                    },
+                    "adversarial_review": {
+                        "blocking_issues": [],
+                        "criticisms": ["no straight placeholder"],
+                        "required_revisions": [],
+                    },
+                    "final_build_plan": {
+                        "architecture": "curved blade body",
+                        "bodies": ["Blade"],
+                        "sketches_features": ["profile sketch", "pad"],
+                        "interfaces": ["pivot bore"],
+                        "mechanisms": ["pivot"],
+                        "manufacturing_assumptions": ["CNC"],
+                        "critical_geometry": ["drop-point curve"],
+                        "construction_order": ["sketch", "verify curves", "pad"],
+                        "verification_checks": ["inspect geometry types"],
+                        "forbidden_shortcuts": ["straight polygon profile"],
+                    },
+                }
+            },
+            "conversation": {
+                "conversation": [
+                    {"role": "user", "content": "Use a drop point profile."}
+                ]
+            },
+        }
+
+        lines = _accepted_design_memory_lines(context)
+        self.assertTrue(lines, lines)
+        text = "\n".join(lines)
+        self.assertIn("ACCEPTED DESIGN MEMORY", text)
+        self.assertIn("Which profile should be used?: drop_point", text)
+        self.assertIn("Sketches/features: profile sketch | pad", text)
+        self.assertIn("Mechanisms: pivot", text)
+        self.assertIn("Construction order: sketch | verify curves | pad", text)
+        prompt = _prompt_with_conversation("Continue.", context)
+        self.assertIn("ACCEPTED DESIGN MEMORY", prompt)
+        self.assertIn("Which profile should be used?: drop_point", prompt)
+        visible = _model_visible_context(context, {"sections": ["design_preflight"]})
+        self.assertEqual(visible["plan"]["answers"][0]["a"], "drop_point")
+        self.assertEqual(visible["plan"]["feat"], ["profile sketch", "pad"])
+        self.assertEqual(visible["plan"]["mech"], ["pivot"])
+        self.assertEqual(visible["plan"]["mfg"], ["CNC"])
+        self.assertEqual(
+            visible["plan"]["order"],
+            ["sketch", "verify curves", "pad"],
+        )
+
+    def test_design_preflight_prompt_and_context_include_assumptions(self):
+        context = {
+            "vibecad_project": {
+                "design_preflight": {
+                    "schema": "vibecad-design-preflight-v1",
+                    "status": "build_ready",
+                    "user_intent": "Make a functional part.",
+                    "requirement_refinement": [
+                        {
+                            "question": "Which material?",
+                            "model_answer": "CNC aluminum",
+                            "assumption": True,
+                            "why_it_matters": "It drives wall thickness.",
+                        }
+                    ],
+                    "design_intent_draft": {
+                        "architecture": "single body",
+                        "bodies_components": ["Body"],
+                        "interfaces": ["mounting face"],
+                        "mechanisms": ["none"],
+                        "manufacturing_assumptions": ["CNC aluminum"],
+                        "non_negotiable_geometry": ["mounting face"],
+                        "risks": ["wall thickness"],
+                    },
+                    "adversarial_review": {
+                        "blocking_issues": [],
+                        "criticisms": ["load path must be explicit"],
+                        "required_revisions": [],
+                    },
+                    "final_build_plan": {
+                        "architecture": "single body",
+                        "bodies": ["Body"],
+                        "sketches_features": ["base sketch", "pad"],
+                        "interfaces": ["mounting face"],
+                        "mechanisms": ["none"],
+                        "manufacturing_assumptions": ["CNC aluminum"],
+                        "critical_geometry": ["mounting face"],
+                        "construction_order": ["sketch", "pad"],
+                        "verification_checks": ["inspect dimensions"],
+                        "forbidden_shortcuts": ["placeholder box"],
+                    },
+                }
+            }
+        }
+
+        lines = _accepted_design_memory_lines(context)
+        text = "\n".join(lines)
+        self.assertIn("Accepted assumptions", text)
+        self.assertIn("CNC aluminum", text)
+        visible = _model_visible_context(context, {"sections": ["design_preflight"]})
+        self.assertEqual(visible["plan"]["assumptions"][0]["a"], "CNC aluminum")
+
+    def test_prompt_preamble_includes_hard_report_errors_as_repair_state(self):
+        context = {
+            "report_view_errors": {
+                "errors": [
+                    "BladePad: Wire is not closed.",
+                    "EdgeBevelChamfer: BRep_API: command not done",
+                ]
+            }
+        }
+
+        prompt = _prompt_with_conversation("Continue.", context)
+
+        self.assertIn("ERRORS: unresolved hard FreeCAD geometry failures", prompt)
+        self.assertIn("Wire is not closed", prompt)
+        self.assertIn("inspect the failed sketch/body", prompt)
+
+    def test_design_preflight_existing_state_keeps_answer_round_visible(self):
+        preflight = {
+            "schema": "vibecad-design-preflight-v1",
+            "status": "needs_user",
+            "initial_user_prompt": "Make a folding knife with a real curved blade.",
+            "user_intent": "Make a functional assembly.",
+            "requirement_refinement": [
+                {
+                    "question": f"Question {index}?",
+                    "model_answer": f"Default {index}",
+                    "assumption": True,
+                    "why_it_matters": "It changes geometry.",
+                }
+                for index in range(20)
+            ],
+            "user_questions": [
+                {
+                    "question": f"Blocking question {index}?",
+                    "default_answer": f"default_{index}",
+                    "options": [
+                        {"label": f"Option {index} A", "answer": f"option_{index}_a"},
+                        {"label": f"Option {index} B", "answer": f"option_{index}_b"},
+                    ],
+                }
+                for index in range(20)
+            ],
+            "last_user_answers": [
+                {
+                    "question": "Which locking interface should be used?",
+                    "answer": "liner_lock",
+                    "source": "choice",
+                }
+            ],
+        }
+
+        lines = _design_preflight_existing_state_lines(preflight)
+        text = "\n".join(lines)
+        self.assertIn("initial_user_prompt", text)
+        self.assertIn("real curved blade", text)
+        self.assertIn("user_answers: use these as binding requirements", text)
+        self.assertIn("Which locking interface should be used?", text)
+        self.assertIn("liner_lock", text)
+        prompt = _design_preflight_prompt(
+            "Continue from the answered questions.",
+            {"vibecad_project": {"design_preflight": preflight}},
+        )
+        self.assertIn("liner_lock", prompt)
+
+    def test_design_preflight_answered_question_round_is_not_pending(self):
+        preflight = {
+            "schema": "vibecad-design-preflight-v1",
+            "status": "needs_user",
+            "user_intent": "Make a functional part.",
+            "user_questions": [
+                {
+                    "question": "Which material?",
+                    "default_answer": "aluminum",
+                    "options": [{"label": "Aluminum", "answer": "aluminum"}],
+                },
+                {
+                    "question": "Which mounting pattern?",
+                    "default_answer": "M3",
+                    "options": [{"label": "M3", "answer": "M3"}],
+                },
+            ],
+            "last_user_answers": [
+                {
+                    "question": "Which material?",
+                    "answer": "aluminum",
+                    "source": "choice",
+                },
+                {
+                    "question": "Which mounting pattern?",
+                    "answer": "M3",
+                    "source": "choice",
+                },
+            ],
+        }
+
+        self.assertTrue(_design_preflight_user_questions_answered(preflight))
+        text = "\n".join(_design_preflight_existing_state_lines(preflight))
+        self.assertIn("answered_user_questions:", text)
+        self.assertNotIn("pending_user_questions:", text)
+
+    def test_design_preflight_structured_submit_persists_needs_user(self):
+        payload = {
+            "schema": "vibecad-design-preflight-v1",
+            "status": "needs_user",
+            "user_intent": "Make a functional part.",
+            "requirement_refinement": [
+                {
+                    "question": "Which material?",
+                    "model_answer": "aluminum",
+                    "assumption": True,
+                    "why_it_matters": "It changes wall thickness.",
+                }
+            ],
+            "user_questions": [
+                {
+                    "question": "Which material?",
+                    "default_answer": "aluminum",
+                    "options": [{"label": "Aluminum", "answer": "aluminum"}],
+                }
+            ],
+        }
+
+        with _temporary_vibecad_home():
+            result = _persist_submitted_design_preflight(
+                VibeCADService(),
+                payload,
+                prompt="Make a part.",
+                provider_name="FakeProvider",
+            )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["preflight"]["status"], "needs_user")
+        self.assertEqual(result["preflight"]["initial_user_prompt"], "Make a part.")
+
+    def test_design_preflight_structured_submit_reports_missing_fields(self):
+        with _temporary_vibecad_home():
+            result = _persist_submitted_design_preflight(
+                VibeCADService(),
+                {
+                    "schema": "vibecad-design-preflight-v1",
+                    "status": "build_ready",
+                    "user_intent": "Make a functional part.",
+                    "requirement_refinement": [
+                        {
+                            "question": "Which material?",
+                            "model_answer": "aluminum",
+                            "assumption": True,
+                            "why_it_matters": "It changes wall thickness.",
+                        }
+                    ],
+                    "final_build_plan": {"architecture": "single body"},
+                },
+                prompt="Make a part.",
+                provider_name="FakeProvider",
+            )
+
+        self.assertFalse(result["ok"], result)
+        self.assertIn("Design preflight submission is incomplete", result["error"])
+        self.assertIn("design_intent_draft", result["missing"])
+
+    def test_design_preflight_capture_preserves_original_user_prompt(self):
+        with _temporary_vibecad_home():
+            service = VibeCADService()
+            first = {
+                "schema": "vibecad-design-preflight-v1",
+                "status": "needs_user",
+                "user_intent": "Make a 4.5 in folding knife blade.",
+                "requirement_refinement": [
+                    {
+                        "question": "What opening feature?",
+                        "model_answer": "Ask the user.",
+                        "assumption": False,
+                        "why_it_matters": "It changes blade/tang geometry.",
+                    }
+                ],
+                "user_questions": [
+                    {
+                        "question": "What opening feature?",
+                        "default_answer": "Thumb stud.",
+                        "options": [
+                            {
+                                "label": "Thumb stud",
+                                "answer": "Thumb stud on the blade.",
+                            }
+                        ],
+                        "why_it_matters": "It changes blade/tang geometry.",
+                    }
+                ],
+            }
+            capture = _persist_submitted_design_preflight(
+                service,
+                first,
+                prompt="Make a 4.5 in folding knife blade.",
+                provider_name="UnitProvider",
+            )
+            self.assertTrue(capture["ok"], capture)
+            service.record_design_preflight_answers(
+                [
+                    {
+                        "question": "What opening feature?",
+                        "answer": "Thumb stud on the blade.",
+                    }
+                ]
+            )
+
+            second = {
+                "schema": "vibecad-design-preflight-v1",
+                "status": "build_ready",
+                "user_intent": "Make a 4.5 in folding knife blade.",
+                "requirement_refinement": [
+                    {
+                        "question": "What opening feature?",
+                        "model_answer": "Thumb stud on the blade.",
+                        "assumption": False,
+                        "why_it_matters": "It changes blade/tang geometry.",
+                    }
+                ],
+                "design_intent_draft": {
+                    "architecture": "curved blade and handle interface",
+                    "bodies_components": ["Blade"],
+                    "interfaces": ["pivot bore", "stop pin"],
+                    "mechanisms": ["folding pivot"],
+                    "manufacturing_assumptions": ["CNC steel"],
+                    "non_negotiable_geometry": ["curved blade profile"],
+                    "risks": ["flat polygon placeholder"],
+                },
+                "adversarial_review": {
+                    "blocking_issues": [],
+                    "criticisms": ["Do not use straight placeholder edges."],
+                    "required_revisions": [],
+                },
+                "final_build_plan": {
+                    "architecture": "curved blade and handle interface",
+                    "bodies": ["Blade"],
+                    "sketches_features": ["arc/spline profile", "pad"],
+                    "interfaces": ["pivot bore", "stop pin"],
+                    "mechanisms": ["folding pivot"],
+                    "manufacturing_assumptions": ["CNC steel"],
+                    "critical_geometry": ["4.5 in curved blade"],
+                    "construction_order": ["sketch", "verify curves", "pad"],
+                    "verification_checks": ["inspect sketch geometry types"],
+                    "forbidden_shortcuts": ["flat polygon blade"],
+                },
+            }
+            capture = _persist_submitted_design_preflight(
+                service,
+                second,
+                prompt=(
+                    "Design preflight answers:\n\n"
+                    "1. What opening feature?\nAnswer: Thumb stud on the blade."
+                ),
+                provider_name="UnitProvider",
+            )
+
+            self.assertTrue(capture["ok"], capture)
+            preflight = capture["preflight"]
+            self.assertEqual(
+                preflight["initial_user_prompt"],
+                "Make a 4.5 in folding knife blade.",
+            )
+            self.assertEqual(
+                preflight["source_prompt"],
+                "Make a 4.5 in folding knife blade.",
+            )
+            self.assertIn(
+                "Design preflight answers",
+                preflight["latest_preflight_prompt"],
+            )
+
+    def test_design_preflight_validation_requires_real_refinement_and_review(self):
+        question_dump = {
+            "schema": "vibecad-design-preflight-v1",
+            "status": "needs_user",
+            "user_intent": "Make a part.",
+            "requirement_refinement": [{"question": "Which material?"}],
+            "user_questions": [
+                {
+                    "question": "Which material?",
+                    "default_answer": "aluminum",
+                    "options": [{"label": "Aluminum", "answer": "aluminum"}],
+                }
+            ],
+        }
+        self.assertIn(
+            "requirement_refinement[1].model_answer",
+            _design_preflight_missing_fields(question_dump),
+        )
+        self.assertIn(
+            "requirement_refinement[1].assumption",
+            _design_preflight_missing_fields(question_dump),
+        )
+
+        malformed_options = dict(question_dump)
+        malformed_options["requirement_refinement"] = [
+            {
+                "question": "Which material?",
+                "model_answer": "aluminum",
+                "assumption": True,
+                "why_it_matters": "It drives wall thickness.",
+            }
+        ]
+        malformed_options["user_questions"] = [
+            {
+                "question": "Which material?",
+                "default_answer": "aluminum",
+                "options": ["aluminum"],
+            }
+        ]
+        self.assertIn(
+            "user_questions[1].options[1]",
+            _design_preflight_missing_fields(malformed_options),
+        )
+
+        contradictory_interview = {
+            "schema": "vibecad-design-preflight-v1",
+            "status": "needs_user",
+            "user_intent": "Make a part.",
+            "requirement_refinement": [
+                {
+                    "question": "Which material?",
+                    "model_answer": "aluminum",
+                    "assumption": True,
+                    "why_it_matters": "It drives wall thickness.",
+                }
+            ],
+            "user_questions": [
+                {
+                    "question": "Which material?",
+                    "default_answer": "aluminum",
+                    "options": [{"label": "Aluminum", "answer": "aluminum"}],
+                }
+            ],
+            "final_build_plan": {
+                "architecture": "single body",
+                "bodies": ["Body"],
+            },
+        }
+        self.assertIn(
+            "final_build_plan=not_allowed_for_needs_user",
+            _design_preflight_missing_fields(contradictory_interview),
+        )
+
+        weak_plan = {
+            "schema": "vibecad-design-preflight-v1",
+            "status": "build_ready",
+            "user_intent": "Make a part.",
+            "requirement_refinement": [
+                {
+                    "question": "Which material?",
+                    "model_answer": "aluminum",
+                    "assumption": True,
+                    "why_it_matters": "It drives wall thickness.",
+                }
+            ],
+            "design_intent_draft": {"architecture": "single body"},
+            "adversarial_review": {"criticisms": []},
+            "final_build_plan": {"architecture": "single body"},
+        }
+        missing = _design_preflight_missing_fields(weak_plan)
+        self.assertIn("design_intent_draft.bodies_components", missing)
+        self.assertIn("adversarial_review.criticisms", missing)
+        self.assertIn("final_build_plan.sketches_features", missing)
+        self.assertIn("final_build_plan.mechanisms", missing)
+
+    def test_design_preflight_build_ready_requires_user_answers_for_non_assumptions(self):
+        payload = {
+            "schema": "vibecad-design-preflight-v1",
+            "status": "build_ready",
+            "user_intent": "Make a functional part.",
+            "requirement_refinement": [
+                {
+                    "question": "Which material?",
+                    "model_answer": "steel",
+                    "assumption": False,
+                    "why_it_matters": "It drives wall thickness.",
+                }
+            ],
+            "design_intent_draft": {
+                "architecture": "single body",
+                "bodies_components": ["Body"],
+                "interfaces": ["mounting face"],
+                "mechanisms": ["none"],
+                "manufacturing_assumptions": ["steel"],
+                "non_negotiable_geometry": ["mounting face"],
+                "risks": ["wall thickness"],
+            },
+            "adversarial_review": {
+                "blocking_issues": [],
+                "criticisms": ["material drives stiffness"],
+                "required_revisions": [],
+            },
+            "final_build_plan": {
+                "architecture": "single body",
+                "bodies": ["Body"],
+                "sketches_features": ["base sketch", "pad"],
+                "interfaces": ["mounting face"],
+                "mechanisms": ["none"],
+                "manufacturing_assumptions": ["steel"],
+                "critical_geometry": ["mounting face"],
+                "construction_order": ["sketch", "pad"],
+                "verification_checks": ["inspect dimensions"],
+                "forbidden_shortcuts": ["placeholder box"],
+            },
+        }
+
+        self.assertIn(
+            "requirement_refinement[1].user_answer",
+            _design_preflight_missing_fields(payload),
+        )
+        payload["last_user_answers"] = [
+            {
+                "question": "Which mounting pattern?",
+                "answer": "M3",
+                "source": "choice",
+            }
+        ]
+        self.assertIn(
+            "requirement_refinement[1].user_answer",
+            _design_preflight_missing_fields(payload),
+        )
+        payload["last_user_answers"] = [
+            {"question": "Which material?", "answer": "steel", "source": "choice"}
+        ]
+        self.assertNotIn(
+            "requirement_refinement[1].user_answer",
+            _design_preflight_missing_fields(payload),
+        )
+
+    def test_design_preflight_build_ready_rejects_unanswered_user_questions(self):
+        payload = {
+            "schema": "vibecad-design-preflight-v1",
+            "status": "build_ready",
+            "user_intent": "Make a functional part.",
+            "requirement_refinement": [
+                {
+                    "question": "Which material?",
+                    "model_answer": "aluminum",
+                    "assumption": True,
+                    "why_it_matters": "It drives wall thickness.",
+                }
+            ],
+            "user_questions": [
+                {
+                    "question": "Which mounting pattern?",
+                    "default_answer": "M3",
+                    "options": [{"label": "M3", "answer": "M3"}],
+                }
+            ],
+            "design_intent_draft": {
+                "architecture": "single body",
+                "bodies_components": ["Body"],
+                "interfaces": ["mounting face"],
+                "mechanisms": ["none"],
+                "manufacturing_assumptions": ["aluminum"],
+                "non_negotiable_geometry": ["mounting face"],
+                "risks": ["wall thickness"],
+            },
+            "adversarial_review": {
+                "blocking_issues": [],
+                "criticisms": ["mounting pattern must be explicit"],
+                "required_revisions": [],
+            },
+            "final_build_plan": {
+                "architecture": "single body",
+                "bodies": ["Body"],
+                "sketches_features": ["base sketch", "pad"],
+                "interfaces": ["mounting face"],
+                "mechanisms": ["none"],
+                "manufacturing_assumptions": ["aluminum"],
+                "critical_geometry": ["mounting face"],
+                "construction_order": ["sketch", "pad"],
+                "verification_checks": ["inspect dimensions"],
+                "forbidden_shortcuts": ["placeholder box"],
+            },
+        }
+
+        self.assertIn("user_questions.unanswered", _design_preflight_missing_fields(payload))
+        payload["last_user_answers"] = [
+            {
+                "question": "Which mounting pattern?",
+                "answer": "M3",
+                "source": "choice",
+            }
+        ]
+        self.assertNotIn(
+            "user_questions.unanswered",
+            _design_preflight_missing_fields(payload),
+        )
+
+    def test_design_preflight_build_ready_requires_valid_full_contract(self):
+        shallow_context = {
+            "vibecad_project": {
+                "design_preflight": {
+                    "schema": "vibecad-design-preflight-v1",
+                    "status": "build_ready",
+                    "user_intent": "Make a part.",
+                    "requirement_refinement": [
+                        {
+                            "question": "Which material?",
+                            "model_answer": "aluminum",
+                            "assumption": True,
+                            "why_it_matters": "It drives wall thickness.",
+                        }
+                    ],
+                    "final_build_plan": {"architecture": "single body"},
+                }
+            }
+        }
+        self.assertFalse(_design_preflight_build_ready(shallow_context))
+
+    def test_design_preflight_prompt_requires_visible_intent_restatement(self):
+        prompt = _design_preflight_prompt(
+            "Make a drone frame.",
+            {"conversation": {"conversation": []}},
+        )
+
+        self.assertIn("user-visible prose must start", prompt)
+        self.assertIn("customer's intended outcome", prompt)
+        self.assertIn("Do not call CAD tools", prompt)
+        self.assertIn(DESIGN_PREFLIGHT_SUBMIT_TOOL, prompt)
+        self.assertIn("Do not embed JSON", prompt)
+
+    def test_run_prompt_revalidates_persisted_build_ready_before_unlocking_tools(self):
+        class Provider(BaseProvider):
+            def __init__(self):
+                self.calls: list[dict[str, Any]] = []
+
+            def run(
+                self,
+                prompt,
+                context,
+                tool_runner=None,
+                cancellation_check=None,
+                progress_callback=None,
+            ):
+                self.calls.append(
+                    {
+                        "tool_runner": tool_runner is not None,
+                        "tool_count": len(context.get("provider_tool_schemas") or []),
+                        "stage": (context.get("provider_tool_scope") or {}).get("stage"),
+                    }
+                )
+                if len(self.calls) == 1:
+                    payload = {
+                        "schema": "vibecad-design-preflight-v1",
+                        "status": "build_ready",
+                        "user_intent": "Make a functional part.",
+                        "requirement_refinement": [
+                            {
+                                "question": "Which material?",
+                                "model_answer": "aluminum",
+                                "assumption": True,
+                                "why_it_matters": "It drives wall thickness.",
+                            }
+                        ],
+                        "design_intent_draft": {
+                            "architecture": "single solid body",
+                            "bodies_components": ["Body"],
+                            "interfaces": ["mounting face"],
+                            "mechanisms": ["none"],
+                            "manufacturing_assumptions": ["CNC"],
+                            "non_negotiable_geometry": ["mounting face"],
+                            "risks": ["weak wall thickness"],
+                        },
+                        "adversarial_review": {
+                            "blocking_issues": [],
+                            "criticisms": ["load path must be explicit"],
+                            "required_revisions": [],
+                        },
+                        "final_build_plan": {
+                            "architecture": "single solid body",
+                            "bodies": ["Body"],
+                            "sketches_features": ["base sketch", "pad"],
+                            "interfaces": ["mounting face"],
+                            "mechanisms": ["none"],
+                            "manufacturing_assumptions": ["CNC"],
+                            "critical_geometry": ["mounting face"],
+                            "construction_order": ["sketch", "pad", "verify"],
+                            "verification_checks": ["inspect body dimensions"],
+                            "forbidden_shortcuts": ["placeholder box"],
+                        },
+                    }
+                    assert tool_runner is not None
+                    submit = tool_runner(
+                        DESIGN_PREFLIGHT_SUBMIT_TOOL,
+                        json.dumps(payload),
+                    )
+                    assert submit["ok"], submit
+                    return ProviderResult("Intended outcome: make a functional part.")
+                return ProviderResult("CAD turn reached.")
+
+        with _temporary_vibecad_home():
+            service = VibeCADService()
+            service.update_design_preflight(
+                {
+                    "schema": "vibecad-design-preflight-v1",
+                    "status": "build_ready",
+                    "user_intent": "Make a weak stale part.",
+                    "requirement_refinement": [
+                        {
+                            "question": "Which material?",
+                            "model_answer": "unknown",
+                            "assumption": True,
+                            "why_it_matters": "It matters.",
+                        }
+                    ],
+                    "final_build_plan": {"architecture": "placeholder"},
+                }
+            )
+            provider = Provider()
+            response = run_prompt("Continue.", service=service, provider=provider)
+
+        self.assertEqual(len(provider.calls), 2, provider.calls)
+        self.assertTrue(provider.calls[0]["tool_runner"], provider.calls)
+        self.assertEqual(provider.calls[0]["tool_count"], 1, provider.calls)
+        self.assertEqual(provider.calls[0]["stage"], "design_preflight")
+        self.assertTrue(provider.calls[1]["tool_runner"], provider.calls)
+        self.assertIn("CAD turn reached.", response.final_output)
+
+    def test_run_prompt_rechecks_valid_build_plan_for_new_user_request(self):
+        class Provider(BaseProvider):
+            def __init__(self, outer):
+                self.outer = outer
+                self.calls: list[dict[str, Any]] = []
+
+            def run(
+                self,
+                prompt,
+                context,
+                tool_runner=None,
+                cancellation_check=None,
+                progress_callback=None,
+            ):
+                self.calls.append(
+                    {
+                        "prompt": prompt,
+                        "tool_runner": tool_runner is not None,
+                        "tool_count": len(context.get("provider_tool_schemas") or []),
+                        "stage": (context.get("provider_tool_scope") or {}).get("stage"),
+                    }
+                )
+                if len(self.calls) == 1:
+                    payload = self.outer._build_ready_preflight_payload(
+                        intent="Make a drone frame for a 10 lb payload.",
+                        architecture="X8 drone frame with explicit load paths",
+                    )
+                    self.outer.assertIsNotNone(tool_runner)
+                    submit = tool_runner(
+                        DESIGN_PREFLIGHT_SUBMIT_TOOL,
+                        json.dumps(payload),
+                    )
+                    self.outer.assertTrue(submit["ok"], submit)
+                    return ProviderResult(
+                        "The customer now wants a drone frame, so I am replacing "
+                        "the stale knife plan before CAD tools unlock."
+                    )
+                return ProviderResult("CAD turn reached.")
+
+        with _temporary_vibecad_home():
+            service = VibeCADService()
+            service.update_design_preflight(
+                self._build_ready_preflight_payload(
+                    intent="Make a folding knife blade.",
+                    architecture="curved folding knife blade",
+                )
+            )
+            provider = Provider(self)
+            response = run_prompt(
+                "Make a drone frame for a 10 lb payload.",
+                service=service,
+                provider=provider,
+            )
+            saved = service.project_context()["design_preflight"]
+
+        self.assertEqual(len(provider.calls), 2, provider.calls)
+        self.assertTrue(provider.calls[0]["tool_runner"], provider.calls)
+        self.assertEqual(provider.calls[0]["tool_count"], 1, provider.calls)
+        self.assertEqual(provider.calls[0]["stage"], "design_preflight")
+        self.assertIn("Make a folding knife blade", provider.calls[0]["prompt"])
+        self.assertIn("Make a drone frame for a 10 lb payload.", provider.calls[0]["prompt"])
+        self.assertTrue(provider.calls[1]["tool_runner"], provider.calls)
+        self.assertEqual(saved["user_intent"], "Make a drone frame for a 10 lb payload.")
+        self.assertEqual(
+            saved["initial_user_prompt"],
+            "Make a drone frame for a 10 lb payload.",
+        )
+        self.assertIn("CAD turn reached.", response.final_output)
+
+    def test_run_prompt_allows_explicit_continuation_to_use_valid_preflight(self):
+        class Provider(BaseProvider):
+            def __init__(self):
+                self.calls: list[dict[str, Any]] = []
+
+            def run(
+                self,
+                prompt,
+                context,
+                tool_runner=None,
+                cancellation_check=None,
+                progress_callback=None,
+            ):
+                self.calls.append(
+                    {
+                        "tool_runner": tool_runner is not None,
+                        "stage": (context.get("provider_tool_scope") or {}).get("stage"),
+                    }
+                )
+                return ProviderResult("CAD turn reached.")
+
+        with _temporary_vibecad_home():
+            service = VibeCADService()
+            service.update_design_preflight(self._build_ready_preflight_payload())
+            provider = Provider()
+            response = run_prompt("Continue.", service=service, provider=provider)
+
+        self.assertEqual(len(provider.calls), 1, provider.calls)
+        self.assertTrue(provider.calls[0]["tool_runner"], provider.calls)
+        self.assertNotEqual(provider.calls[0]["stage"], "design_preflight")
+        self.assertEqual(response.final_output, "CAD turn reached.")
+
     def test_prompt_with_conversation_marks_memory_as_document_scoped(self):
         prompt = _prompt_with_conversation(
             "Continue the bracket",
@@ -632,9 +1842,188 @@ class TestVibeCADServiceContext(SettingsSnapshotTestCase):
             },
         )
 
-        self.assertIn("only as current document/project memory", prompt)
-        self.assertIn("Conversation scope: scope=saved_document", prompt)
-        self.assertIn("document=BracketDoc", prompt)
-        self.assertIn("file=/tmp/bracket.FCStd", prompt)
-        self.assertIn("do not treat unrelated documents", prompt)
-        self.assertIn("Current user request: Continue the bracket", prompt)
+        self.assertIn(
+            "Saved conversation context "
+            "(d=BracketDoc,f=/tmp/bracket.FCStd; authoritative requirements",
+            prompt,
+        )
+        self.assertIn("1. USER:\nMake a mounting bracket.", prompt)
+        self.assertIn("2. VIBECAD:\nCreated the base body.", prompt)
+        self.assertIn("U: Continue the bracket", prompt)
+        self.assertNotIn("only as current document/project memory", prompt)
+        self.assertNotIn("Conversation scope:", prompt)
+        self.assertNotIn("Current user request:", prompt)
+
+    def test_requirement_memory_keeps_original_ask_after_chat_window_ages_out(self):
+        with _temporary_vibecad_home():
+            service = VibeCADService()
+            original = (
+                "Make a 4.5 in folding blade with a real curved drop point, "
+                "liner lock, and no flat polygon placeholder."
+            )
+            service.record_conversation_turn(
+                "user",
+                original,
+                metadata={"source": "prompt"},
+            )
+            for index in range(55):
+                service.record_conversation_turn("assistant", f"Progress {index}.")
+                service.record_conversation_turn(
+                    "user",
+                    f"Continue detailed CAD step {index}.",
+                    metadata={"source": "prompt"},
+                )
+
+            context = service.provider_context_summary()
+            recent = json.dumps(context["conversation"]["conversation"])
+            self.assertNotIn("4.5 in folding blade", recent)
+
+            prompt = _prompt_with_conversation(
+                "What requirements did I give you to begin with?",
+                context,
+            )
+            self.assertIn("Persistent requirement memory", prompt)
+            self.assertIn("4.5 in folding blade", prompt)
+            self.assertIn("no flat polygon placeholder", prompt)
+
+            visible = _model_visible_context(context, {"sections": ["conversation"]})
+            visible_text = json.dumps(visible["conv"]["requirements"])
+            self.assertIn("4.5 in folding blade", visible_text)
+            self.assertIn("omitted", visible_text)
+
+    def test_prompt_with_conversation_includes_all_saved_requirement_turns(self):
+        prompt = _prompt_with_conversation(
+            "Continue with the reviewed design.",
+            {
+                "conversation": {
+                    "scope": {
+                        "kind": "unsaved_document",
+                        "document": "KnifeDoc",
+                    },
+                    "conversation": [
+                        {
+                            "role": "user",
+                            "content": (
+                                "Make a 4.5 in folding blade with a clip point, "
+                                "a thumb stud, a liner lock, and no flat polygon "
+                                "placeholder profile."
+                            ),
+                        },
+                        {
+                            "role": "assistant",
+                            "content": (
+                                "I will refine requirements before CAD and verify "
+                                "the blade curve uses arcs or splines."
+                            ),
+                        },
+                        {
+                            "role": "user",
+                            "content": "Use the prior requirements as authoritative.",
+                        },
+                    ],
+                }
+            },
+        )
+
+        self.assertIn("Make a 4.5 in folding blade", prompt)
+        self.assertIn("liner lock", prompt)
+        self.assertIn("no flat polygon placeholder profile", prompt)
+        self.assertIn("verify the blade curve uses arcs or splines", prompt)
+        self.assertIn("Use the prior requirements as authoritative.", prompt)
+
+    def test_prompt_with_conversation_omits_duplicate_current_user_turn(self):
+        prompt = _prompt_with_conversation(
+            "Continue the bracket",
+            {
+                "conversation": {
+                    "scope": {"kind": "unsaved_document", "document": "BracketDoc"},
+                    "conversation": [
+                        {"role": "user", "content": "Make a mounting bracket."},
+                        {"role": "user", "content": "Continue the bracket"},
+                    ],
+                }
+            },
+        )
+
+        self.assertIn("1. USER:\nMake a mounting bracket.", prompt)
+        self.assertEqual(prompt.count("Continue the bracket"), 1)
+
+    def test_continuation_prompt_keeps_requirement_memory_and_design_memory(self):
+        context = {
+            "vibecad_workspace": {"mode": "workspace", "entered_workbench": "PartDesignWorkbench"},
+            "vibecad_project": {
+                "requirement_memory": [
+                    {
+                        "role": "user",
+                        "content": (
+                            "Make a 4.5 in folding blade with a real curved "
+                            "drop point and no flat polygon placeholder."
+                        ),
+                        "source": "prompt",
+                    }
+                ],
+                "design_preflight": {
+                    **self._build_ready_preflight_payload(
+                        intent="Make a 4.5 in folding knife blade.",
+                        architecture="curved folding knife blade",
+                    ),
+                    "initial_user_prompt": "Make a 4.5 in folding blade.",
+                    "final_build_plan": {
+                        "architecture": "curved folding knife blade",
+                        "bodies": ["Blade"],
+                        "sketches_features": ["arc/spline profile sketch", "pad"],
+                        "interfaces": ["pivot bore", "stop pin"],
+                        "mechanisms": ["folding pivot"],
+                        "manufacturing_assumptions": ["CNC steel"],
+                        "critical_geometry": ["drop-point curve"],
+                        "construction_order": ["sketch", "verify curves", "pad"],
+                        "verification_checks": ["inspect sketch geometry types"],
+                        "forbidden_shortcuts": ["straight polygon profile"],
+                    },
+                },
+                "design_memory": {
+                    "user_intent": "Make a 4.5 in folding knife blade.",
+                    "summary": "curved folding knife blade",
+                    "accepted_assumptions": ["4.5 in means blade length"],
+                    "mechanisms": ["folding pivot"],
+                    "critical_geometry": ["drop-point curve"],
+                    "verification_checks": ["inspect sketch geometry types"],
+                    "forbidden_shortcuts": ["straight polygon profile"],
+                    "known_failures": ["flat polygon placeholder profile"],
+                },
+            },
+            "document": {
+                "objects": [
+                    {"name": "Body", "label": "BladeBody", "type": "PartDesign::Body"}
+                ]
+            },
+        }
+
+        prompt = _continuation_prompt(
+            "Continue.",
+            ["Workspace entered."],
+            context,
+            [
+                {
+                    "tool_name": "core.enter_workspace",
+                    "ok": True,
+                    "result": {"workspace_handoff": "workspace_entry"},
+                }
+            ],
+        )
+
+        self.assertIn("Persistent requirement memory", prompt)
+        self.assertIn("4.5 in folding blade", prompt)
+        self.assertIn("no flat polygon placeholder", prompt)
+        self.assertIn("ACCEPTED DESIGN MEMORY", prompt)
+        self.assertIn("User intent: Make a 4.5 in folding knife blade.", prompt)
+        self.assertIn("Accepted architecture: curved folding knife blade", prompt)
+        self.assertIn("Accepted assumptions: 4.5 in means blade length", prompt)
+        self.assertIn("Mechanisms: folding pivot", prompt)
+        self.assertIn("Critical geometry: drop-point curve", prompt)
+        self.assertIn("Verification checks: inspect sketch geometry types", prompt)
+        self.assertIn("Forbidden shortcuts: straight polygon profile", prompt)
+        self.assertIn("Known failures: flat polygon placeholder profile", prompt)
+        self.assertNotIn("P:", prompt)
+        self.assertIn("T:", prompt)
+        self.assertIn("O:", prompt)

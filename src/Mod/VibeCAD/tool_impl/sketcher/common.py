@@ -717,8 +717,7 @@ def profile_validation_deep(service: Any, sketch: Any | None, tolerance: float =
         blockers.append({"severity": "warning", "kind": "t_junction_or_nonmanifold_nodes", "count": len(t_junctions)})
     if line_intersections:
         blockers.append({"severity": "warning", "kind": "line_self_intersections", "count": len(line_intersections)})
-    if not faces:
-        blockers.append({"severity": "error", "kind": "no_faces", "count": 0})
+    error_blockers = [item for item in blockers if item.get("severity") == "error"]
 
     return {
         **base,
@@ -740,9 +739,16 @@ def profile_validation_deep(service: Any, sketch: Any | None, tolerance: float =
         "wire_count": len(wires),
         "face_count": len(faces),
         "faces": face_summaries,
+        "shape_face_diagnostic": {
+            "face_count": len(faces),
+            "note": (
+                "Sketch.Shape.Faces is diagnostic only; PartDesign pads may still be valid "
+                "when endpoint/profile validation reports ready_for_pad."
+            ),
+        },
         "feature_readiness": {
-            "pad": bool(base.get("ready_for_pad")) and not blockers,
-            "pocket": bool(base.get("ready_for_pocket")) and not blockers,
+            "pad": bool(base.get("ready_for_pad")) and not error_blockers,
+            "pocket": bool(base.get("ready_for_pocket")) and not error_blockers,
             "blockers": blockers,
         },
     }

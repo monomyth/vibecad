@@ -12,12 +12,9 @@ from . import domain_runtime
 
 
 TOOL_SPEC = {'contextual': True,
- 'description': 'Create a native PartDesign AdditivePipe or SubtractivePipe by '
-                'sweeping an existing profile sketch along an existing spine sketch. '
-                'Pass section_sketch_names for a variable cross-section sweep '
-                '(Transformation=Multisection): the swept section morphs through each '
-                'listed sketch along the spine — use this for ducts, channels, and '
-                'flow passages whose cross-sectional area changes along the path.',
+ 'description': 'Create a PartDesign AdditivePipe/SubtractivePipe by sweeping a '
+                'profile along a spine. Use for curved rails, ducts, channels, '
+                'tubes, handles, ribs, and flow passages.',
  'name': 'partdesign.sweep_profile',
  'parameters': {'properties': {'label': {'type': 'string'},
                                'mode': {'description': 'additive adds material; subtractive removes it.',

@@ -18,12 +18,8 @@ from VibeCADTransactions import run_freecad_transaction
 TOOL_SPEC = {
     "contextual": True,
     "description": (
-        "Replicate an existing PartDesign feature with a native PartDesign "
-        "transformation feature. operation='linear' creates a LinearPattern "
-        "along a Body origin axis (direction, length, occurrences); "
-        "operation='polar' creates a PolarPattern around a Body origin axis "
-        "(axis, angle, occurrences); operation='mirror' creates a Mirrored "
-        "feature across a Body origin plane (mirror_plane)."
+        "Replicate an existing PartDesign feature with native linear, polar, "
+        "or mirror pattern features. Use for repeated features inside a Body."
     ),
     "name": "partdesign.pattern",
     "parameters": {

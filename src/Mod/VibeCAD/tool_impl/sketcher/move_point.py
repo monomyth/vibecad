@@ -13,10 +13,8 @@ from .constrain_common import point_position
 TOOL_SPEC = {
     "name": "sketcher.move_point",
     "description": (
-        "Move one existing Sketcher geometry point role or whole geometry to an absolute or "
-        "relative 2D location, equivalent to dragging geometry in Sketcher. Drags a single "
-        "point or element — use sketcher.transform_geometry for multi-element move/copy/mirror "
-        "and sketcher.modify_geometry to trim/extend/split/fillet curves."
+        "Move one Sketcher point role or whole geometry to an absolute or "
+        "relative 2D location. Use transform_geometry for multi-element edits."
     ),
     "contextual": True,
     "parameters": {

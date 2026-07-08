@@ -34,12 +34,15 @@ from VibeCADProvider import (
     _anthropic_child_main,
     _anthropic_final_text,
     _anthropic_request_dump_dir,
+    _anthropic_stream_event_summary,
     _anthropic_thinking_config,
     _anthropic_tool_definition,
     _anthropic_user_content,
+    _anthropic_visual_repin_content,
     _build_context_function_tool,
     _context_image_blocks,
     _image_file_payload,
+    _image_file_payload_with_status,
     MAX_PROVIDER_IMAGE_BYTES,
     _build_provider_function_tools,
     _provider_reasoning_effort,
@@ -54,8 +57,10 @@ from VibeCADProvider import (
 from VibeCADSession import (
     choose_provider,
     _continuation_prompt,
+    _capture_reference_briefs_from_output,
     _reference_image_lines,
     _session_prompt_preamble,
+    _strip_reference_brief_json_blocks,
     provider_safe_tool_schemas,
 )
 
@@ -99,6 +104,17 @@ class TestVibeCADAnthropicProvider(unittest.TestCase):
         )
         self.assertEqual(_anthropic_final_text([]), "")
 
+    def test_anthropic_stream_summary_surfaces_visible_text_delta(self):
+        event = types.SimpleNamespace(
+            type="content_block_delta",
+            delta=types.SimpleNamespace(type="text_delta", text="Building the blade."),
+        )
+
+        summary = _anthropic_stream_event_summary(event)
+
+        self.assertEqual(summary["stream_event_type"], "content_block_delta")
+        self.assertEqual(summary["text_delta"], "Building the blade.")
+
     def test_all_registered_tools_convert_to_anthropic_tool_shape(self):
         service = VibeCADService()
         schemas = provider_safe_tool_schemas(service, apply_workbench_allowlist=False)
@@ -140,7 +156,7 @@ class TestVibeCADAnthropicProvider(unittest.TestCase):
             self.assertEqual(content[0], {"type": "text", "text": "look at this"})
             label_block = content[1]
             self.assertEqual(label_block["type"], "text")
-            self.assertTrue(label_block["text"].startswith("CURRENT VIEWPORT"))
+            self.assertEqual(label_block["text"], "V:current")
             image_block = content[2]
             self.assertEqual(image_block["type"], "image")
             self.assertEqual(image_block["source"]["type"], "base64")
@@ -157,7 +173,7 @@ class TestVibeCADAnthropicProvider(unittest.TestCase):
                     {
                         "schema": "vibecad-anthropic-request-v1",
                         "model": DEFAULT_ANTHROPIC_MODEL,
-                        "tools": [{"name": "core_get_active_document"}],
+                        "tools": [{"name": "c_doc"}],
                     }
                 )
                 self.assertIsNotNone(path)
@@ -221,7 +237,7 @@ class TestVibeCADAnthropicProvider(unittest.TestCase):
 
         result = self._run_anthropic_subprocess(
             _fake_anthropic_module(
-                "core_get_active_document", final_text="Bridge round-trip OK."
+                "c_doc", final_text="Bridge round-trip OK."
             ),
             tool_runner,
         )
@@ -235,7 +251,7 @@ class TestVibeCADAnthropicProvider(unittest.TestCase):
         with self.assertRaises(ProviderUnavailable) as caught:
             self._run_anthropic_subprocess(
                 _fake_anthropic_module(
-                    "core_get_active_document", always_tool_use=True
+                    "c_doc", always_tool_use=True
                 ),
                 tool_runner,
                 max_turns=2,
@@ -598,6 +614,51 @@ class TestVibeCADReferenceImages(unittest.TestCase):
             self.assertEqual(references["images"][0]["name"], "bracket.png")
             self.assertEqual(references["images"][0]["label"], "front view")
 
+    def test_reference_images_persist_to_project_reference_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            service = self._service_with_reference_dir(root)
+            source = self._write_png(root)
+            attached = service.attach_reference_image(str(source), label="front view")
+            self.assertTrue(attached["ok"])
+
+            reloaded = self._service_with_reference_dir(root)
+            summary = reloaded.reference_images_summary()
+            self.assertEqual(summary["count"], 1)
+            self.assertEqual(summary["images"][0]["name"], "bracket.png")
+            self.assertEqual(summary["images"][0]["label"], "front view")
+
+    def test_reference_brief_capture_persists_and_display_strip_hides_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            service = self._service_with_reference_dir(root)
+            source = self._write_png(root)
+            reference = service.attach_reference_image(str(source))["reference"]
+            output = (
+                "REFERENCE_BRIEF_JSON: "
+                + json.dumps(
+                    {
+                        "reference_ids": [reference["id"]],
+                        "object_type": "compressor wheel",
+                        "must_preserve": ["backswept blades", "nose boss"],
+                        "counts_patterns": ["5 main blades", "5 splitter blades"],
+                        "unknown_dimensions": ["shaft bore"],
+                        "do_not_simplify": ["do not use flat pads for blades"],
+                    }
+                )
+                + "\nReference understood: compressor wheel with 5+5 curved blades."
+            )
+
+            captured = _capture_reference_briefs_from_output(service, output)
+            self.assertEqual(len(captured), 1)
+            summary = service.reference_images_summary()
+            brief = summary["images"][0]["visual_brief"]
+            self.assertEqual(brief["object_type"], "compressor wheel")
+            self.assertIn("5 main blades", brief["counts_patterns"])
+            displayed = _strip_reference_brief_json_blocks(output)
+            self.assertNotIn("REFERENCE_BRIEF_JSON", displayed)
+            self.assertIn("Reference understood:", displayed)
+
     def test_clear_local_session_clears_reference_images(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -637,11 +698,10 @@ class TestVibeCADReferenceImages(unittest.TestCase):
             context["reference_images"]["images"][1]["label"] = "side profile"
             blocks = _context_image_blocks(context)
             self.assertEqual(len(blocks), 3)
-            self.assertIn('REFERENCE (user-supplied, image 1 of 2): "front.png"', blocks[0][0])
-            self.assertIn("TARGET", blocks[0][0])
-            self.assertIn('REFERENCE (user-supplied, image 2 of 2): "side.png"', blocks[1][0])
+            self.assertEqual("R1/2:front.png", blocks[0][0])
+            self.assertIn("R2/2:side.png", blocks[1][0])
             self.assertIn("side profile", blocks[1][0])
-            self.assertTrue(blocks[2][0].startswith("CURRENT VIEWPORT"))
+            self.assertEqual(blocks[2][0], "V:current")
             for _, mime_type, image_data in blocks:
                 self.assertEqual(mime_type, "image/png")
                 self.assertTrue(image_data)
@@ -660,7 +720,30 @@ class TestVibeCADReferenceImages(unittest.TestCase):
             )
             blocks = _context_image_blocks(context)
             self.assertEqual(len(blocks), 1)
-            self.assertIn('image 1 of 1): "good.png"', blocks[0][0])
+            self.assertEqual("R1/1:good.png", blocks[0][0])
+            notes = context["reference_images"].get("provider_delivery_notes", [])
+            self.assertEqual(len(notes), 2)
+
+    def test_provider_payload_reports_unusable_reference_to_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            missing = directory / "missing.png"
+            context = {
+                "reference_images": {
+                    "count": 1,
+                    "images": [
+                        {"name": "missing.png", "label": "", "path": str(missing)}
+                    ],
+                }
+            }
+            result = _agents_input_from_context("make this", context)
+            self.assertIsInstance(result, list)
+            texts = [
+                item["text"]
+                for item in result[0]["content"]
+                if item["type"] == "input_text"
+            ]
+            self.assertTrue(any(text.startswith("R_MISS:") for text in texts))
 
     def test_image_file_payload_rejects_unusable_files(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -678,6 +761,25 @@ class TestVibeCADReferenceImages(unittest.TestCase):
             payload = _image_file_payload(str(good))
             self.assertIsNotNone(payload)
             self.assertEqual(payload[0], "image/png")
+            status = _image_file_payload_with_status(str(good))
+            self.assertTrue(status["available"])
+
+    def test_anthropic_visual_repin_content_places_reference_with_viewport(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            context = self._context_with_images(
+                directory, ["front.png"], screenshot=False
+            )
+            shot = directory / "viewport.png"
+            shot.write_bytes(self._MINIMAL_PNG)
+            blocks = _anthropic_visual_repin_content(
+                context, {"captured": True, "path": str(shot)}
+            )
+            texts = [item["text"] for item in blocks if item["type"] == "text"]
+            self.assertIn("R vs V.", texts)
+            self.assertTrue(any(text.startswith("R1/1:") for text in texts))
+            self.assertTrue(any(text == "V:current" for text in texts))
+            self.assertEqual(len([item for item in blocks if item["type"] == "image"]), 2)
 
     def test_agents_input_labels_references_and_viewport(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -692,11 +794,11 @@ class TestVibeCADReferenceImages(unittest.TestCase):
                 content[0], {"type": "input_text", "text": "make this bracket"}
             )
             self.assertEqual(content[1]["type"], "input_text")
-            self.assertIn("REFERENCE (user-supplied, image 1 of 1)", content[1]["text"])
+            self.assertEqual("R1/1:front.png", content[1]["text"])
             self.assertEqual(content[2]["type"], "input_image")
             self.assertTrue(content[2]["image_url"].startswith("data:image/png;base64,"))
             self.assertEqual(content[3]["type"], "input_text")
-            self.assertTrue(content[3]["text"].startswith("CURRENT VIEWPORT"))
+            self.assertEqual("V:current", content[3]["text"])
             self.assertEqual(content[4]["type"], "input_image")
             self.assertEqual(len(content), 5)
 
@@ -709,12 +811,12 @@ class TestVibeCADReferenceImages(unittest.TestCase):
             content = _anthropic_user_content("make this bracket", context)
             self.assertIsInstance(content, list)
             self.assertEqual(content[0], {"type": "text", "text": "make this bracket"})
-            self.assertIn("image 1 of 2", content[1]["text"])
+            self.assertEqual("R1/2:front.png", content[1]["text"])
             self.assertEqual(content[2]["type"], "image")
             self.assertEqual(content[2]["source"]["media_type"], "image/png")
-            self.assertIn("image 2 of 2", content[3]["text"])
+            self.assertEqual("R2/2:side.png", content[3]["text"])
             self.assertEqual(content[4]["type"], "image")
-            self.assertTrue(content[5]["text"].startswith("CURRENT VIEWPORT"))
+            self.assertEqual("V:current", content[5]["text"])
             self.assertEqual(content[6]["type"], "image")
             self.assertEqual(len(content), 7)
 
@@ -737,14 +839,14 @@ class TestVibeCADReferenceImages(unittest.TestCase):
                 for item in agents[0]["content"]
                 if item["type"] == "input_text"
             ]
-            self.assertFalse(any(text.startswith("CURRENT VIEWPORT") for text in texts))
+            self.assertFalse(any(text.startswith("V:") for text in texts))
             anthropic = _anthropic_user_content("build it", context)
             self.assertIsInstance(anthropic, list)
             block_texts = [
                 item["text"] for item in anthropic if item["type"] == "text"
             ]
             self.assertFalse(
-                any(text.startswith("CURRENT VIEWPORT") for text in block_texts)
+                any(text.startswith("V:") for text in block_texts)
             )
 
     # --- session steering -----------------------------------------------------
@@ -755,7 +857,7 @@ class TestVibeCADReferenceImages(unittest.TestCase):
     def test_preamble_has_no_reference_block_without_references(self):
         preamble = _session_prompt_preamble({})
         self.assertNotIn("reference images:", preamble)
-        self.assertNotIn("TARGET design", preamble)
+        self.assertNotIn("Refs:", preamble)
         self.assertEqual(
             preamble, _session_prompt_preamble({"reference_images": {"images": []}})
         )
@@ -768,21 +870,35 @@ class TestVibeCADReferenceImages(unittest.TestCase):
             ]
         )
         preamble = _session_prompt_preamble(context)
-        self.assertIn("the user attached 2 reference images", preamble)
-        self.assertIn("TARGET design", preamble)
-        self.assertIn("not current document geometry", preamble)
-        self.assertIn("anchor scale", preamble)
-        self.assertIn("state every dimensional assumption", preamble)
-        self.assertIn("ask the user for one anchor dimension", preamble)
-        self.assertIn("CURRENT VIEWPORT", preamble)
-        self.assertIn("reference 1: bracket.png — front view", preamble)
-        self.assertIn("reference 2: photo.jpg", preamble)
+        self.assertNotIn("Refs:", preamble)
+        self.assertIn("R1:bracket.png|front view", preamble)
+        self.assertIn("R2:photo.jpg", preamble)
+        self.assertNotIn("Need ref brief:", preamble)
 
-    def test_preamble_reference_block_uses_singular_grammar(self):
+    def test_preamble_reference_block_omits_redundant_count(self):
         context = self._reference_context([{"name": "one.png", "label": ""}])
         preamble = _session_prompt_preamble(context)
-        self.assertIn("the user attached 1 reference image ", preamble)
-        self.assertNotIn("1 reference images", preamble)
+        self.assertNotIn("Refs:", preamble)
+        self.assertIn("R1:one.png", preamble)
+
+    def test_preamble_reference_block_renders_stored_visual_brief(self):
+        context = self._reference_context(
+            [
+                {
+                    "name": "impeller.png",
+                    "label": "",
+                    "visual_brief": {
+                        "object_type": "compressor wheel",
+                        "counts_patterns": ["5 main blades", "5 splitter blades"],
+                        "must_preserve": ["backswept lofted blades"],
+                    },
+                }
+            ]
+        )
+        preamble = _session_prompt_preamble(context)
+        self.assertIn("b=compressor wheel", preamble)
+        self.assertIn("5 main blades", preamble)
+        self.assertNotIn("Ref brief present.", preamble)
 
     def test_reference_image_lines_ignores_malformed_context(self):
         self.assertEqual(_reference_image_lines({}), [])
@@ -799,7 +915,7 @@ class TestVibeCADReferenceImages(unittest.TestCase):
 
     def test_continuation_prompt_lists_references_only_when_attached(self):
         without = _continuation_prompt("build a bracket", ["previous output"], {}, [])
-        self.assertNotIn("Attached user reference images", without)
+        self.assertNotIn("Refs (", without)
 
         context = self._reference_context(
             [
@@ -810,7 +926,6 @@ class TestVibeCADReferenceImages(unittest.TestCase):
         with_refs = _continuation_prompt(
             "build a bracket", ["previous output"], context, []
         )
-        self.assertIn("Attached user reference images (2)", with_refs)
+        self.assertIn("R:", with_refs)
         self.assertIn("bracket.png", with_refs)
         self.assertIn("photo.jpg", with_refs)
-        self.assertIn("TARGET design", with_refs)

@@ -12,13 +12,9 @@ from . import domain_runtime
 
 
 TOOL_SPEC = {'contextual': True,
- 'description': 'Create a native PartDesign AdditiveLoft or SubtractiveLoft that '
-                'blends smoothly from a profile sketch through ordered section '
-                'sketches on different planes. The go-to tool for any shape that '
-                'transitions between dissimilar cross-sections or needs '
-                'curvature-continuous flow surfaces. Place each section on its own '
-                'datum plane (partdesign.create_datum_plane with offsets) before '
-                'lofting.',
+ 'description': 'Create a PartDesign AdditiveLoft/SubtractiveLoft through ordered '
+                'section sketches. Use for blades, ducts, ergonomic forms, twist, '
+                'camber, and changing sections.',
  'name': 'partdesign.loft_profiles',
  'parameters': {'properties': {'closed': {'description': 'Close the loft back to the first profile, forming a ring (default false).',
                                           'type': 'boolean'},

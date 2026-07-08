@@ -12,10 +12,8 @@ from .common import get_sketch, no_sketch, profile_validation, run_freecad_trans
 TOOL_SPEC = {
     "name": "sketcher.close_sketch",
     "description": (
-        "Close the active native Sketcher edit session, equivalent to the human "
-        "Sketcher leave/close action, and return updated workbench, task panel, "
-        "solver, and profile state. Use this before creating PartDesign features "
-        "when the sketch is still open for editing."
+        "Close the active Sketcher edit session and return solver/profile "
+        "state. Use before creating PartDesign features from an open sketch."
     ),
     "contextual": True,
     "parameters": {

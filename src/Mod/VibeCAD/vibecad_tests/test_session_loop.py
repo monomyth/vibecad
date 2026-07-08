@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 
 import contextlib
-import os
 import json
 from pathlib import Path
 import sys
 import tempfile
 import types
 from typing import Any
+from unittest import mock
 
 import VibeCADProject
 from VibeCADCore import (
@@ -25,18 +25,12 @@ from VibeCADProvider import (
 )
 from VibeCADSession import (
     CORE_PROVIDER_TOOLS,
-    MAX_OPERATION_SCORE_PER_PROVIDER_TURN,
-    MAX_OPERATION_SCORE_PER_PROVIDER_TURN_ENV,
-    MAX_MUTATING_TOOL_CALLS_PER_PROVIDER_TURN_ENV,
     _effective_provider_workbench,
-    _max_operation_score_per_provider_turn,
-    _max_mutating_tool_calls_per_provider_turn,
     _missing_requirement_lines,
-    _operation_score_for_tool,
     _provider_loop_state,
     _result_summary,
     _should_continue_autonomously,
-    _tool_batch_checkpoint_reached,
+    _tool_batch_workspace_handoff_reached,
     make_provider_tool_runner,
     provider_tool_scope_for_context,
     provider_safe_tool_schemas,
@@ -583,7 +577,7 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
 
         attempted_write = [{"tool_name": "partdesign.extrude", "ok": False, "safety": "safe_write"}]
         self.assertIn(
-            "first meaningful native FreeCAD geometry",
+            "create native geometry",
             _missing_requirement_lines("Any prompt text", empty_context, attempted_write)[0],
         )
 
@@ -602,7 +596,7 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         }
         self.assertEqual(
             _missing_requirement_lines("No keyword dependency", sketch_context, []),
-            ["- fully constrain Sketch (2 degrees of freedom) before creating dependent features"],
+            ["- constrain Sketch (2 DoF)"],
         )
 
     def test_loop_requirements_need_fresh_screenshot_after_latest_write(self):
@@ -633,14 +627,14 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
             context,
             [screenshot, write],
         )
-        self.assertIn("after the latest geometry changes", stale_lines[-1])
+        self.assertIn("capture_view", stale_lines[-1])
 
         fresh_lines = _missing_requirement_lines(
             "Create CAD geometry",
             context,
             [write, screenshot],
         )
-        self.assertNotIn("after the latest geometry changes", "\n".join(fresh_lines))
+        self.assertNotIn("capture_view", "\n".join(fresh_lines))
 
         headless_screenshot = {
             "tool_name": "core.capture_view_screenshot",
@@ -653,7 +647,7 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
             context,
             [write, headless_screenshot],
         )
-        self.assertNotIn("after the latest geometry changes", "\n".join(headless_lines))
+        self.assertNotIn("capture_view", "\n".join(headless_lines))
 
     def test_loop_requirements_do_not_parse_prompt_for_scenario_gates(self):
         context = {
@@ -739,21 +733,20 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
             },
         }
         lines = _missing_requirement_lines("Continue this model.", context, [])
-        self.assertTrue(any("assembly.ground_component" in line for line in lines), lines)
-        self.assertFalse(any("assembly.create_joint" in line for line in lines), lines)
+        self.assertTrue(any(line == "- ground TestAssembly" for line in lines), lines)
+        self.assertFalse(any("joint TestAssembly" in line for line in lines), lines)
 
         context["assembly"]["assemblies"][0]["grounded_count"] = 1
         lines = _missing_requirement_lines("Continue this model.", context, [])
-        self.assertFalse(any("assembly.ground_component" in line for line in lines), lines)
-        joints_lines = [line for line in lines if "assembly.create_joint" in line]
+        self.assertFalse(any("ground TestAssembly" in line for line in lines), lines)
+        joints_lines = [line for line in lines if "joint TestAssembly" in line]
         self.assertEqual(len(joints_lines), 1, lines)
-        self.assertIn("assembly.solve", joints_lines[0])
-        self.assertIn("raw placement is layout, not mating", joints_lines[0])
+        self.assertEqual("- joint TestAssembly; solve", joints_lines[0])
 
         context["assembly"]["assemblies"][0]["joints"] = 1
         lines = _missing_requirement_lines("Continue this model.", context, [])
         self.assertFalse(
-            any("assembly.ground_component" in line or "assembly.create_joint" in line for line in lines),
+            any("ground TestAssembly" in line or "joint TestAssembly" in line for line in lines),
             lines,
         )
 
@@ -778,25 +771,6 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
             lines,
         )
 
-    def test_cam_execution_contract_requires_machine_validated_machining(self):
-        from VibeCADSession import _execution_contract_for_context
-
-        contract = _execution_contract_for_context({"workbench": "CAMWorkbench"})
-        self.assertEqual(contract["mode"], "machine_validated_machining")
-        required_order = " ".join(contract["required_order"])
-        for tool in (
-            "cam.define_machine",
-            "cam.create_job",
-            "cam.add_tool",
-            "cam.create_operation",
-            "cam.validate_job",
-            "cam.postprocess",
-        ):
-            self.assertIn(tool, required_order, tool)
-        gates = " ".join(contract["completion_gates"])
-        self.assertIn("bound to a machine", gates)
-        self.assertIn("validation", gates)
-
     def test_loop_requirements_gate_cam_jobs_without_machine_binding(self):
         context = {
             "workbench": "CAMWorkbench",
@@ -807,16 +781,16 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
             },
         }
         lines = _missing_requirement_lines("machine the part", context, [])
-        self.assertTrue(any("not bound to a machine" in line for line in lines), lines)
+        self.assertTrue(any("cam_bind:Job" in line for line in lines), lines)
 
         context["cam"]["jobs"][0]["machine"] = "Generic LinuxCNC Mill"
         lines = _missing_requirement_lines("machine the part", context, [])
-        self.assertFalse(any("not bound to a machine" in line for line in lines), lines)
+        self.assertFalse(any("cam_bind:" in line for line in lines), lines)
 
         # Malformed cam context entries are tolerated without gating noise.
         context["cam"] = {"job_count": 1, "jobs": [None, "junk", {"no_machine_key": True}]}
         lines = _missing_requirement_lines("machine the part", context, [])
-        self.assertFalse(any("not bound to a machine" in line for line in lines), lines)
+        self.assertFalse(any("cam_bind:" in line for line in lines), lines)
 
     def test_loop_requirements_gate_unvalidated_or_forced_postprocess(self):
         context = {
@@ -836,9 +810,7 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
             }
         ]
         lines = _missing_requirement_lines("machine the part", context, unvalidated)
-        self.assertTrue(
-            any("without a machine validation" in line for line in lines), lines
-        )
+        self.assertTrue(any("cam_validate" in line for line in lines), lines)
 
         forced = [
             {
@@ -852,9 +824,7 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
             }
         ]
         lines = _missing_requirement_lines("machine the part", context, forced)
-        self.assertTrue(
-            any("despite unresolved machine" in line for line in lines), lines
-        )
+        self.assertTrue(any("cam_fix" in line for line in lines), lines)
 
         clean = [
             {
@@ -869,32 +839,14 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         ]
         lines = _missing_requirement_lines("machine the part", context, clean)
         self.assertFalse(
-            any("validation" in line or "G-code" in line for line in lines), lines
+            any("cam_validate" in line or "cam_fix" in line for line in lines), lines
         )
 
         # The steering lines flow into loop-state validation notes so an
         # unvalidated postprocess refuses autonomous completion.
         state = _provider_loop_state("machine the part", context, unvalidated, 1, False)
         notes = state.get("state_validation_notes", [])
-        self.assertTrue(
-            any("without a machine validation" in str(note) for note in notes), notes
-        )
-
-    def test_assembly_execution_contract_requires_grounding_joints_and_solve(self):
-        from VibeCADSession import _execution_contract_for_context
-
-        contract = _execution_contract_for_context({"workbench": "AssemblyWorkbench"})
-        self.assertEqual(contract["mode"], "native_assembly")
-        required_order = " ".join(contract["required_order"])
-        self.assertIn("assembly.ground_component", required_order)
-        self.assertIn("assembly.create_joint", required_order)
-        self.assertIn("partdesign.find_subelements", required_order)
-        self.assertIn("never by dead-reckoned raw placement", required_order)
-        self.assertIn("assembly.solve", required_order)
-        gates = " ".join(contract["completion_gates"])
-        self.assertIn("grounded component", gates)
-        self.assertIn("raw placement is layout, not mating", gates)
-        self.assertIn("solve successfully", gates)
+        self.assertTrue(any("cam_validate" in str(note) for note in notes), notes)
 
     def test_provider_safe_tool_schemas_expose_only_command_write_tools(self):
         service = VibeCADService()
@@ -903,9 +855,9 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         self.assertNotIn("core.create_new_document", names)
         self.assertNotIn("core.open_document", names)
         self.assertIn("core.delete_object", names)
-        self.assertIn("core.report_tool_shape_gap", names)
+        self.assertNotIn("core.report_tool_shape_gap", names)
         self.assertNotIn("core.run_workbench_command", names)
-        self.assertIn("core.get_tool_shape_report", names)
+        self.assertNotIn("core.get_tool_shape_report", names)
         self.assertIn("core.wait_for_user_gui_action", names)
         self.assertNotIn("core.propose_run_workbench_command", names)
         self.assertIn("core.capture_view_screenshot", names)
@@ -976,7 +928,7 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         # Sketcher pack: consolidated multi-function tools only.
         # sketcher.get_sketch was retired: sketcher.inspect_sketch is a strict
         # superset (adds solver DoF, profile readiness, repair diagnostics).
-        self.assertIn("core.report_tool_shape_gap", sketcher_names)
+        self.assertNotIn("core.report_tool_shape_gap", sketcher_names)
         self.assertNotIn("sketcher.get_sketch", sketcher_names)
         self.assertIn("sketcher.create_sketch", sketcher_names)
         self.assertIn("sketcher.open_sketch", sketcher_names)
@@ -1186,14 +1138,13 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
                 self.assertNotIn(hidden, cam_names, hidden)
             self.assertIn("cam.validate_job", cam_names)
             self.assertIn("model.build_from_script", cam_names)
-            # Read/view/feedback tools stay available in script mode.
+            # Read/view tools stay available in script mode.
             for kept in (
                 "core.get_active_document",
                 "core.capture_view_screenshot",
                 "core.set_view",
                 "core.get_report_view_errors",
                 "core.enter_workspace",
-                "core.report_tool_shape_gap",
                 "partdesign.get_bodies",
             ):
                 self.assertIn(kept, names, kept)
@@ -1318,7 +1269,7 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
                     )
                     if not result.get("ok"):
                         raise AssertionError(result)
-                    if result.get("checkpoint") != "workspace_entry":
+                    if result.get("workspace_handoff") != "workspace_entry":
                         raise AssertionError(result)
                     return ProviderResult("Entered PartDesign; refreshing tool surface.")
                 self.assert_tool(tool_runner)
@@ -1346,7 +1297,6 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
                 "Create a PartDesign part in small verified steps.",
                 service=service,
                 provider=provider,
-                enforce_small_steps=True,
             )
 
             self.assertEqual(response.provider, "ScopeProbeProvider")
@@ -1375,15 +1325,15 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
             tmp_dir.cleanup()
             App.closeDocument(doc.Name)
 
-    def test_partdesign_create_sketch_does_not_force_hidden_tool_surface_refresh(self):
+    def test_partdesign_create_sketch_does_not_force_hidden_workspace_handoff(self):
         import FreeCAD as App
 
-        doc = App.newDocument("VibeCADCreateSketchRefreshCheckpointTest")
+        doc = App.newDocument("VibeCADCreateSketchRefreshHandoffTest")
         try:
             service = VibeCADService()
             with _temporary_design_project(service, "Create Sketch Refresh"):
                 service.active_workbench_name = lambda: "PartDesignWorkbench"  # type: ignore[method-assign]
-                body = service.registry.call("partdesign.create_body", label="Checkpoint Body")
+                body = service.registry.call("partdesign.create_body", label="Handoff Body")
                 self.assertTrue(body["ok"], body)
                 trace = []
                 runner = make_provider_tool_runner(
@@ -1395,11 +1345,11 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
 
                 result = runner(
                     "partdesign.create_sketch",
-                    '{"body_name": "Checkpoint Body", "label": "Component Sketch", "plane": "XY_Plane"}',
+                    '{"body_name": "Handoff Body", "label": "Component Sketch", "plane": "XY_Plane"}',
                 )
 
                 self.assertTrue(result["ok"], result)
-                self.assertIsNone(result.get("checkpoint"))
+                self.assertIsNone(result.get("workspace_handoff"))
                 self.assertNotIn("required_next_action", result)
 
                 drawn = runner(
@@ -1407,8 +1357,8 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
                     '{"sketch_name": "Component Sketch", "width": 10, "height": 10}',
                 )
                 self.assertTrue(drawn["ok"], drawn)
-                self.assertNotEqual(drawn.get("status"), "deferred_checkpoint")
-                self.assertIsNone(drawn.get("checkpoint"))
+                self.assertIsNone(drawn.get("status"))
+                self.assertIsNone(drawn.get("workspace_handoff"))
         finally:
             App.closeDocument(doc.Name)
 
@@ -1502,6 +1452,62 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         self.assertEqual(blocked["tool_workbench"], "PartWorkbench")
         self.assertIn("Tool is not available", blocked["error"])
 
+    def test_provider_tool_runner_blocks_partdesign_write_while_sketch_is_open(self):
+        service = VibeCADService()
+        service.active_workbench_name = lambda: "PartDesignWorkbench"  # type: ignore[method-assign]
+        service.task_panel_summary = lambda: {  # type: ignore[method-assign]
+            "available": True,
+            "edit_mode": True,
+            "active_sketch": "BladeProfile",
+            "profile_status": {
+                "ready_for_pad": False,
+                "ready_for_pocket": False,
+                "closed_profile": False,
+                "reason": "Wire is not closed.",
+            },
+        }
+        runner = make_provider_tool_runner(service, "PartDesignWorkbench")
+
+        blocked = runner(
+            "partdesign.extrude",
+            '{"sketch_name": "BladeProfile", "operation": "pad", "length": 3.2}',
+        )
+
+        self.assertFalse(blocked["ok"], blocked)
+        self.assertEqual(blocked["active_sketch"], "BladeProfile")
+        self.assertFalse(blocked["retry_same_call"])
+        self.assertEqual(
+            blocked["required_next_action"]["tool"],
+            "sketcher.inspect_sketch",
+        )
+        self.assertIn("still editing sketch", blocked["error"])
+
+    def test_provider_tool_runner_marks_hard_geometry_payload_non_repeatable(self):
+        service = VibeCADService()
+        service.active_workbench_name = lambda: "PartDesignWorkbench"  # type: ignore[method-assign]
+        hard_payload = {
+            "ok": False,
+            "transaction": {
+                "report_view_errors": {
+                    "errors": ["BladePad: Wire is not closed."]
+                }
+            },
+        }
+        with mock.patch.object(service.registry, "call", return_value=hard_payload):
+            runner = make_provider_tool_runner(service, "PartDesignWorkbench")
+            result = runner(
+                "partdesign.dressup",
+                '{"operation": "fillet", "feature_name": "BladePad", "edge_names": ["Edge1"], "radius": 1.0}',
+            )
+
+        self.assertFalse(result["ok"], result)
+        self.assertFalse(result["retry_same_call"])
+        self.assertIn("Wire is not closed", result["error"])
+        self.assertEqual(
+            result["required_next_action"]["tool"],
+            "core.get_report_view_errors",
+        )
+
     def test_provider_tool_runner_rejects_part_tools_in_partdesign(self):
         service = VibeCADService()
         with _temporary_design_project(service, "Reject Part Tool"):
@@ -1537,12 +1543,12 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
             if doc is not None:
                 App.closeDocument(doc.Name)
 
-    def test_provider_tool_runner_does_not_checkpoint_same_workbench_activation(self):
+    def test_provider_tool_runner_does_not_handoff_same_workbench_activation(self):
         if not _gui_workbench_api_available():
             self.skipTest("FreeCAD GUI workbench API unavailable")
         service = VibeCADService()
         service.activate_workbench("PartDesignWorkbench")
-        turn_state = {"turn": 1, "mutating_tool_calls": 0, "checkpoint_reached": False}
+        turn_state = {"turn": 1, "mutating_tool_calls": 0}
         runner = make_provider_tool_runner(
             service,
             "PartDesignWorkbench",
@@ -1551,23 +1557,22 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         result = runner("core.activate_workbench", '{"name": "PartDesignWorkbench"}')
 
         self.assertTrue(result["ok"], result)
-        self.assertNotEqual(result.get("checkpoint"), "workbench_switch")
-        self.assertFalse(turn_state.get("workbench_switch_reached", False))
+        self.assertNotEqual(result.get("workspace_handoff"), "workbench_switch")
 
-    def test_autonomous_loop_continues_after_workbench_switch_checkpoint(self):
+    def test_autonomous_loop_continues_after_workspace_handoff(self):
         trace = [
             {
                 "tool_name": "core.activate_workbench",
                 "ok": True,
-                "result": {"ok": True, "checkpoint": "workbench_switch"},
+                "result": {"ok": True, "workspace_handoff": "workbench_switch"},
             }
         ]
-        self.assertTrue(_tool_batch_checkpoint_reached(trace))
+        self.assertTrue(_tool_batch_workspace_handoff_reached(trace))
         service = VibeCADService()
         self.assertTrue(
             _should_continue_autonomously(
                 "Design a usable quadcopter drone concept.",
-                "Checkpoint after required workbench switch.",
+                "Workspace changed.",
                 service,
                 trace,
                 turn_index=1,
@@ -1602,19 +1607,15 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         finally:
             App.closeDocument(doc.Name)
 
-    def test_provider_tool_runner_reports_small_step_checkpoint_after_completed_mutation(self):
+    def test_provider_tool_runner_ignores_stale_loop_budget_state(self):
         import FreeCAD as App
 
         service = VibeCADService()
-        with _temporary_design_project(service, "Small Step Checkpoint"):
+        with _temporary_design_project(service, "Stale Operation Score Ignored"):
             turn_state = {
                 "turn": 1,
-                "operation_score": MAX_OPERATION_SCORE_PER_PROVIDER_TURN
-                - _operation_score_for_tool(
-                    "partdesign.create_sketch", SafetyLevel.SAFE_WRITE
-                ),
-                "mutating_tool_calls": 4,
-                "checkpoint_reached": False,
+                "operation" + "_score": 999,
+                "mutating_tool_calls": 0,
             }
             runner = make_provider_tool_runner(
                 service,
@@ -1623,29 +1624,17 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
             )
             result = runner(
                 "partdesign.create_sketch",
-                '{"label": "Checkpoint Sketch", "plane": "XY_Plane"}',
+                '{"label": "No Budget Gate Sketch", "plane": "XY_Plane"}',
             )
         doc = App.ActiveDocument
         try:
             self.assertTrue(result["ok"], result)
-            self.assertEqual(result.get("checkpoint"), "small_step")
-            self.assertTrue(turn_state.get("checkpoint_reached"))
-            self.assertEqual(
-                result.get("operation_score"),
-                MAX_OPERATION_SCORE_PER_PROVIDER_TURN,
-            )
-            self.assertEqual(
-                result.get("score_limit"),
-                MAX_OPERATION_SCORE_PER_PROVIDER_TURN,
-            )
-            self.assertEqual(
-                result.get("required_next_action", {}).get("finish_current_turn"),
-                True,
-            )
+            self.assertIsNone(result.get("status"))
+            self.assertIsNone(result.get("workspace_handoff"))
             self.assertTrue(
                 any(
                     getattr(obj, "TypeId", "") == "Sketcher::SketchObject"
-                    and getattr(obj, "Label", "") == "Checkpoint Sketch"
+                    and getattr(obj, "Label", "") == "No Budget Gate Sketch"
                     for obj in (doc.Objects if doc else [])
                 )
             )
@@ -1653,126 +1642,19 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
             if doc is not None:
                 App.closeDocument(doc.Name)
 
-    def test_provider_tool_runner_defers_over_budget_operation_as_recoverable_failure(self):
-        import FreeCAD as App
-
-        service = VibeCADService()
-        with _temporary_design_project(service, "Deferred Small Step Checkpoint"):
-            turn_state = {
-                "turn": 1,
-                "operation_score": MAX_OPERATION_SCORE_PER_PROVIDER_TURN,
-                "mutating_tool_calls": 6,
-                "checkpoint_reached": False,
-            }
-            runner = make_provider_tool_runner(
-                service,
-                "PartDesignWorkbench",
-                turn_state=turn_state,
-            )
-            result = runner(
-                "partdesign.create_sketch",
-                '{"label": "Deferred Sketch", "plane": "XY_Plane"}',
-            )
-        doc = App.ActiveDocument
-        try:
-            self.assertFalse(result["ok"], result)
-            self.assertEqual(result.get("status"), "deferred_checkpoint")
-            self.assertFalse(result.get("executed"))
-            self.assertFalse(result.get("mutated_document"))
-            self.assertTrue(result.get("recoverable"))
-            self.assertEqual(result.get("checkpoint"), "small_step")
-            self.assertEqual(result.get("blocked_tool"), "partdesign.create_sketch")
-            self.assertEqual(
-                result.get("next_operation_score"),
-                _operation_score_for_tool(
-                    "partdesign.create_sketch", SafetyLevel.SAFE_WRITE
-                ),
-            )
-            self.assertFalse(
-                any(
-                    getattr(obj, "TypeId", "") == "Sketcher::SketchObject"
-                    and getattr(obj, "Label", "") == "Deferred Sketch"
-                    for obj in (doc.Objects if doc else [])
-                )
-            )
-        finally:
-            if doc is not None:
-                App.closeDocument(doc.Name)
-
-    def test_operation_score_budget_is_configurable(self):
-        old_score_value = os.environ.get(MAX_OPERATION_SCORE_PER_PROVIDER_TURN_ENV)
-        old_mutation_value = os.environ.get(MAX_MUTATING_TOOL_CALLS_PER_PROVIDER_TURN_ENV)
-        try:
-            os.environ[MAX_OPERATION_SCORE_PER_PROVIDER_TURN_ENV] = "11"
-            os.environ.pop(MAX_MUTATING_TOOL_CALLS_PER_PROVIDER_TURN_ENV, None)
-            self.assertEqual(_max_operation_score_per_provider_turn(), 11)
-            self.assertEqual(_max_mutating_tool_calls_per_provider_turn(), 11)
-            state = _provider_loop_state(
-                "make a bracket",
-                {"document": {"object_count": 1}, "workbench": "PartDesignWorkbench"},
-                [],
-                turn=1,
-                visual_feedback_consumed=False,
-            )
-            self.assertEqual(state["max_operation_score_per_turn"], 11)
-            self.assertEqual(state["max_mutating_tool_calls_per_turn"], 11)
-        finally:
-            if old_score_value is None:
-                os.environ.pop(MAX_OPERATION_SCORE_PER_PROVIDER_TURN_ENV, None)
-            else:
-                os.environ[MAX_OPERATION_SCORE_PER_PROVIDER_TURN_ENV] = old_score_value
-            if old_mutation_value is None:
-                os.environ.pop(MAX_MUTATING_TOOL_CALLS_PER_PROVIDER_TURN_ENV, None)
-            else:
-                os.environ[MAX_MUTATING_TOOL_CALLS_PER_PROVIDER_TURN_ENV] = (
-                    old_mutation_value
-                )
-
-    def test_legacy_mutating_tool_limit_env_still_configures_operation_budget(self):
-        old_score_value = os.environ.get(MAX_OPERATION_SCORE_PER_PROVIDER_TURN_ENV)
-        old_mutation_value = os.environ.get(MAX_MUTATING_TOOL_CALLS_PER_PROVIDER_TURN_ENV)
-        try:
-            os.environ.pop(MAX_OPERATION_SCORE_PER_PROVIDER_TURN_ENV, None)
-            os.environ[MAX_MUTATING_TOOL_CALLS_PER_PROVIDER_TURN_ENV] = "7"
-            self.assertEqual(_max_operation_score_per_provider_turn(), 7)
-            self.assertEqual(_max_mutating_tool_calls_per_provider_turn(), 7)
-        finally:
-            if old_score_value is None:
-                os.environ.pop(MAX_OPERATION_SCORE_PER_PROVIDER_TURN_ENV, None)
-            else:
-                os.environ[MAX_OPERATION_SCORE_PER_PROVIDER_TURN_ENV] = old_score_value
-            if old_mutation_value is None:
-                os.environ.pop(MAX_MUTATING_TOOL_CALLS_PER_PROVIDER_TURN_ENV, None)
-            else:
-                os.environ[MAX_MUTATING_TOOL_CALLS_PER_PROVIDER_TURN_ENV] = (
-                    old_mutation_value
-                )
-
-    def test_operation_scores_weight_sketch_constraints_lower_than_solid_features(self):
-        self.assertEqual(
-            _operation_score_for_tool("sketcher.add_constraint", SafetyLevel.SAFE_WRITE),
-            1,
-        )
-        self.assertGreater(
-            _operation_score_for_tool(
-                "partdesign.loft_profiles", SafetyLevel.SAFE_WRITE
-            ),
-            _operation_score_for_tool("sketcher.add_constraint", SafetyLevel.SAFE_WRITE),
-        )
-
-    def test_autonomous_loop_continues_when_tool_trace_reports_checkpoint(self):
+    def test_autonomous_loop_continues_when_tool_trace_reports_workspace_handoff(self):
         service = VibeCADService()
         trace = [
             {
-                "tool_name": "partdesign.pad_profile",
-                "ok": False,
-                "result": {"ok": False, "checkpoint": "small_step"},
+                "tool_name": "core.enter_workspace",
+                "ok": True,
+                "result": {"ok": True, "workspace_handoff": "workspace_entry"},
             }
         ]
         self.assertTrue(
             _should_continue_autonomously(
                 "Design a usable bearing carrier bracket and capture the viewport.",
-                "Progress checkpoint: VibeCAD requested a checkpoint before further edits.",
+                "Entered PartDesign.",
                 service,
                 trace,
                 0,
@@ -1786,7 +1668,7 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
             _should_continue_autonomously(
                 "Design a usable bearing carrier bracket.",
                 "Next steps: I'm ready to continue once the tools allow. "
-                "Progress checkpoint requested. Please confirm?",
+                "Progress refresh requested. Please confirm?",
                 service,
                 [],
                 0,
@@ -1889,7 +1771,8 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         report = service.tool_shape_report("PartDesignWorkbench")
         names = set(report["provider_tool_names"])
         self.assertEqual(report["active_workbench"], "PartDesignWorkbench")
-        self.assertIn("core.get_tool_shape_report", names)
+        self.assertNotIn("core.get_tool_shape_report", names)
+        self.assertNotIn("core.report_tool_shape_gap", names)
         self.assertIn("partdesign.create_sketch", names)
         self.assertIn("partdesign.extrude", names)
         self.assertIn("partdesign.hole_from_sketch", names)

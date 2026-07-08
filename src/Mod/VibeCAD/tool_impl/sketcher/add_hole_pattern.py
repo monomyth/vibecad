@@ -21,9 +21,8 @@ from .common import (
 TOOL_SPEC = {
     "name": "sketcher.add_hole_pattern",
     "description": (
-        "Add a fully constrained native Sketcher hole/bolt pattern in one operation. "
-        "Use for mounting holes, bolt patterns, vents, and repeated circular cut profiles "
-        "before partdesign.extrude (operation='pocket') or partdesign.hole_from_sketch."
+        "Add a fully constrained Sketcher hole/bolt pattern for pockets, "
+        "drilled holes, vents, and repeated circular cuts."
     ),
     "contextual": True,
     "parameters": {

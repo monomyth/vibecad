@@ -27,17 +27,9 @@ OPERATIONS = ("translate", "copy", "mirror", "offset", "array")
 TOOL_SPEC = {
     "name": "sketcher.transform_geometry",
     "description": (
-        "Transform one or more native Sketcher geometry elements with one of five operations. "
-        "operation='translate': move selected geometry by a 2D delta (requires dx, dy). "
-        "operation='copy': duplicate selected geometry with a 2D offset (requires dx, dy). "
-        "operation='mirror': mirror selected geometry across an explicit 2D axis (requires "
-        "axis_point_x/y and axis_direction_x/y; keep_original controls copy vs in-place). "
-        "operation='offset': create offset copies of line/circle/arc geometry (requires "
-        "distance; side selects direction). "
-        "operation='array': create a rectangular array of selected geometry (requires columns, "
-        "rows, column_dx/dy, row_dx/dy). Equivalent to Sketcher's move/copy/symmetry/offset/"
-        "array workbench tools. Operates on whole elements — use sketcher.modify_geometry to "
-        "trim/extend/split/fillet curves and sketcher.move_point to drag one point."
+        "Move, copy, mirror, offset, or array existing Sketcher geometry. "
+        "Use this for whole-element transforms, not for authoring missing "
+        "curves or changing one point."
     ),
     "contextual": True,
     "parameters": {

@@ -13,12 +13,8 @@ from . import domain_runtime
 
 TOOL_SPEC = {
     "description": (
-        "Run the assembly kinematic solver to reposition components "
-        "according to the existing joints. Use this after editing a part "
-        "or a joint to bring the assembly back into a mated state. Returns "
-        "the solver return code (0 means solved) and the resulting "
-        "component placements. Requires at least one joint; ground one "
-        "component and create joints first."
+        "Run the assembly solver after grounding and joints exist. Returns "
+        "solver code (0 solved) and component placements."
     ),
     "name": "assembly.solve",
     "parameters": {

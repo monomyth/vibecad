@@ -28,6 +28,7 @@ TOOL_MODULE_NAMES = (
     'core_list_active_workbench_commands',
     'core_get_tool_shape_report',
     'core_report_tool_shape_gap',
+    'core_update_design_memory',
     'core_enter_workspace',
     'core_activate_workbench',
     'core_get_active_workbench_tool_pack',

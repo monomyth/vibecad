@@ -6,15 +6,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import core_get_active_document, core_get_task_panel
+from . import core_get_active_document, core_get_task_panel, partdesign_find_subelements
 from VibeCADTransactions import run_freecad_transaction
 
 TOOL_SPEC = {'contextual': True,
- 'description': 'Create a Sketch inside a PartDesign Body (reusing or creating the Body), '
-                'attached to a Body origin plane, a datum plane, or a planar face. '
-                'Attach section/skeleton sketches to datum planes with '
-                "support_type='datum_plane' and sketches on existing solids with "
-                "support_type='face'.",
+ 'description': 'Create a Sketch inside a PartDesign Body. Use origin planes for '
+                'governing layouts, datum planes for loft/sweep sections, and '
+                "support_type='face' with subelement or normal for feature sketches "
+                'on existing solids.',
  'name': 'partdesign.create_sketch',
  'parameters': {'properties': {'body_name': {'description': 'Optional target PartDesign Body internal name or visible label returned by partdesign.create_body or partdesign.get_bodies.',
                                               'type': 'string'},
@@ -27,8 +26,15 @@ TOOL_SPEC = {'contextual': True,
                                          'type': 'string'},
                                'support_object': {'description': 'Datum plane or solid feature internal name or label, required for datum_plane and face support.',
                                                   'type': 'string'},
-                               'subelement': {'description': "Planar face subelement such as 'Face3', required when support_type='face'.",
-                                              'type': 'string'},
+                               'subelement': {'description': "Planar face subelement such as 'Face3'. For support_type='face', provide this or normal.",
+                                               'type': 'string'},
+                               'normal': {'description': 'For support_type=face: resolve or validate a planar face by outward normal, e.g. {"z": 1} for the top face.',
+                                          'properties': {'x': {'type': 'number'},
+                                                         'y': {'type': 'number'},
+                                                         'z': {'type': 'number'}},
+                                          'type': 'object'},
+                               'normal_tolerance_degrees': {'description': 'Angular tolerance for normal face selection. Default 5 degrees.',
+                                                            'type': 'number'},
                                'map_mode': {'description': 'Attachment MapMode (default FlatFace).',
                                             'type': 'string'}},
                 'type': 'object'},
@@ -44,6 +50,8 @@ def run(
     support_type: str = "origin_plane",
     support_object: str | None = None,
     subelement: str | None = None,
+    normal: dict[str, Any] | None = None,
+    normal_tolerance_degrees: float = 5.0,
     map_mode: str = "FlatFace",
 ) -> dict[str, Any]:
     clean_support_type = str(support_type or "origin_plane")
@@ -66,6 +74,11 @@ def run(
         return {
             "ok": False,
             "error": "support_object is required when support_type is datum_plane or face.",
+        }
+    if clean_support_type == "face" and not str(subelement or "").strip() and normal is None:
+        return {
+            "ok": False,
+            "error": "subelement or normal is required when support_type is face.",
         }
 
     def _create() -> dict[str, Any]:
@@ -118,6 +131,7 @@ def run(
                         return plane_name
             return name or label
 
+        face_resolution: dict[str, Any] | None = None
         if clean_support_type == "origin_plane":
             support = next(
                 (
@@ -133,6 +147,15 @@ def run(
         else:
             support = target
             support_subelement = str(subelement or "")
+            if clean_support_type == "face" and normal is not None:
+                face_resolution = _resolve_face_support(
+                    service,
+                    str(support_object),
+                    support_subelement,
+                    normal,
+                    normal_tolerance_degrees,
+                )
+                support_subelement = str(face_resolution["subelement"])
 
         sketch = doc.addObject("Sketcher::SketchObject", "Sketch")
         sketch.Label = label or "Sketch"
@@ -156,6 +179,7 @@ def run(
             "support_type": clean_support_type,
             "plane": requested_plane if clean_support_type == "origin_plane" else None,
             "subelement": support_subelement,
+            "resolved_face": face_resolution,
             "attachment_support": getattr(support, "Name", None),
             "map_mode": getattr(sketch, "MapMode", None),
             "active_workbench": _active_workbench_name(),
@@ -183,6 +207,56 @@ def run(
             else None
         ),
         "next_action": "Add closed sketch geometry, then call partdesign.extrude with operation='pad' or 'pocket'.",
+    }
+
+
+def _resolve_face_support(
+    service: Any,
+    support_object: str,
+    requested_subelement: str,
+    normal: dict[str, Any],
+    normal_tolerance_degrees: float,
+) -> dict[str, Any]:
+    result = partdesign_find_subelements.run(
+        service,
+        object_name=support_object,
+        element_type="face",
+        geometry_type="plane",
+        normal=normal,
+        normal_tolerance_degrees=normal_tolerance_degrees,
+        limit=100,
+    )
+    if not result.get("found"):
+        raise RuntimeError(str(result.get("error") or "No matching planar face found."))
+    matches = [
+        item
+        for item in result.get("matches", []) or []
+        if isinstance(item, dict) and str(item.get("name") or "").strip()
+    ]
+    if not matches:
+        raise RuntimeError(
+            "No planar face on "
+            f"{support_object} matches normal {normal} within "
+            f"{float(normal_tolerance_degrees):g} degrees."
+        )
+    requested = str(requested_subelement or "").strip()
+    if requested:
+        selected = next((item for item in matches if item.get("name") == requested), None)
+        if selected is None:
+            candidates = ", ".join(str(item.get("name")) for item in matches[:8])
+            raise RuntimeError(
+                f"{requested} on {support_object} does not match normal {normal}. "
+                f"Matching planar faces: {candidates or 'none'}."
+            )
+    else:
+        selected = max(matches, key=lambda item: float(item.get("area", 0.0) or 0.0))
+    return {
+        "subelement": selected["name"],
+        "normal": result.get("filters", {}).get("normal"),
+        "normal_tolerance_degrees": float(normal_tolerance_degrees),
+        "candidate_count": len(matches),
+        "selected": selected,
+        "candidates": matches[:8],
     }
 
 

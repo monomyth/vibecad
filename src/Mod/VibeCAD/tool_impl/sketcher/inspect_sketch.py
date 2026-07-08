@@ -43,16 +43,9 @@ ALL_SECTIONS = (
 TOOL_SPEC = {
     "name": "sketcher.inspect_sketch",
     "description": (
-        "Inspect a Sketcher sketch in one call; the single sketch-inspection tool. "
-        "Default sections return geometry inventory "
-        "(indices, handles, semantic names, point roles, construction state), constraints "
-        "(handles, driving state, datum values, expressions), solver status (degrees of freedom, "
-        "conflicting/redundant constraints), and profile validation (closed-profile pad/pocket "
-        "readiness). Optional sections: profile_deep (endpoint graph, open nodes, duplicate edges, "
-        "self-intersections, feature readiness), constraint_diagnostics (per-geometry constraint "
-        "coverage and actionable repair suggestions), external_geometry (imported external "
-        "references), reference_geometry (document objects and shape subelements usable as "
-        "external geometry references)."
+        "Inspect Sketcher geometry types, constraints, solver/DoF, profile "
+        "closure, external references, and feature readiness. Use before "
+        "solid features when shape or constraints matter."
     ),
     "contextual": True,
     "safety": "READ",
@@ -177,8 +170,10 @@ def run(
 
     if sketch is not None and "geometry" in sketch_sections:
         geometry = geometry_inventory(service, sketch)
+        summary = service.sketcher_summary(getattr(sketch, "Name", None))
         result["geometry_count"] = len(geometry)
         result["geometry"] = geometry
+        result["internal_geometry"] = summary.get("internal_geometry", {})
         result["named_geometry"] = resolve_geometry_names(service, sketch, include_missing=True)
     if sketch is not None and "constraints" in sketch_sections:
         summary = service.sketcher_summary(getattr(sketch, "Name", None))

@@ -16,17 +16,10 @@ from typing import Any
 TOOL_SPEC = {
     "contextual": True,
     "description": (
-        "Find faces or edges of an object by geometric query instead of "
-        "trusting positional names like Face3 that shift when the feature "
-        "history changes. Filter by geometry_type (plane, cylinder, cone, "
-        "sphere, torus, bspline for faces; line, circle, ellipse, bspline "
-        "for edges), outward normal direction (planar faces), radius, "
-        "area/length range, and proximity to a point. Each match returns "
-        "the current subelement name plus a geometric fingerprint (type, "
-        "area/length, center of mass, outward normal, radius, bounding box) "
-        "so the same face or edge can be re-resolved after model edits. Use "
-        "this to pick stable face_names/edge_names for dressups, drafts, "
-        "thickness/shell operations, and hole placement."
+        "Find faces or edges by geometry instead of brittle names like Face3. "
+        "Filter by type, normal, radius, area/length, or proximity. Use "
+        "returned subelement names for dressups, drafts, shell openings, "
+        "joints, and sketch attachment."
     ),
     "name": "partdesign.find_subelements",
     "parameters": {

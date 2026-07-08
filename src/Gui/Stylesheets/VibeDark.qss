@@ -1186,6 +1186,7 @@ QWidget#VibePanelRoot {
 
 QWidget#VibeHeader,
 QWidget#VibeComposer,
+QScrollArea#VibeQuestionPanel,
 QWidget#VibeActivityBody {
   color: #e8edf2;
   background-color: #171c23;
@@ -1254,6 +1255,40 @@ QPlainTextEdit#VibePrompt:focus {
 QWidget#VibeComposer {
   padding: 8px; }
 
+QScrollArea#VibeQuestionPanel {
+  padding: 8px; }
+
+QWidget#VibeQuestionList {
+  background-color: transparent; }
+
+QWidget#VibeQuestionCard {
+  color: #e8edf2;
+  background-color: #10141a;
+  border: 1px solid #29313c;
+  border-radius: 8px; }
+
+QLabel#VibeQuestionHeader,
+QLabel#VibeQuestionText {
+  color: #ffffff;
+  font-weight: bold; }
+
+QLabel#VibeQuestionWhy {
+  color: #9fb0c2; }
+
+QWidget#VibeQuestionCard QRadioButton {
+  color: #e8edf2; }
+
+QWidget#VibeQuestionCard QLineEdit {
+  min-height: 26px;
+  padding: 4px 8px;
+  color: #ffffff;
+  background-color: #0e1116;
+  border: 1px solid #39434f;
+  border-radius: 6px; }
+
+QWidget#VibeQuestionCard QLineEdit:focus {
+  border-color: #4dabf7; }
+
 QWidget#VibeComposerButtons {
   background-color: transparent;
   border: 0px solid transparent; }
@@ -1273,6 +1308,7 @@ QToolButton#VibeActivityToggle:checked {
   border-color: #4dabf7; }
 
 QPushButton#VibeSend,
+QPushButton#VibeQuestionSubmit,
 QPushButton#VibeStop,
 QPushButton#VibeAttachView {
   min-height: 26px;
@@ -1282,13 +1318,15 @@ QPushButton#VibeAttachView {
   border: 1px solid #39434f;
   border-radius: 7px; }
 
-QPushButton#VibeSend {
+QPushButton#VibeSend,
+QPushButton#VibeQuestionSubmit {
   color: #ffffff;
   background-color: #1c7ed6;
   border-color: #4dabf7;
   font-weight: bold; }
 
-QPushButton#VibeSend:hover {
+QPushButton#VibeSend:hover,
+QPushButton#VibeQuestionSubmit:hover {
   background-color: #1971c2; }
 
 QPushButton#VibeStop:hover,
@@ -1303,6 +1341,7 @@ QPushButton#VibeAttachView:pressed {
   border-color: #4dabf7; }
 
 QPushButton#VibeSend:disabled,
+QPushButton#VibeQuestionSubmit:disabled,
 QPushButton#VibeStop:disabled,
 QPushButton#VibeAttachView:disabled {
   color: #5c6874;

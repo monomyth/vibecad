@@ -15,17 +15,10 @@ from typing import Any
 TOOL_SPEC = {
     "contextual": True,
     "description": (
-        "Check clearance and interference between shaped document objects, "
-        "pairwise. For every pair this reports overlap_volume (boolean "
-        "common) and min_distance, and classifies the pair as "
-        "'interference' (solids overlap), 'contact' (touching), or 'clear' "
-        "(separated). Pass object_names for specific objects (for example "
-        "rotor body vs housing body), or assembly_name to check every "
-        "shaped component of a native Assembly against the others. Set "
-        "clearance_threshold to flag pairs that are clear but closer than "
-        "a required gap. Use this to verify rotor-to-housing clearances, "
-        "fit-up of mating parts, and freedom from unintended collisions "
-        "before finalizing a design."
+        "Check pairwise interference and clearance between shaped objects or "
+        "assembly components. Reports overlap volume, minimum distance, and "
+        "clear/contact/interference status; use clearance_threshold to flag "
+        "tight gaps."
     ),
     "name": "assembly.check_interference",
     "parameters": {

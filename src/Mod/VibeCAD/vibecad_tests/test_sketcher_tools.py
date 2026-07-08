@@ -419,8 +419,9 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
             self.assertGreaterEqual(len(deep["open_nodes"]), 2)
             blocker_kinds = {item["kind"] for item in deep["feature_readiness"]["blockers"]}
             self.assertIn("open_endpoints", blocker_kinds)
-            self.assertIn("no_faces", blocker_kinds)
+            self.assertNotIn("no_faces", blocker_kinds)
             self.assertFalse(deep["feature_readiness"]["pad"])
+            self.assertIn("shape_face_diagnostic", deep)
 
             report = service.registry.call('sketcher.inspect_sketch', include=['constraint_diagnostics'], sketch_name=sketch_name)
             self.assertTrue(report["ok"], report)
@@ -630,6 +631,19 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
             self.assertTrue(profile["fully_constrained"], profile)
             self.assertTrue(profile["ready_for_pad"], profile)
             self.assertTrue(profile["ready_for_pocket"], profile)
+            deep_profile = service.registry.call(
+                "sketcher.inspect_sketch",
+                sketch_name="Sketch",
+                include=["profile_deep"],
+            )
+            self.assertTrue(deep_profile["ok"], deep_profile)
+            deep = deep_profile["profile_validation_deep"]
+            self.assertTrue(deep["ready_for_pad"], deep)
+            self.assertTrue(deep["feature_readiness"]["pad"], deep)
+            self.assertNotIn(
+                "no_faces",
+                {item["kind"] for item in deep["feature_readiness"]["blockers"]},
+            )
             self.assertFalse(slot["solver_status"]["conflicting_constraint_indices"], slot)
             self.assertFalse(slot["solver_status"]["redundant_constraint_indices"], slot)
             next_tools = {
@@ -754,6 +768,14 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
             self.assertIn("LineSegment", geometry_types)
             self.assertIn("Ellipse", geometry_types)
             self.assertIn("BSplineCurve", geometry_types)
+            spline_summary = [
+                item for item in summary["geometry"] if item["type"] == "BSplineCurve"
+            ][0]
+            self.assertGreaterEqual(spline_summary["pole_count"], 3)
+            self.assertIn("degree", spline_summary)
+            self.assertIn("internal_degenerate_geometry_count", spline_summary)
+            self.assertIn("internal_geometry", summary)
+            self.assertIn("dependent_parameter_count", summary["internal_geometry"])
 
             bulk_constraints = service.registry.call('sketcher.delete_items', all_constraints=True, sketch_name=sketch.Name)
             self.assertTrue(bulk_constraints["ok"], bulk_constraints)
@@ -1029,6 +1051,171 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
             self.assertIn("ArcOfCircle", [item["type"] for item in fillet_summary["geometry"]])
         finally:
             App.closeDocument(doc.Name)
+
+    def test_sketcher_add_geometry_requires_canonical_sketch_points(self):
+        import FreeCAD as App
+
+        doc = App.newDocument("VibeCADSketchCanonicalPointTest")
+        try:
+            service = VibeCADService()
+            sketch_result = service.registry.call(
+                "sketcher.create_sketch",
+                label="Canonical Point Sketch",
+                support_type="origin_plane",
+                plane="XY_Plane",
+                open_for_edit=False,
+            )
+            self.assertTrue(sketch_result["ok"], sketch_result)
+            sketch_name = sketch_result["active_sketch"]
+
+            line = service.registry.call(
+                "sketcher.add_geometry",
+                kind="line",
+                sketch_name=sketch_name,
+                points=[[0, 0], [10, 0]],
+            )
+            self.assertTrue(line["ok"], line)
+            self.assertEqual(line["transaction"]["result"]["start"], [0.0, 0.0])
+            self.assertEqual(line["transaction"]["result"]["end"], [10.0, 0.0])
+
+            circle = service.registry.call(
+                "sketcher.add_geometry",
+                kind="circle",
+                sketch_name=sketch_name,
+                center=[5, 2],
+                radius=2,
+            )
+            self.assertTrue(circle["ok"], circle)
+            self.assertEqual(circle["transaction"]["result"]["center"], [5.0, 2.0])
+
+            three_d_line = service.registry.call(
+                "sketcher.add_geometry",
+                kind="line",
+                sketch_name=sketch_name,
+                points=[[0, 0, 0], [10, 0, 0]],
+            )
+            self.assertFalse(three_d_line["ok"], three_d_line)
+            self.assertIn("exactly [x, y]", three_d_line["error"])
+
+            object_center = service.registry.call(
+                "sketcher.add_geometry",
+                kind="circle",
+                sketch_name=sketch_name,
+                center={"x": 5, "y": 2},
+                radius=2,
+            )
+            self.assertFalse(object_center["ok"], object_center)
+            self.assertIn("center=[x, y]", object_center["error"])
+        finally:
+            App.closeDocument(doc.Name)
+
+    def test_sketcher_add_constraint_accepts_point_role_aliases(self):
+        import FreeCAD as App
+
+        doc = App.newDocument("VibeCADSketchPointRoleAliasTest")
+        try:
+            service = VibeCADService()
+            sketch_result = service.registry.call(
+                "sketcher.create_sketch",
+                label="Point Role Alias Sketch",
+                support_type="origin_plane",
+                plane="XY_Plane",
+                open_for_edit=False,
+            )
+            self.assertTrue(sketch_result["ok"], sketch_result)
+            sketch_name = sketch_result["active_sketch"]
+
+            circle = service.registry.call(
+                "sketcher.add_geometry",
+                kind="circle",
+                sketch_name=sketch_name,
+                center=[5, 2],
+                radius=2,
+            )
+            self.assertTrue(circle["ok"], circle)
+            lock = service.registry.call(
+                "sketcher.add_constraint",
+                constraint_type="Lock",
+                sketch_name=sketch_name,
+                first_geometry=0,
+                first_point="point",
+                x=5,
+                y=2,
+            )
+            self.assertTrue(lock["ok"], lock)
+            self.assertEqual(lock["transaction"]["result"]["constraints_added"], 2)
+        finally:
+            App.closeDocument(doc.Name)
+
+    def test_sketcher_modify_geometry_infers_fillet_reference_points(self):
+        import FreeCAD as App
+
+        doc = App.newDocument("VibeCADSketchFilletInferenceTest")
+        try:
+            service = VibeCADService()
+            sketch_result = service.registry.call(
+                "sketcher.create_sketch",
+                label="Fillet Inference Sketch",
+                support_type="origin_plane",
+                plane="XY_Plane",
+                open_for_edit=False,
+            )
+            self.assertTrue(sketch_result["ok"], sketch_result)
+            sketch_name = sketch_result["active_sketch"]
+
+            first = service.registry.call(
+                "sketcher.add_geometry",
+                kind="line",
+                sketch_name=sketch_name,
+                points=[[0, 0], [10, 0]],
+            )
+            second = service.registry.call(
+                "sketcher.add_geometry",
+                kind="line",
+                sketch_name=sketch_name,
+                points=[[10, 0], [10, 10]],
+            )
+            self.assertTrue(first["ok"], first)
+            self.assertTrue(second["ok"], second)
+            fillet = service.registry.call(
+                "sketcher.modify_geometry",
+                operation="fillet",
+                sketch_name=sketch_name,
+                first_geometry=0,
+                second_geometry=1,
+                radius=2,
+            )
+            self.assertTrue(fillet["ok"], fillet)
+            self.assertEqual(
+                fillet["transaction"]["result"]["reference_mode"],
+                "inferred_shared_endpoint",
+            )
+            self.assertGreaterEqual(len(fillet["mutation"]["created_geometry_indices"]), 1)
+        finally:
+            App.closeDocument(doc.Name)
+
+    def test_provider_schema_keeps_sketcher_point_role_guidance(self):
+        from provider_tools.base import tool_json_schema
+
+        service = VibeCADService()
+        schema = tool_json_schema(service.registry.get("sketcher.add_constraint").to_schema())
+        p1 = schema["properties"]["p1"]
+        self.assertIn("enum", p1)
+        self.assertIn("center", p1["enum"])
+        self.assertIn("point", p1["enum"])
+
+        draw_schema = tool_json_schema(service.registry.get("sketcher.add_geometry").to_schema())
+        points = draw_schema["properties"]["p"]
+        self.assertEqual(points["type"], "array")
+        self.assertEqual(points["items"]["type"], "array")
+        self.assertEqual(points["items"]["minItems"], 2)
+        self.assertEqual(points["items"]["maxItems"], 2)
+        self.assertEqual(points["items"]["items"]["type"], "number")
+        center = draw_schema["properties"]["c"]
+        self.assertEqual(center["type"], "array")
+        self.assertEqual(center["minItems"], 2)
+        self.assertEqual(center["maxItems"], 2)
+        self.assertEqual(center["items"]["type"], "number")
 
     def test_native_sketcher_external_geometry_tools_add_list_and_remove(self):
         import FreeCAD as App

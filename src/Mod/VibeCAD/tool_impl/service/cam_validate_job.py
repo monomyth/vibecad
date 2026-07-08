@@ -11,12 +11,9 @@ from . import cam_runtime
 
 TOOL_SPEC = {
     "description": (
-        "Validate a CAM job's toolpaths and tool controllers against the "
-        "limits of its bound machine: spindle RPM range, axis travel "
-        "envelopes, and feed rates versus axis velocities. Returns structured "
-        "violations with severity so unsafe programs are caught before "
-        "G-code is generated. cam.postprocess refuses to run while error "
-        "severity violations remain (unless forced)."
+        "Validate a CAM job against its machine: spindle range, travel, and "
+        "feed limits. Returns severity-tagged violations; postprocess blocks "
+        "while errors remain unless forced."
     ),
     "name": "cam.validate_job",
     "parameters": {

@@ -11,12 +11,9 @@ from VibeCADTransactions import run_freecad_transaction
 from . import domain_runtime
 
 
-TOOL_SPEC = {'description': 'Create a native Draft array of copies of an existing object: '
-                "array_type='ortho' for a rectangular grid, 'polar' for copies "
-                'around a center. Use for repeated whole objects (bolts, standoffs); '
-                'to repeat a feature inside a Body use partdesign.pattern. '
-                'Set fuse=true when the copies touch or overlap and must merge '
-                'into one connected solid instead of separate disjoint copies.',
+TOOL_SPEC = {'description': 'Create a native Draft ortho or polar array of a whole '
+                'object. Use partdesign.pattern to repeat features inside a Body. '
+                'Set fuse=true only when touching copies must merge.',
  'name': 'draft.create_array',
  'parameters': {'properties': {'array_type': {'description': 'ortho: rectangular grid; polar: circular arrangement.',
                                               'enum': ['ortho', 'polar'],

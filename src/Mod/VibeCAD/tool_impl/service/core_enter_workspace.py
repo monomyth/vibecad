@@ -6,27 +6,14 @@ from __future__ import annotations
 
 
 TOOL_SPEC = {
-    "description": (
-        "Switch to a FreeCAD workspace/workbench. This is the only "
-        "workspace-switching tool: entering a workspace exposes its full "
-        "CAD tool pack on the next turn. Call it before using any "
-        "workspace-specific tool."
-    ),
+    "description": "Enter a FreeCAD workspace.",
     "name": "core.enter_workspace",
     "parameters": {
         "type": "object",
         "properties": {
             "name": {
                 "type": "string",
-                "description": "Workbench name such as PartDesignWorkbench or SketcherWorkbench.",
-            },
-            "goal": {
-                "type": "string",
-                "description": "Short model-written goal for this workspace session.",
-            },
-            "reason": {
-                "type": "string",
-                "description": "Why this workspace is the right place for the next operation.",
+                "description": "Workbench name.",
             },
         },
         "required": ["name"],
@@ -35,29 +22,31 @@ TOOL_SPEC = {
 }
 
 
-def run(service, name: str, goal: str = "", reason: str = "") -> dict[str, object]:
+def run(
+    service,
+    name: str,
+    goal: str = "",
+    reason: str = "",
+) -> dict[str, object]:
     from tool_impl.service.core_activate_workbench import run as activate_workbench
-    from VibeCADWorkbenchTools import get_tool_pack
+    from VibeCADWorkbenchTools import WORKBENCH_TOOL_PACKS, get_tool_pack
 
-    result = activate_workbench(service, name=name)
+    requested = str(name or "").strip()
+    normalized = _normalize_workspace_name(requested, WORKBENCH_TOOL_PACKS)
+    result = activate_workbench(service, name=normalized)
     active = result.get("active")
     if active is None:
         active = result.get("active_workbench")
-    known_workspace = get_tool_pack(name) is not None
-    ok = bool(result.get("activated")) or active == name or known_workspace
+    known_workspace = get_tool_pack(normalized) is not None
+    ok = bool(result.get("activated")) or active == normalized or known_workspace
     response: dict[str, object] = {
         "ok": ok,
-        "requested": name,
-        "active_workbench": active or name,
-        "workspace": active or name,
-        "goal": str(goal or "").strip(),
-        "reason": str(reason or "").strip(),
-        "workspace_session": {
-            "workbench": active or name,
-            "goal": str(goal or "").strip(),
-            "reason": str(reason or "").strip(),
-        },
+        "requested": requested,
+        "active_workbench": active or normalized,
+        "workspace": active or normalized,
     }
+    if normalized != requested:
+        response["normalized"] = normalized
     if result.get("error"):
         if ok:
             response["activation_warning"] = result["error"]
@@ -65,3 +54,35 @@ def run(service, name: str, goal: str = "", reason: str = "") -> dict[str, objec
             response["error"] = result["error"]
             response["recoverable"] = True
     return response
+
+
+def _normalize_workspace_name(name: str, packs: dict[str, object]) -> str:
+    clean = str(name or "").strip()
+    if not clean:
+        return clean
+    if clean in packs:
+        return clean
+    folded = clean.casefold()
+    for workbench in packs:
+        if folded == workbench.casefold():
+            return workbench
+        if workbench.endswith("Workbench") and folded == workbench[:-9].casefold():
+            return workbench
+
+    root_matches: list[tuple[int, str]] = []
+    prefix_matches: list[tuple[int, str]] = []
+    for workbench, pack in packs.items():
+        prefixes = getattr(pack, "command_prefixes", ()) or ()
+        wb_root = workbench[:-9] if workbench.endswith("Workbench") else workbench
+        for prefix in prefixes:
+            if not prefix or not clean.startswith(prefix):
+                continue
+            score = len(str(prefix))
+            if str(prefix).rstrip("_").casefold() == wb_root.casefold():
+                root_matches.append((score, workbench))
+            else:
+                prefix_matches.append((score, workbench))
+    matches = root_matches or prefix_matches
+    if matches:
+        return sorted(matches, key=lambda item: item[0], reverse=True)[0][1]
+    return clean

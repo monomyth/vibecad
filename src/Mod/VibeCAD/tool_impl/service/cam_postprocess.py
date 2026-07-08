@@ -12,10 +12,8 @@ from . import cam_runtime, cam_validate_job
 
 TOOL_SPEC = {
     "description": (
-        "Post-process a CAM job to a G-code file using the machine's (or "
-        "job's) postprocessor. The job is validated against its machine "
-        "first: error severity violations block output unless force=true. "
-        "Returns the output path and a preview of the emitted G-code."
+        "Post-process a CAM job to G-code. Validates against the machine first; "
+        "error violations block output unless force=true."
     ),
     "name": "cam.postprocess",
     "parameters": {

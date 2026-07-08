@@ -14,10 +14,8 @@ from VibeCADTransactions import run_freecad_transaction
 from . import domain_runtime
 
 
-TOOL_SPEC = {'description': 'Apply a Part dress-up feature to an existing object: '
-                "operation='fillet' rounds edges, operation='chamfer' bevels edges, "
-                "operation='thickness' hollows the solid into a shell by removing "
-                'selected faces and applying wall thickness.',
+TOOL_SPEC = {'description': 'Apply a Part fillet, chamfer, or thickness feature. '
+                'Use after the base shape is correct, not as a substitute for it.',
  'name': 'part.dressup',
  'parameters': {'properties': {'operation': {'description': "One of 'fillet', 'chamfer', "
                                                             "or 'thickness'.",
