@@ -1116,10 +1116,10 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
         finally:
             App.closeDocument(doc.Name)
 
-    def test_sketcher_add_constraint_accepts_point_role_aliases(self):
+    def test_sketcher_add_constraint_rejects_point_role_aliases(self):
         import FreeCAD as App
 
-        doc = App.newDocument("VibeCADSketchPointRoleAliasTest")
+        doc = App.newDocument("VibeCADSketchPointRoleStrictTest")
         try:
             service = VibeCADService()
             sketch_result = service.registry.call(
@@ -1149,8 +1149,24 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
                 x=5,
                 y=2,
             )
-            self.assertTrue(lock["ok"], lock)
-            self.assertEqual(lock["transaction"]["result"]["constraints_added"], 2)
+            self.assertFalse(lock["ok"], lock)
+            self.assertIn("point role must be one of", lock["error"])
+            self.assertNotIn("aliases", lock["error"].lower())
+
+            canonical_lock = service.registry.call(
+                "sketcher.add_constraint",
+                constraint_type="Lock",
+                sketch_name=sketch_name,
+                first_geometry=0,
+                first_point="center",
+                x=5,
+                y=2,
+            )
+            self.assertTrue(canonical_lock["ok"], canonical_lock)
+            self.assertEqual(
+                canonical_lock["transaction"]["result"]["constraints_added"],
+                2,
+            )
         finally:
             App.closeDocument(doc.Name)
 

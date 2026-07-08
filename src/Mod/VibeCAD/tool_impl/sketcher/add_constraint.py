@@ -162,9 +162,9 @@ def _resolve_point_roles(
     """Resolve semantic point roles (start/end/center/...) into raw Sketcher pos ints.
 
     Explicit *_pos integers always win. When only *_point roles are provided they are
-    translated via the same role table the retired constrain_* wrappers used, including
-    the origin-handle shortcut. Point-anchored constraint types get the same defaults
-    those wrappers applied when neither pos nor point is given.
+    translated through the canonical role table, including the origin-handle shortcut.
+    Point-anchored constraint types get explicit defaults when neither pos nor point
+    is given.
     """
     defaults: dict[str, tuple[str | None, str | None, str | None]] = {
         "Coincident": ("end", "start", None),
