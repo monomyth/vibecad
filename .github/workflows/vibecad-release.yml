@@ -103,15 +103,35 @@ jobs:
           echo "matched-key=${{ steps.cache-pixi-linux.outputs.cache-matched-key }}"
           echo "primary-key=${{ steps.cache-pixi-linux.outputs.cache-primary-key }}"
 
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/ccache
+          # Rolling key: every run saves a fresh entry and restores the most
+          # recent prior one via restore-keys, so ccache updates each build.
+          key: ccache-linux-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ccache-linux-
+
       - name: Build package environment
         shell: bash
         working-directory: package/rattler-build
+        env:
+          CCACHE_DIR: ${{ runner.temp }}/ccache
+          CCACHE_MAXSIZE: "2G"
         run: |
           set -euo pipefail
           pixi install -e default
           pixi install -e package
 
-      - name: Build Linux AppImage
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ccache-linux-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Build Linux AppImage and Debian package
         shell: bash
         working-directory: package/rattler-build
         env:
@@ -121,19 +141,30 @@ jobs:
           UPLOAD_RELEASE: "false"
         run: |
           set -euo pipefail
-          pixi run -e package create_bundle
 
-      - name: Build Linux Debian package
-        shell: bash
-        env:
-          BUILD_TAG: ${{ needs.prepare.outputs.build_tag }}
-        run: |
-          set -euo pipefail
-          package/linux/build_deb_from_appdir.sh \
-            --appdir package/rattler-build/linux/AppDir \
-            --output-dir package/rattler-build/linux \
+          # Build the shared AppDir once (cheap: ~20s), then compress the AppImage
+          # and the .deb concurrently. Both only read the finalized AppDir and are
+          # independent of each other, so they overlap on the runner's cores.
+          CREATE_BUNDLE_PHASE=appdir pixi run -e package create_bundle
+
+          CREATE_BUNDLE_PHASE=appimage pixi run -e package create_bundle &
+          appimage_pid=$!
+
+          ../linux/build_deb_from_appdir.sh \
+            --appdir linux/AppDir \
+            --output-dir linux \
             --version "${BUILD_TAG}" \
-            --arch "$(uname -m)"
+            --arch "$(uname -m)" &
+          deb_pid=$!
+
+          appimage_rc=0
+          deb_rc=0
+          wait "$appimage_pid" || appimage_rc=$?
+          wait "$deb_pid" || deb_rc=$?
+          if [[ "$appimage_rc" -ne 0 || "$deb_rc" -ne 0 ]]; then
+            echo "AppImage exit=$appimage_rc, Debian exit=$deb_rc" >&2
+            exit 1
+          fi
 
       - name: Save Pixi and Python caches
         if: always() && steps.cache-pixi-linux.outputs.cache-hit != 'true'
@@ -195,13 +226,33 @@ jobs:
           echo "matched-key=${{ steps.cache-pixi-windows.outputs.cache-matched-key }}"
           echo "primary-key=${{ steps.cache-pixi-windows.outputs.cache-primary-key }}"
 
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}\ccache
+          # Rolling key: every run saves a fresh entry and restores the most
+          # recent prior one via restore-keys, so ccache updates each build.
+          key: ccache-windows-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ccache-windows-
+
       - name: Build package environment
         shell: bash
         working-directory: package/rattler-build
+        env:
+          CCACHE_DIR: ${{ runner.temp }}\ccache
+          CCACHE_MAXSIZE: "2G"
         run: |
           set -euo pipefail
           pixi install -e default
           pixi install -e package
+
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}\ccache
+          key: ccache-windows-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Build Windows release assets
         shell: bash

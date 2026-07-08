@@ -83,13 +83,34 @@ jobs:
           echo "matched-key=${{ steps.cache-pixi-windows.outputs.cache-matched-key }}"
           echo "primary-key=${{ steps.cache-pixi-windows.outputs.cache-primary-key }}"
 
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}\ccache
+          # Rolling key: every run saves a fresh entry and restores the most recent
+          # prior one via restore-keys, so ccache updates each build. Shares the
+          # ccache-windows-* pool with the release workflow (identical win-64 recipe).
+          key: ccache-windows-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ccache-windows-
+
       - name: Build FreeCAD package environment
         shell: bash
         working-directory: package/rattler-build
+        env:
+          CCACHE_DIR: ${{ runner.temp }}\ccache
+          CCACHE_MAXSIZE: "2G"
         run: |
           set -euo pipefail
           pixi install -e default
           pixi install -e package
+
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}\ccache
+          key: ccache-windows-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Create Windows bundle and installer
         shell: bash

@@ -11,6 +11,18 @@ source:
 
 build:
   number: 0
+  script:
+    env:
+      # rattler-build runs the build in a sandbox that does not inherit shell
+      # variables, so any ccache settings must be forwarded explicitly here.
+      # CCACHE_DIR is empty for local builds; build.sh/build.bat unset it in that
+      # case so ccache falls back to its own default cache location.
+      CCACHE_DIR: ${{ env.get("CCACHE_DIR", default="") }}
+      # Cap the cache so CI stays within the 10 GB GitHub Actions cache budget.
+      CCACHE_MAXSIZE: ${{ env.get("CCACHE_MAXSIZE", default="5G") }}
+      # Hash compiler *content* rather than mtime so cached objects survive the
+      # fresh conda extraction on each CI run (where compiler mtimes change).
+      CCACHE_COMPILERCHECK: ${{ env.get("CCACHE_COMPILERCHECK", default="content") }}
 
 requirements:
   build:

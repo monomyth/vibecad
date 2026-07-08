@@ -4,111 +4,143 @@ set -e
 set -x
 
 conda_env="AppDir/usr"
-
-mkdir -p ${conda_env}
-
-../scripts/install_vibecad_provider_deps.sh ../.pixi/envs/default
-cp -a ../.pixi/envs/default/* ${conda_env}
-
-echo -e "\nDelete unnecessary stuff"
-rm -rf ${conda_env}/include
-find ${conda_env} -name \*.a -delete
-
-mv ${conda_env}/bin ${conda_env}/bin_tmp
-mkdir ${conda_env}/bin
-cp ${conda_env}/bin_tmp/freecad ${conda_env}/bin/
-cp ${conda_env}/bin_tmp/freecadcmd ${conda_env}/bin
-cp ${conda_env}/bin_tmp/ccx ${conda_env}/bin/
-cp ${conda_env}/bin_tmp/python ${conda_env}/bin/
-cp ${conda_env}/bin_tmp/pip ${conda_env}/bin/
-cp ${conda_env}/bin_tmp/pyside6-rcc ${conda_env}/bin/
-cp ${conda_env}/bin_tmp/gmsh ${conda_env}/bin/
-cp ${conda_env}/bin_tmp/dot ${conda_env}/bin/
-cp ${conda_env}/bin_tmp/unflatten ${conda_env}/bin/
-rm -rf ${conda_env}/bin_tmp
-
-sed -i '1s|.*|#!/usr/bin/env python|' ${conda_env}/bin/pip
-
-echo -e "\nCopying Icon and Desktop file"
-cp ${conda_env}/share/applications/org.freecad.FreeCAD.desktop AppDir/
-sed -i 's/Exec=FreeCAD/Exec=AppRun/g' AppDir/org.freecad.FreeCAD.desktop
-cp ${conda_env}/share/icons/hicolor/scalable/apps/org.freecad.FreeCAD.svg AppDir/
-
-# Remove __pycache__ folders and .pyc files
-find . -path "*/__pycache__/*" -delete
-find . -name "*.pyc" -type f -delete
-
-# reduce size
-rm -rf ${conda_env}/conda-meta/
-rm -rf ${conda_env}/doc/global/
-rm -rf ${conda_env}/share/gtk-doc/
-rm -rf ${conda_env}/lib/cmake/
-
-find . -name "*.h" -type f -delete
-find . -name "*.cmake" -type f -delete
-
 version_name="VibeCAD_${BUILD_TAG}-Linux-$(uname -m)"
 
-echo -e "\################"
-echo -e "version_name:  ${version_name}"
-echo -e "################"
+# Build (and finalize) the AppDir. This is the shared input for both the AppImage
+# and the Debian package, so it is a separate phase that must complete before
+# either packaging step reads it. Once this returns the AppDir is not modified
+# again, so the two packagers can run in parallel.
+build_appdir() {
+    mkdir -p ${conda_env}
 
-pixi list -e default > AppDir/packages.txt
-sed -i "1s/.*/\nLIST OF PACKAGES:/" AppDir/packages.txt
+    ../scripts/install_vibecad_provider_deps.sh ../.pixi/envs/default
+    cp -a ../.pixi/envs/default/* ${conda_env}
 
-echo "Running VibeCAD command-line smoke test..."
-if ! "${conda_env}/bin/freecadcmd" --safe-mode --version; then
-    echo "VibeCAD command-line smoke test failed; the Linux bundle cannot start."
-    exit 1
-fi
-if ! "${conda_env}/bin/freecadcmd" --safe-mode -c "import agents, anthropic, keyring; print('VibeCAD provider SDK and keyring imports ok')"; then
-    echo "VibeCAD provider SDK/keyring smoke test failed; the Linux bundle is missing AI provider dependencies."
-    exit 1
-fi
-if ! "${conda_env}/bin/freecadcmd" --safe-mode -c "from VibeCADProvider import _provider_subprocess_smoke; _provider_subprocess_smoke(); print('VibeCAD provider subprocess smoke ok')"; then
-    echo "VibeCAD provider subprocess smoke test failed; the Linux bundle cannot run AI providers."
-    exit 1
-fi
+    echo -e "\nDelete unnecessary stuff"
+    rm -rf ${conda_env}/include
+    find ${conda_env} -name \*.a -delete
 
-curl -LO https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-$(uname -m).AppImage
-chmod a+x appimagetool-$(uname -m).AppImage
+    mv ${conda_env}/bin ${conda_env}/bin_tmp
+    mkdir ${conda_env}/bin
+    cp ${conda_env}/bin_tmp/freecad ${conda_env}/bin/
+    cp ${conda_env}/bin_tmp/freecadcmd ${conda_env}/bin
+    cp ${conda_env}/bin_tmp/ccx ${conda_env}/bin/
+    cp ${conda_env}/bin_tmp/python ${conda_env}/bin/
+    cp ${conda_env}/bin_tmp/pip ${conda_env}/bin/
+    cp ${conda_env}/bin_tmp/pyside6-rcc ${conda_env}/bin/
+    cp ${conda_env}/bin_tmp/gmsh ${conda_env}/bin/
+    cp ${conda_env}/bin_tmp/dot ${conda_env}/bin/
+    cp ${conda_env}/bin_tmp/unflatten ${conda_env}/bin/
+    rm -rf ${conda_env}/bin_tmp
 
-if [ "${UPLOAD_RELEASE}" == "true" ]; then
-    case "${BUILD_TAG}" in
-        *weekly*)
-            GH_UPDATE_TAG="weeklies"
-            ;;
-        *rc*)
-            GH_UPDATE_TAG="${BUILD_TAG}"
-            ;;
-        *)
-            GH_UPDATE_TAG="latest"
-            ;;
-    esac
-fi
+    sed -i '1s|.*|#!/usr/bin/env python|' ${conda_env}/bin/pip
 
-echo -e "\nCreate the appimage"
-# export GPG_TTY=$(tty)
-chmod a+x ./AppDir/AppRun
-./appimagetool-$(uname -m).AppImage \
-  --comp zstd \
-  --mksquashfs-opt -Xcompression-level \
-  --mksquashfs-opt 22 \
-  -u "gh-releases-zsync|10-X-eng|vibecad|${GH_UPDATE_TAG}|VibeCAD*$(uname -m)*.AppImage.zsync" \
-  AppDir ${version_name}.AppImage
-  # -s --sign-key ${GPG_KEY_ID} \
+    echo -e "\nCopying Icon and Desktop file"
+    cp ${conda_env}/share/applications/org.freecad.FreeCAD.desktop AppDir/
+    sed -i 's/Exec=FreeCAD/Exec=AppRun/g' AppDir/org.freecad.FreeCAD.desktop
+    cp ${conda_env}/share/icons/hicolor/scalable/apps/org.freecad.FreeCAD.svg AppDir/
 
-echo -e "\nCreate hash"
-sha256sum ${version_name}.AppImage > ${version_name}.AppImage-SHA256.txt
+    # Remove __pycache__ folders and .pyc files
+    find . -path "*/__pycache__/*" -delete
+    find . -name "*.pyc" -type f -delete
 
-if [ "${UPLOAD_RELEASE}" == "true" ]; then
-    gh release upload --clobber ${BUILD_TAG} "${version_name}.AppImage" "${version_name}.AppImage.zsync" "${version_name}.AppImage-SHA256.txt"
-    if [ "${GH_UPDATE_TAG}" == "weeklies" ]; then
-        generic_name="VibeCAD_weekly-Linux-$(uname -m)"
-        mv "${version_name}.AppImage" "${generic_name}.AppImage"
-        mv "${version_name}.AppImage.zsync" "${generic_name}.AppImage.zsync"
-        mv "${version_name}.AppImage-SHA256.txt" "${generic_name}.AppImage-SHA256.txt"
-        gh release create weeklies --prerelease | true
-        gh release upload --clobber weeklies "${generic_name}.AppImage" "${generic_name}.AppImage.zsync" "${generic_name}.AppImage-SHA256.txt"
+    # reduce size
+    rm -rf ${conda_env}/conda-meta/
+    rm -rf ${conda_env}/doc/global/
+    rm -rf ${conda_env}/share/gtk-doc/
+    rm -rf ${conda_env}/lib/cmake/
+
+    find . -name "*.h" -type f -delete
+    find . -name "*.cmake" -type f -delete
+
+    echo -e "\################"
+    echo -e "version_name:  ${version_name}"
+    echo -e "################"
+
+    pixi list -e default > AppDir/packages.txt
+    sed -i "1s/.*/\nLIST OF PACKAGES:/" AppDir/packages.txt
+
+    echo "Running VibeCAD command-line smoke test..."
+    if ! "${conda_env}/bin/freecadcmd" --safe-mode --version; then
+        echo "VibeCAD command-line smoke test failed; the Linux bundle cannot start."
+        exit 1
     fi
-fi
+    if ! "${conda_env}/bin/freecadcmd" --safe-mode -c "import agents, anthropic, keyring; print('VibeCAD provider SDK and keyring imports ok')"; then
+        echo "VibeCAD provider SDK/keyring smoke test failed; the Linux bundle is missing AI provider dependencies."
+        exit 1
+    fi
+    if ! "${conda_env}/bin/freecadcmd" --safe-mode -c "from VibeCADProvider import _provider_subprocess_smoke; _provider_subprocess_smoke(); print('VibeCAD provider subprocess smoke ok')"; then
+        echo "VibeCAD provider subprocess smoke test failed; the Linux bundle cannot run AI providers."
+        exit 1
+    fi
+
+    # Finalize AppDir here so the packaging phases only ever read it.
+    chmod a+x ./AppDir/AppRun
+}
+
+# Compress the finalized AppDir into an AppImage. Reads AppDir only.
+make_appimage() {
+    curl -LO https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-$(uname -m).AppImage
+    chmod a+x appimagetool-$(uname -m).AppImage
+
+    if [ "${UPLOAD_RELEASE}" == "true" ]; then
+        case "${BUILD_TAG}" in
+            *weekly*)
+                GH_UPDATE_TAG="weeklies"
+                ;;
+            *rc*)
+                GH_UPDATE_TAG="${BUILD_TAG}"
+                ;;
+            *)
+                GH_UPDATE_TAG="latest"
+                ;;
+        esac
+    fi
+
+    echo -e "\nCreate the appimage"
+    # export GPG_TTY=$(tty)
+    # zstd compression level 19 (max "normal" level): the "ultra" level 22 roughly
+    # doubles the mksquashfs time for a marginal size gain on a 4-core runner.
+    ./appimagetool-$(uname -m).AppImage \
+      --comp zstd \
+      --mksquashfs-opt -Xcompression-level \
+      --mksquashfs-opt 19 \
+      -u "gh-releases-zsync|10-X-eng|vibecad|${GH_UPDATE_TAG}|VibeCAD*$(uname -m)*.AppImage.zsync" \
+      AppDir ${version_name}.AppImage
+      # -s --sign-key ${GPG_KEY_ID} \
+
+    echo -e "\nCreate hash"
+    sha256sum ${version_name}.AppImage > ${version_name}.AppImage-SHA256.txt
+
+    if [ "${UPLOAD_RELEASE}" == "true" ]; then
+        gh release upload --clobber ${BUILD_TAG} "${version_name}.AppImage" "${version_name}.AppImage.zsync" "${version_name}.AppImage-SHA256.txt"
+        if [ "${GH_UPDATE_TAG}" == "weeklies" ]; then
+            generic_name="VibeCAD_weekly-Linux-$(uname -m)"
+            mv "${version_name}.AppImage" "${generic_name}.AppImage"
+            mv "${version_name}.AppImage.zsync" "${generic_name}.AppImage.zsync"
+            mv "${version_name}.AppImage-SHA256.txt" "${generic_name}.AppImage-SHA256.txt"
+            gh release create weeklies --prerelease | true
+            gh release upload --clobber weeklies "${generic_name}.AppImage" "${generic_name}.AppImage.zsync" "${generic_name}.AppImage-SHA256.txt"
+        fi
+    fi
+}
+
+# Phase dispatch. Defaults to the full pipeline so local invocations and other
+# callers behave exactly as before; CI runs the phases separately so it can
+# compress the AppImage and the .deb in parallel.
+case "${CREATE_BUNDLE_PHASE:-all}" in
+    appdir)
+        build_appdir
+        ;;
+    appimage)
+        make_appimage
+        ;;
+    all)
+        build_appdir
+        make_appimage
+        ;;
+    *)
+        echo "Unknown CREATE_BUNDLE_PHASE: ${CREATE_BUNDLE_PHASE}" >&2
+        exit 2
+        ;;
+esac

@@ -170,7 +170,10 @@ EOF
 chmod 0755 "$pkgroot/DEBIAN/postrm"
 
 deb_path="$output_dir/${package_name}_${deb_version}_${deb_arch}.deb"
-dpkg-deb --build --root-owner-group "$pkgroot" "$deb_path"
+# Speed up packaging by lowering the xz compression level (dpkg-deb defaults to -6).
+# Staying on xz (rather than switching to zstd) keeps the package installable by the
+# same set of dpkg/apt versions, so the supported OS list is unchanged.
+dpkg-deb -Zxz -z1 --build --root-owner-group "$pkgroot" "$deb_path"
 sha256sum "$deb_path" > "${deb_path}-SHA256.txt"
 
 echo "$deb_path"
