@@ -1580,10 +1580,6 @@ def run_prompt(
                     "The provider made partial FreeCAD changes but did not "
                     f"return a final answer before stopping: {exc}"
                 )
-                entered_workspace = _workspace_session_from_trace(
-                    tool_trace,
-                    entered_workspace,
-                )
                 context = _refresh_provider_context(
                     active_service,
                     clean_prompt,
@@ -1623,10 +1619,6 @@ def run_prompt(
                         "text": turn_output,
                     },
                 )
-            entered_workspace = _workspace_session_from_trace(
-                tool_trace,
-                entered_workspace,
-            )
             post_turn_context = _refresh_provider_context(
                 active_service,
                 clean_prompt,
@@ -1824,33 +1816,6 @@ def _apply_entered_workspace_provider_surface(
         "active_workbench": active_workbench,
         "entered_workbench": workspace,
     }
-
-
-def _workspace_session_from_trace(
-    tool_trace: list[dict[str, Any]],
-    current_workspace: str | None,
-) -> str | None:
-    workspace = current_workspace
-    for item in tool_trace:
-        if not isinstance(item, dict) or not item.get("ok"):
-            continue
-        tool_name = str(item.get("tool_name") or "")
-        if tool_name not in {"core.enter_workspace", "core.activate_workbench"}:
-            continue
-        result = item.get("result")
-        if not isinstance(result, dict):
-            continue
-        required_next = result.get("required_next_action")
-        if isinstance(required_next, dict) and required_next.get("next_turn_workbench"):
-            workspace = str(required_next["next_turn_workbench"])
-            continue
-        for key in ("active_workbench", "workspace", "workbench"):
-            if result.get(key):
-                workspace = str(result[key])
-                break
-        if workspace is None and item.get("active_workbench"):
-            workspace = str(item["active_workbench"])
-    return workspace
 
 
 def _effective_provider_workbench(
@@ -2470,8 +2435,6 @@ def _continuation_prompt(
         result = item.get("result") if isinstance(item.get("result"), dict) else {}
         details = []
         if isinstance(result, dict):
-            if result.get("workspace_handoff"):
-                details.append(f"wh={result.get('workspace_handoff')}")
             if result.get("error"):
                 details.append(f"err={_trace_text(result.get('error'), 80)}")
             for key, label in (
@@ -2519,28 +2482,6 @@ def _should_continue_autonomously(
     tool_trace: list[dict[str, Any]],
     turn_index: int,
 ) -> bool:
-    if (
-        MAX_AUTONOMOUS_PROVIDER_TURNS is not None
-        and turn_index >= MAX_AUTONOMOUS_PROVIDER_TURNS - 1
-    ):
-        return False
-    if _tool_batch_workspace_handoff_reached(tool_trace):
-        return True
-    return False
-
-
-def _tool_batch_workspace_handoff_reached(tool_trace: list[dict[str, Any]]) -> bool:
-    for item in reversed(tool_trace):
-        result = item.get("result")
-        if not isinstance(result, dict):
-            continue
-        if result.get("workspace_handoff") in {"workbench_switch", "workspace_entry"}:
-            return True
-        error = str(result.get("error", "")).lower()
-        if "workspace handoff" in error:
-            return True
-        if item.get("ok"):
-            return False
     return False
 
 
@@ -2947,39 +2888,6 @@ def make_provider_tool_runner(
             hard_failure = _result_hard_geometry_failure_text(payload)
             if hard_failure:
                 result.update(_hard_geometry_failure_result(hard_failure))
-            if result["ok"] and tool_name in {
-                "core.activate_workbench",
-                "core.enter_workspace",
-            }:
-                requested_workbench = str(args.get("name", "") or "").strip()
-                resolved_workbench = requested_workbench
-                if isinstance(payload, dict):
-                    resolved_workbench = str(
-                        payload.get("workspace")
-                        or payload.get("active_workbench")
-                        or requested_workbench
-                    ).strip()
-                should_handoff = bool(resolved_workbench) and (
-                    tool_name == "core.enter_workspace"
-                    or resolved_workbench != live_workbench
-                )
-                if should_handoff:
-                    handoff_name = (
-                        "workspace_entry"
-                        if tool_name == "core.enter_workspace"
-                        else "workbench_switch"
-                    )
-                    provider_workbench = resolved_workbench
-                    trace_entry["active_workbench"] = resolved_workbench
-                    result["workspace_handoff"] = handoff_name
-                    _emit_progress(
-                        progress_callback,
-                        {
-                            "event": "tool_workspace_handoff_reached",
-                            "tool_name": tool_name,
-                            "active_workbench": resolved_workbench,
-                        },
-                    )
         except Exception as exc:
             result = {"ok": False, "error": str(exc)}
             if _is_hard_geometry_failure(str(exc)):
@@ -3171,7 +3079,6 @@ def _result_summary(result: dict[str, Any]) -> dict[str, Any]:
     for key in (
         "status",
         "error",
-        "workspace_handoff",
         "blocked_tool",
         "blocked_arguments_json",
         "required_next_action",

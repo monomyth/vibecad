@@ -1363,7 +1363,6 @@ _PROVIDER_RESULT_KEY_ALIASES = {
     "tool_workbench": "tool_wb",
     "transaction": "tx",
     "volume_delta": "dV",
-    "workspace_handoff": "handoff",
 }
 _MAX_RESULT_TEXT = 240
 _MAX_RESULT_ITEMS = 6

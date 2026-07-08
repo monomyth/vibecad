@@ -29,7 +29,6 @@ from VibeCADSession import (
     _provider_loop_state,
     _result_summary,
     _should_continue_autonomously,
-    _tool_batch_workspace_handoff_reached,
     make_provider_tool_runner,
     provider_tool_scope_for_context,
     provider_safe_tool_schemas,
@@ -1111,7 +1110,6 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
                     service,
                     "PartDesignWorkbench",
                     tool_trace=trace,
-                    turn_state={"turn": 1, "mutating_tool_calls": 0},
                 )
 
                 result = runner(
@@ -1316,7 +1314,7 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         self.assertEqual(blocked["active_workbench"], "PartDesignWorkbench")
         self.assertEqual(blocked["tool_workbench"], "PartWorkbench")
 
-    def test_provider_tool_runner_requires_explicit_workbench_switch(self):
+    def test_provider_tool_runner_blocks_tools_from_other_native_workbenches(self):
         if not _gui_workbench_api_available():
             self.skipTest("FreeCAD GUI workbench API unavailable")
         import FreeCAD as App
@@ -1330,31 +1328,27 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
             )
         doc = App.ActiveDocument
         try:
-            self.assertTrue(blocked["ok"], blocked)
-            result = blocked["result"]
-            self.assertEqual(result["transaction"]["result"]["sketch_label"], "Auto Switch Sketch")
-            self.assertIsNotNone(result["active_sketch"])
+            self.assertFalse(blocked["ok"], blocked)
+            self.assertIn("not available for the selected workspace", blocked["error"])
+            self.assertEqual(blocked["selected_workbench"], "PartWorkbench")
+            self.assertEqual(blocked["tool_workbench"], "PartDesignWorkbench")
         finally:
             if doc is not None:
                 App.closeDocument(doc.Name)
 
-    def test_provider_tool_runner_does_not_handoff_same_workbench_activation(self):
-        if not _gui_workbench_api_available():
-            self.skipTest("FreeCAD GUI workbench API unavailable")
+    def test_provider_tool_runner_blocks_internal_workbench_activation(self):
         service = VibeCADService()
-        service.activate_workbench("PartDesignWorkbench")
-        turn_state = {"turn": 1, "mutating_tool_calls": 0}
         runner = make_provider_tool_runner(
             service,
             "PartDesignWorkbench",
-            turn_state=turn_state,
         )
         result = runner("core.activate_workbench", '{"name": "PartDesignWorkbench"}')
 
-        self.assertTrue(result["ok"], result)
-        self.assertNotEqual(result.get("workspace_handoff"), "workbench_switch")
+        self.assertFalse(result["ok"], result)
+        self.assertIn("not available for the selected workspace", result["error"])
+        self.assertIsNone(result.get("workspace_handoff"))
 
-    def test_autonomous_loop_continues_after_workspace_handoff(self):
+    def test_autonomous_loop_ignores_stale_workspace_handoff_trace(self):
         trace = [
             {
                 "tool_name": "core.activate_workbench",
@@ -1362,9 +1356,8 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
                 "result": {"ok": True, "workspace_handoff": "workbench_switch"},
             }
         ]
-        self.assertTrue(_tool_batch_workspace_handoff_reached(trace))
         service = VibeCADService()
-        self.assertTrue(
+        self.assertFalse(
             _should_continue_autonomously(
                 "Design a usable quadcopter drone concept.",
                 "Workspace changed.",
@@ -1406,16 +1399,19 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         import FreeCAD as App
 
         service = VibeCADService()
+        old_settings = load_settings()
+        self.addCleanup(save_settings, old_settings)
+        save_settings(
+            VibeCADSettings(
+                enable_native_freecad_tools=True,
+                native_tool_workbenches=("PartDesignWorkbench",),
+            )
+        )
         with _temporary_design_project(service, "Stale Operation Score Ignored"):
-            turn_state = {
-                "turn": 1,
-                "operation" + "_score": 999,
-                "mutating_tool_calls": 0,
-            }
+            service.active_workbench_name = lambda: "PartDesignWorkbench"  # type: ignore[method-assign]
             runner = make_provider_tool_runner(
                 service,
                 "PartDesignWorkbench",
-                turn_state=turn_state,
             )
             result = runner(
                 "partdesign.create_sketch",
@@ -1437,7 +1433,7 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
             if doc is not None:
                 App.closeDocument(doc.Name)
 
-    def test_autonomous_loop_continues_when_tool_trace_reports_workspace_handoff(self):
+    def test_autonomous_loop_does_not_continue_for_legacy_workspace_handoff(self):
         service = VibeCADService()
         trace = [
             {
@@ -1446,14 +1442,13 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
                 "result": {"ok": True, "workspace_handoff": "workspace_entry"},
             }
         ]
-        self.assertTrue(
+        self.assertFalse(
             _should_continue_autonomously(
                 "Design a usable bearing carrier bracket and capture the viewport.",
                 "Entered PartDesign.",
                 service,
                 trace,
                 0,
-                visual_feedback_consumed=True,
             )
         )
 
@@ -1782,15 +1777,12 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
                 '{"target_name": "Motor plate", "label": "Motor plate center bore", "radius": 4, "depth": 12, "x": 30, "y": 20, "z": -3, "axis": "Z"}',
             )
             self.assertTrue(cut["ok"], cut)
-            switched_to_draft = runner("core.activate_workbench", '{"name": "DraftWorkbench"}')
-            self.assertTrue(switched_to_draft["ok"], switched_to_draft)
-            array = runner(
+            draft_blocked = runner(
                 "draft.create_array",
                 '{"object_name": "Motor plate center bore", "label": "Motor plate bore pattern", "array_type": "polar", "polar_count": 4, "polar_angle": 360, "center_x": 30, "center_y": 20, "center_z": 0}',
             )
-            self.assertTrue(array["ok"], array)
-            switched_to_part = runner("core.activate_workbench", '{"name": "PartWorkbench"}')
-            self.assertTrue(switched_to_part["ok"], switched_to_part)
+            self.assertFalse(draft_blocked["ok"], draft_blocked)
+            self.assertIn("not available for the selected workspace", draft_blocked["error"])
             fillet = runner('part.dressup', '{"operation": "fillet", "object_name": "Motor plate center bore", "label": "Rounded motor plate", "radius": 0.5, "edge_indices": [1, 2, 3, 4]}')
             self.assertTrue(fillet["ok"], fillet)
             chamfer = runner('part.dressup', '{"operation": "chamfer", "object_name": "Motor plate", "label": "Chamfered motor plate", "distance": 0.5, "edge_indices": [1, 2, 3, 4]}')
@@ -1801,18 +1793,12 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
             labels = {getattr(obj, "Label", obj.Name) for obj in doc.Objects}
             self.assertIn("Motor plate", labels)
             self.assertIn("Motor plate center bore", labels)
-            self.assertIn("Motor plate bore pattern", labels)
+            self.assertNotIn("Motor plate bore pattern", labels)
             self.assertIn("Rounded motor plate", labels)
             self.assertIn("Chamfered motor plate", labels)
             self.assertIn("Hollow motor plate", labels)
             self.assertAlmostEqual(float(plate.Length), 70.0)
             self.assertAlmostEqual(float(plate.Width), 45.0)
-            pattern = next(
-                obj
-                for obj in doc.Objects
-                if getattr(obj, "Label", "") == "Motor plate bore pattern"
-            )
-            self.assertIn("Array", getattr(pattern, "Proxy", pattern).__class__.__name__)
             rounded = next(
                 obj
                 for obj in doc.Objects
