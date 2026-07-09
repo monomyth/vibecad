@@ -312,24 +312,6 @@ def validate_api_key(
         )
 
 
-def validate_openai_api_key(
-    api_key: str | None,
-    *,
-    source: str | None = None,
-    timeout_seconds: float = 10.0,
-    opener: Any | None = None,
-) -> AuthState:
-    """Backward-compatible wrapper around validate_api_key for OpenAI."""
-
-    return validate_api_key(
-        api_key,
-        provider="openai",
-        source=source,
-        timeout_seconds=timeout_seconds,
-        opener=opener,
-    )
-
-
 def validate_configured_auth(
     *,
     provider: str = DEFAULT_PROVIDER,
@@ -355,24 +337,6 @@ def validate_configured_auth(
         timeout_seconds=timeout_seconds,
         opener=opener,
         base_url=base_url,
-    )
-
-
-def validate_configured_openai_auth(
-    *,
-    env: dict[str, str] | None = None,
-    dotenv_path: Path | None = None,
-    timeout_seconds: float = 10.0,
-    opener: Any | None = None,
-) -> AuthState:
-    """Backward-compatible wrapper around validate_configured_auth for OpenAI."""
-
-    return validate_configured_auth(
-        provider="openai",
-        env=env,
-        dotenv_path=dotenv_path,
-        timeout_seconds=timeout_seconds,
-        opener=opener,
     )
 
 

@@ -433,9 +433,9 @@ class TestVibeCADPreferences(unittest.TestCase):
             self.assertNotIn("test123456", page.status.text())
             self.assertEqual(self._pref.GetString("OpenAIApiKey", ""), "")
 
-            original_validate_configured = VibeCADPreferences.validate_configured_openai_auth
+            original_validate_configured = VibeCADPreferences.validate_configured_auth
             try:
-                VibeCADPreferences.validate_configured_openai_auth = lambda **_kwargs: types.SimpleNamespace(
+                VibeCADPreferences.validate_configured_auth = lambda **_kwargs: types.SimpleNamespace(
                     status=AuthStatus.VERIFIED,
                     source="OS keyring",
                     redacted_key="sk-...3456",
@@ -449,9 +449,9 @@ class TestVibeCADPreferences(unittest.TestCase):
                 self.assertIn("sk-...3456", page.status.text())
                 self.assertNotIn("test123456", page.status.text())
             finally:
-                VibeCADPreferences.validate_configured_openai_auth = original_validate_configured
+                VibeCADPreferences.validate_configured_auth = original_validate_configured
 
-            original_validate_typed = VibeCADPreferences.validate_openai_api_key
+            original_validate_typed = VibeCADPreferences.validate_api_key
             try:
                 calls = []
 
@@ -464,7 +464,7 @@ class TestVibeCADPreferences(unittest.TestCase):
                         message="OpenAI credential validation failed with HTTP 401.",
                     )
 
-                VibeCADPreferences.validate_openai_api_key = fake_validate_typed
+                VibeCADPreferences.validate_api_key = fake_validate_typed
                 page.api_key.setText("sk-invalid0000")
                 validate_button.click()
                 if app:
@@ -476,7 +476,7 @@ class TestVibeCADPreferences(unittest.TestCase):
                 self.assertIn("sk-...0000", page.status.text())
                 self.assertNotIn("invalid0000", page.status.text())
             finally:
-                VibeCADPreferences.validate_openai_api_key = original_validate_typed
+                VibeCADPreferences.validate_api_key = original_validate_typed
 
             logout_button.click()
             if app:

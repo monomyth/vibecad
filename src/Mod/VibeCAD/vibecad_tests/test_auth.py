@@ -22,8 +22,6 @@ from VibeCADAuth import (
     store_keyring_key,
     validate_api_key,
     validate_configured_auth,
-    validate_configured_openai_auth,
-    validate_openai_api_key,
 )
 
 from vibecad_tests.support import (
@@ -80,15 +78,16 @@ class TestVibeCADAuth(unittest.TestCase):
             self.assertFalse(stored["stored"])
             self.assertIsNone(stored["redacted_key"])
 
-    def test_validate_openai_api_key_reports_verified_without_exposing_secret(self):
+    def test_validate_api_key_openai_reports_verified_without_exposing_secret(self):
         requests = []
 
         def opener(request, timeout):
             requests.append((request, timeout))
             return FakeHTTPResponse(200)
 
-        state = validate_openai_api_key(
+        state = validate_api_key(
             "sk-test123456",
+            provider="openai",
             source="unit-test",
             timeout_seconds=0.5,
             opener=opener,
@@ -100,7 +99,7 @@ class TestVibeCADAuth(unittest.TestCase):
         self.assertEqual(requests[0][0].full_url, "https://api.openai.com/v1/models")
         self.assertEqual(requests[0][0].headers["Authorization"], "Bearer sk-test123456")
 
-    def test_validate_openai_api_key_reports_invalid_and_offline(self):
+    def test_validate_api_key_openai_reports_invalid_and_offline(self):
         def invalid_opener(_request, timeout=None):
             raise error.HTTPError(
                 "https://api.openai.com/v1/models",
@@ -110,8 +109,9 @@ class TestVibeCADAuth(unittest.TestCase):
                 None,
             )
 
-        invalid = validate_openai_api_key(
+        invalid = validate_api_key(
             "sk-test123456",
+            provider="openai",
             timeout_seconds=0.5,
             opener=invalid_opener,
         )
@@ -121,8 +121,9 @@ class TestVibeCADAuth(unittest.TestCase):
         def offline_opener(_request, timeout=None):
             raise OSError("network unavailable")
 
-        offline = validate_openai_api_key(
+        offline = validate_api_key(
             "sk-test123456",
+            provider="openai",
             timeout_seconds=0.5,
             opener=offline_opener,
         )
@@ -130,7 +131,8 @@ class TestVibeCADAuth(unittest.TestCase):
         self.assertNotIn("test123456", str(offline))
 
     def test_validate_configured_auth_uses_resolved_credential(self):
-        state = validate_configured_openai_auth(
+        state = validate_configured_auth(
+            provider="openai",
             env={"OPENAI_API_KEY": "sk-test123456"},
             timeout_seconds=0.5,
             opener=lambda _request, timeout=None: FakeHTTPResponse(200),
