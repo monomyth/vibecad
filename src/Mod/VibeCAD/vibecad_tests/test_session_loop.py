@@ -1578,6 +1578,30 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         finally:
             save_settings(old_settings)
 
+    def test_service_settings_accessors_do_not_hide_load_failures(self):
+        import VibeCADCore
+
+        service = VibeCADService()
+        with mock.patch.object(
+            VibeCADCore,
+            "load_settings",
+            side_effect=RuntimeError("settings store failed"),
+        ):
+            accessors = (
+                service.provider_name,
+                service.provider_model,
+                service.provider_base_url,
+                service.provider_reasoning_effort,
+                service.use_online_provider_by_default,
+                service.native_freecad_tools_enabled,
+                service.enabled_native_tool_workbenches,
+                service.build_script_mode_enabled,
+            )
+            for accessor in accessors:
+                with self.subTest(accessor=accessor.__name__):
+                    with self.assertRaisesRegex(RuntimeError, "settings store failed"):
+                        accessor()
+
     def test_provider_tool_surface_reports_scoped_tools(self):
         old_settings = load_settings()
         try:

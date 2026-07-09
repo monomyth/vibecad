@@ -208,12 +208,9 @@ class VibeCADService:
         return configured_dotenv_path()
 
     def provider_name(self) -> str:
-        try:
-            name = load_settings().provider
-            provider_spec(name)
-            return name
-        except Exception:
-            return "openai"
+        name = load_settings().provider
+        provider_spec(name)
+        return name
 
     def provider_api_key(self) -> str | None:
         try:
@@ -225,41 +222,23 @@ class VibeCADService:
         return credential.value if credential is not None else None
 
     def provider_model(self) -> str:
-        try:
-            return load_settings().active_model
-        except Exception:
-            return "gpt-5.5"
+        return load_settings().active_model
 
     def provider_base_url(self) -> str | None:
         """Base URL override for the selected provider, or None for official."""
-        try:
-            return load_settings().base_url_for(self.provider_name())
-        except Exception:
-            return None
+        return load_settings().base_url_for(self.provider_name())
 
     def provider_reasoning_effort(self) -> str:
-        try:
-            return load_settings().reasoning_effort
-        except Exception:
-            return "high"
+        return load_settings().reasoning_effort
 
     def use_online_provider_by_default(self) -> bool:
-        try:
-            return load_settings().use_online_provider
-        except Exception:
-            return True
+        return load_settings().use_online_provider
 
     def native_freecad_tools_enabled(self) -> bool:
-        try:
-            return bool(load_settings().enable_native_freecad_tools)
-        except Exception:
-            return False
+        return bool(load_settings().enable_native_freecad_tools)
 
     def enabled_native_tool_workbenches(self) -> set[str]:
-        try:
-            return set(load_settings().native_tool_workbenches)
-        except Exception:
-            return set()
+        return set(load_settings().native_tool_workbenches)
 
     def build_script_mode_enabled(self) -> bool:
         """Whether the user opted into script mode (model.build_from_script).
@@ -270,10 +249,7 @@ class VibeCADService:
         (the default), only the structured tools are available. Read and
         view tools remain available in both modes.
         """
-        try:
-            return bool(load_settings().enable_build_script)
-        except Exception:
-            return False
+        return bool(load_settings().enable_build_script)
 
     def is_workbench_tool_pack_enabled(self, workbench: str | None) -> bool:
         if not workbench:
