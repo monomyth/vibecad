@@ -50,6 +50,9 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
             self.assertTrue(sketch_result["ok"], sketch_result)
             sketch = [obj for obj in doc.Objects if obj.TypeId == "Sketcher::SketchObject"][0]
             draw_result = service.registry.call("sketcher.draw_rectangle",
+            center_x=0,
+            center_y=0,
+            construction=False,
                 width=10,
                 height=5,
                 sketch_name=sketch.Name,
@@ -80,6 +83,9 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
             sketch = [obj for obj in doc.Objects if obj.TypeId == "Sketcher::SketchObject"][0]
             draw_result = service.registry.call(
                 "sketcher.draw_rectangle",
+                center_x=0,
+                center_y=0,
+                construction=False,
                 width=30,
                 height=12,
                 sketch_name=sketch.Name,
@@ -458,6 +464,70 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
             self.assertEqual(action["tool"], "sketcher.delete_items")
             self.assertEqual(action["arguments"], {"sketch_name": "Sketch", "constraint_items": [index]})
             self.assertEqual(action["target_constraint"]["handle"], f"constraint:{index}")
+
+    def test_draw_rectangle_requires_explicit_target_center_and_construction(self):
+        import FreeCAD as App
+
+        doc = App.newDocument("VibeCADDrawRectangleExplicitContractTest")
+        try:
+            service = VibeCADService()
+            sketch_result = service.registry.call(
+                "partdesign.create_sketch",
+                label="Rectangle Contract Sketch",
+            )
+            self.assertTrue(sketch_result["ok"], sketch_result)
+            sketch = doc.getObject(sketch_result["active_sketch"])
+            self.assertIsNotNone(sketch)
+            before_geometry = len(getattr(sketch, "Geometry", []))
+
+            missing_sketch = service.registry.call(
+                "sketcher.draw_rectangle",
+                width=10,
+                height=5,
+                center_x=0,
+                center_y=0,
+                construction=False,
+            )
+            self.assertFalse(missing_sketch["ok"], missing_sketch)
+            self.assertIn("sketch_name is required", missing_sketch["error"])
+            self.assertFalse(missing_sketch.get("retry_same_call", True))
+
+            missing_center = service.registry.call(
+                "sketcher.draw_rectangle",
+                sketch_name=sketch.Name,
+                width=10,
+                height=5,
+                center_x=0,
+                construction=False,
+            )
+            self.assertFalse(missing_center["ok"], missing_center)
+            self.assertIn("center_y is required", missing_center["error"])
+            self.assertFalse(missing_center.get("retry_same_call", True))
+
+            missing_construction = service.registry.call(
+                "sketcher.draw_rectangle",
+                sketch_name=sketch.Name,
+                width=10,
+                height=5,
+                center_x=0,
+                center_y=0,
+            )
+            self.assertFalse(missing_construction["ok"], missing_construction)
+            self.assertIn("construction is required", missing_construction["error"])
+            self.assertEqual(before_geometry, len(getattr(sketch, "Geometry", [])))
+
+            spec = service.registry.get("sketcher.draw_rectangle").to_schema()
+            required = set(spec["parameters"]["required"])
+            self.assertTrue(
+                {"sketch_name", "width", "height", "center_x", "center_y", "construction"}
+                <= required
+            )
+            serialized = str(spec).lower()
+            self.assertNotIn("default 0", serialized)
+            self.assertNotIn("default false", serialized)
+            self.assertNotIn("first sketch", serialized)
+        finally:
+            App.closeDocument(doc.Name)
 
     def test_atomic_sketcher_tools_add_geometry_and_constraints(self):
         import FreeCAD as App

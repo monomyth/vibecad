@@ -744,6 +744,7 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
                         "height": 32,
                         "center_x": 0,
                         "center_y": 0,
+                        "construction": False,
                     },
                     {
                         "name": "adjust_slot",

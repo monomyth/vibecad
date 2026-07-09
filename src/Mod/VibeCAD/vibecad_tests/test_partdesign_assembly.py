@@ -187,6 +187,9 @@ class TestVibeCADPartDesignAssembly(SettingsSnapshotTestCase):
             self.assertTrue(sketch_result["ok"], sketch_result)
             sketch = [obj for obj in doc.Objects if obj.TypeId == "Sketcher::SketchObject"][0]
             draw_result = service.registry.call("sketcher.draw_rectangle",
+            center_x=0,
+            center_y=0,
+            construction=False,
                 width=10,
                 height=10,
                 sketch_name=sketch.Name,
@@ -231,6 +234,9 @@ class TestVibeCADPartDesignAssembly(SettingsSnapshotTestCase):
             self.assertIsNotNone(sketch)
             draw_result = service.registry.call(
                 "sketcher.draw_rectangle",
+                center_x=0,
+                center_y=0,
+                construction=False,
                 width=10,
                 height=10,
                 sketch_name=sketch.Name,
@@ -273,6 +279,9 @@ class TestVibeCADPartDesignAssembly(SettingsSnapshotTestCase):
             self.assertIsNotNone(sketch)
             rectangle = service.registry.call(
                 "sketcher.draw_rectangle",
+                center_x=0,
+                center_y=0,
+                construction=False,
                 sketch_name=sketch.Name,
                 width=20,
                 height=12,
@@ -415,6 +424,9 @@ class TestVibeCADPartDesignAssembly(SettingsSnapshotTestCase):
             self.assertTrue(base_sketch_result["ok"], base_sketch_result)
             base_sketch = [obj for obj in doc.Objects if obj.TypeId == "Sketcher::SketchObject"][0]
             base_draw = service.registry.call("sketcher.draw_rectangle",
+            center_x=0,
+            center_y=0,
+            construction=False,
                 width=30,
                 height=20,
                 sketch_name=base_sketch.Name,
@@ -432,6 +444,9 @@ class TestVibeCADPartDesignAssembly(SettingsSnapshotTestCase):
             self.assertEqual(len(pocket_sketches), 1)
             pocket_sketch = pocket_sketches[0]
             pocket_draw = service.registry.call("sketcher.draw_rectangle",
+            center_x=0,
+            center_y=0,
+            construction=False,
                 width=8,
                 height=6,
                 sketch_name=pocket_sketch.Name,
@@ -467,6 +482,9 @@ class TestVibeCADPartDesignAssembly(SettingsSnapshotTestCase):
             base_sketch = [obj for obj in doc.Objects if obj.TypeId == "Sketcher::SketchObject"][0]
             base_draw = service.registry.call(
                 "sketcher.draw_rectangle",
+                center_x=0,
+                center_y=0,
+                construction=False,
                 width=30,
                 height=20,
                 sketch_name=base_sketch.Name,
@@ -532,6 +550,9 @@ class TestVibeCADPartDesignAssembly(SettingsSnapshotTestCase):
             self.assertIsNotNone(base_sketch)
             base_draw = service.registry.call(
                 "sketcher.draw_rectangle",
+                center_x=0,
+                center_y=0,
+                construction=False,
                 width=30,
                 height=20,
                 sketch_name=base_sketch.Name,
@@ -610,6 +631,9 @@ class TestVibeCADPartDesignAssembly(SettingsSnapshotTestCase):
             base_sketch = [obj for obj in doc.Objects if obj.TypeId == "Sketcher::SketchObject"][0]
             base_draw = service.registry.call(
                 "sketcher.draw_rectangle",
+                center_x=0,
+                center_y=0,
+                construction=False,
                 width=30,
                 height=20,
                 sketch_name=base_sketch.Name,
@@ -626,6 +650,9 @@ class TestVibeCADPartDesignAssembly(SettingsSnapshotTestCase):
             ][0]
             pocket_draw = service.registry.call(
                 "sketcher.draw_rectangle",
+                center_x=0,
+                center_y=0,
+                construction=False,
                 width=8,
                 height=6,
                 sketch_name=pocket_sketch.Name,
@@ -736,6 +763,9 @@ class TestVibeCADPartDesignAssembly(SettingsSnapshotTestCase):
             sketch = [obj for obj in doc.Objects if obj.TypeId == "Sketcher::SketchObject"][0]
             draw_result = service.registry.call(
                 "sketcher.draw_rectangle",
+                center_x=0,
+                center_y=0,
+                construction=False,
                 width=10,
                 height=10,
                 sketch_name=sketch.Name,
@@ -832,6 +862,9 @@ class TestVibeCADPartDesignAssembly(SettingsSnapshotTestCase):
             sketch = [obj for obj in doc.Objects if obj.TypeId == "Sketcher::SketchObject"][0]
             draw_result = service.registry.call(
                 "sketcher.draw_rectangle",
+                center_x=0,
+                center_y=0,
+                construction=False,
                 width=8,
                 height=6,
                 sketch_name=sketch.Name,
@@ -862,6 +895,9 @@ class TestVibeCADPartDesignAssembly(SettingsSnapshotTestCase):
             sketch = [obj for obj in doc.Objects if obj.TypeId == "Sketcher::SketchObject"][0]
             draw_result = service.registry.call(
                 "sketcher.draw_rectangle",
+                center_x=0,
+                center_y=0,
+                construction=False,
                 width=10,
                 height=10,
                 sketch_name=sketch.Name,
@@ -916,6 +952,7 @@ class TestVibeCADPartDesignAssembly(SettingsSnapshotTestCase):
             sketch = [obj for obj in doc.Objects if obj.TypeId == "Sketcher::SketchObject"][0]
             profile_result = service.registry.call(
                 "sketcher.draw_rectangle",
+                construction=False,
                 sketch_name=sketch.Name,
                 width=2,
                 height=4,
@@ -948,6 +985,9 @@ class TestVibeCADPartDesignAssembly(SettingsSnapshotTestCase):
             base_sketch = [obj for obj in doc.Objects if obj.TypeId == "Sketcher::SketchObject"][0]
             base_profile = service.registry.call(
                 "sketcher.draw_rectangle",
+                center_x=0,
+                center_y=0,
+                construction=False,
                 sketch_name=base_sketch.Name,
                 width=10,
                 height=8,
@@ -989,6 +1029,9 @@ class TestVibeCADPartDesignAssembly(SettingsSnapshotTestCase):
             sketch = [obj for obj in doc.Objects if obj.TypeId == "Sketcher::SketchObject"][0]
             draw_result = service.registry.call(
                 "sketcher.draw_rectangle",
+                center_x=0,
+                center_y=0,
+                construction=False,
                 sketch_name=sketch.Name,
                 width=10,
                 height=10,
@@ -1083,6 +1126,9 @@ class TestVibeCADPartDesignAssembly(SettingsSnapshotTestCase):
             self.assertTrue(profile_result["ok"], profile_result)
             profile = [obj for obj in doc.Objects if obj.TypeId == "Sketcher::SketchObject"][0]
             profile_draw = service.registry.call("sketcher.draw_rectangle",
+            center_x=0,
+            center_y=0,
+            construction=False,
                 width=6,
                 height=4,
                 sketch_name=profile.Name,
@@ -1095,6 +1141,9 @@ class TestVibeCADPartDesignAssembly(SettingsSnapshotTestCase):
                 if obj.TypeId == "Sketcher::SketchObject" and obj.Name != profile.Name
             ][0]
             section_draw = service.registry.call("sketcher.draw_rectangle",
+            center_x=0,
+            center_y=0,
+            construction=False,
                 width=3,
                 height=2,
                 sketch_name=section.Name,
@@ -1403,6 +1452,9 @@ class TestVibeCADPartDesignAssembly(SettingsSnapshotTestCase):
             ][0]
             draw_result = service.registry.call(
                 "sketcher.draw_rectangle",
+                center_x=0,
+                center_y=0,
+                construction=False,
                 width=20,
                 height=15,
                 sketch_name=sketch.Name,

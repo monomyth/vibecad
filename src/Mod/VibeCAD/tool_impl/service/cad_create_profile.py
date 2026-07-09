@@ -287,7 +287,10 @@ def _body_for_profile(service: Any, component_name: str, body_name: str | None) 
 
 
 def _add_rectangle_entity(service: Any, sketch_name: str, entity: dict[str, Any]) -> dict[str, Any]:
-    missing = _missing_entity_fields(entity, ("width", "height", "center_x", "center_y"))
+    missing = _missing_entity_fields(
+        entity,
+        ("width", "height", "center_x", "center_y", "construction"),
+    )
     if missing:
         return {
             "ok": False,
