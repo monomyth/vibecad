@@ -2,6 +2,7 @@
 
 import os
 import json
+import asyncio
 from pathlib import Path
 import tempfile
 
@@ -336,6 +337,85 @@ class TestVibeCADProviderPayloads(SettingsSnapshotTestCase):
             self.assertIsInstance(tool["params_json_schema"], dict)
             self.assertEqual(tool["params_json_schema"]["type"], "object")
             self.assertIn("properties", tool["params_json_schema"])
+
+    def test_provider_tool_rejects_unknown_arguments_before_backend_send(self):
+        from provider_tools import create_tool
+
+        class FakeFunctionTool:
+            def __init__(
+                self,
+                name,
+                description,
+                params_json_schema,
+                on_invoke_tool,
+                strict_json_schema,
+            ):
+                self.name = name
+                self.description = description
+                self.params_json_schema = params_json_schema
+                self.on_invoke_tool = on_invoke_tool
+                self.strict_json_schema = strict_json_schema
+
+        class FakeConn:
+            def __init__(self):
+                self.messages = []
+
+            def send(self, message):
+                self.messages.append(message)
+
+            def recv(self):
+                return {
+                    "type": "tool_result",
+                    "result": {"ok": True, "feature": "Pad"},
+                }
+
+        schema = {
+            "name": "partdesign.extrude",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "operation": {"type": "string"},
+                    "sketch_name": {"type": "string"},
+                },
+            },
+        }
+        conn = FakeConn()
+        tool = create_tool(schema, conn, FakeFunctionTool)
+
+        result = asyncio.run(
+            tool.on_invoke_tool(
+                None,
+                '{"operation":"pad","sketch_name":"BladeProfile","bogus":true}',
+            )
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["retry_same_call"])
+        self.assertEqual(result["unsupported_arguments"], ["bogus"])
+        self.assertEqual(result["allowed_arguments"], ["operation", "sketch_name"])
+        self.assertIn("Unsupported argument(s) for partdesign.extrude", result["error"])
+        self.assertEqual(conn.messages, [])
+
+        ok_result = asyncio.run(
+            tool.on_invoke_tool(
+                None,
+                '{"operation":"pad","sketch_name":"BladeProfile"}',
+            )
+        )
+
+        self.assertTrue(ok_result["ok"])
+        self.assertEqual(
+            conn.messages,
+            [
+                {
+                    "type": "tool",
+                    "tool_name": "partdesign.extrude",
+                    "arguments_json": (
+                        '{"operation":"pad","sketch_name":"BladeProfile"}'
+                    ),
+                }
+            ],
+        )
 
     def test_openai_request_tool_list_uses_active_scoped_surface(self):
         class FakeFunctionTool:

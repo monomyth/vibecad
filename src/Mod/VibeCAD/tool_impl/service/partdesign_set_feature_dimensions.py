@@ -50,24 +50,53 @@ def run(
         "Height": height,
         "Radius": radius,
     }
-    requested = {
-        key: float(value)
-        for key, value in editable.items()
-        if value is not None and hasattr(feature, key)
-    }
-    ignored = sorted(key for key, value in editable.items() if value is not None and not hasattr(feature, key))
     if not type_id.startswith("PartDesign::"):
         return {
             "ok": False,
             "error": f"Object is not a PartDesign feature: {feature_name}",
             "type": type_id,
         }
+    available = sorted(key for key in editable if hasattr(feature, key))
+    unsupported = sorted(
+        key for key, value in editable.items() if value is not None and key not in available
+    )
+    if unsupported:
+        guidance = (
+            f"Available dimension properties: {', '.join(available)}."
+            if available
+            else "This feature has no editable Length/Width/Height/Radius properties."
+        )
+        return {
+            "ok": False,
+            "error": (
+                f"Unsupported dimension(s) for {feature_name}: "
+                f"{', '.join(unsupported)}. {guidance}"
+            ),
+            "type": type_id,
+            "unsupported_dimensions": unsupported,
+            "available_dimensions": available,
+            "retry_same_call": False,
+        }
+    try:
+        requested = {
+            key: float(value)
+            for key, value in editable.items()
+            if value is not None and key in available
+        }
+    except (TypeError, ValueError) as exc:
+        return {
+            "ok": False,
+            "error": f"PartDesign feature dimensions must be numeric: {exc}",
+            "type": type_id,
+            "available_dimensions": available,
+            "retry_same_call": False,
+        }
     if not requested:
         return {
             "ok": False,
             "error": "No editable PartDesign dimension properties were provided.",
             "type": type_id,
-            "ignored_dimensions": ignored,
+            "available_dimensions": available,
         }
     if any(value <= 0 for value in requested.values()):
         return {"ok": False, "error": "PartDesign feature dimensions must be positive."}
@@ -99,7 +128,6 @@ def run(
             "type": getattr(target, "TypeId", ""),
             "before": before,
             "after": after,
-            "ignored_dimensions": ignored,
         }
 
     transaction = run_freecad_transaction(

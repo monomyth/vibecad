@@ -46,11 +46,11 @@ TOOL_SPEC = {
             },
             "geometry_index": {
                 "type": "integer",
-                "description": "Target geometry index (trim/extend/split; alias for first_geometry in fillet).",
+                "description": "Target geometry index for trim, extend, or split.",
             },
             "geometry_handle": {
                 "type": "string",
-                "description": "Semantic geometry handle for the target (trim/extend/split; alias for first_geometry_handle in fillet).",
+                "description": "Semantic geometry handle for trim, extend, or split.",
             },
             "x": {"type": "number", "description": "trim/split: picked point X in sketch mm."},
             "y": {"type": "number", "description": "trim/split: picked point Y in sketch mm."},
@@ -129,11 +129,26 @@ def run(
     if sketch is None:
         return {"ok": False, "error": "Sketch not found.", "requested": sketch_name}
     if op == "fillet":
+        if geometry_index is not None or geometry_handle:
+            return {
+                "ok": False,
+                "error": (
+                    "operation='fillet' uses first_geometry/first_geometry_handle; "
+                    "geometry_index/geometry_handle are only for trim, extend, or split."
+                ),
+                "retry_same_call": False,
+            }
+        if first_geometry is None and not first_geometry_handle:
+            return {
+                "ok": False,
+                "error": "operation='fillet' requires first_geometry or first_geometry_handle.",
+                "retry_same_call": False,
+            }
         return _run_fillet(
             service,
             sketch,
-            first_geometry if first_geometry is not None else geometry_index,
-            first_geometry_handle or geometry_handle,
+            first_geometry,
+            first_geometry_handle,
             first_point,
             second_geometry,
             second_geometry_handle,
@@ -146,6 +161,15 @@ def run(
             preserve_corner,
             chamfer,
         )
+    if first_geometry is not None or first_geometry_handle:
+        return {
+            "ok": False,
+            "error": (
+                f"operation='{op}' uses geometry_index/geometry_handle; "
+                "first_geometry/first_geometry_handle are only for fillet."
+            ),
+            "retry_same_call": False,
+        }
     try:
         index = resolve_geometry_index(service, sketch, geometry_index, geometry_handle)
     except (KeyError, ValueError, RuntimeError, TypeError) as exc:

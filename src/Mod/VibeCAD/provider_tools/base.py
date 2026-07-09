@@ -287,22 +287,64 @@ def _schema_for_provider_tool(tool_name: str, parameters: dict[str, Any]) -> dic
         result["required"] = [item for item in required if str(item) in keep]
     return result
 
-
-
-def _filter_backend_arguments(schema: dict[str, Any], arguments_json: str) -> str:
+def _provider_argument_names(schema: dict[str, Any]) -> list[str]:
+    tool_name = str(schema.get("name", ""))
     parameters = schema.get("parameters")
-    properties = parameters.get("properties") if isinstance(parameters, dict) else None
+    if not isinstance(parameters, dict):
+        parameters = {"type": "object", "properties": {}}
+    exposed_parameters = _schema_for_provider_tool(tool_name, parameters)
+    properties = exposed_parameters.get("properties")
     if not isinstance(properties, dict):
-        return arguments_json or "{}"
-    allowed = {str(key) for key in properties}
+        return []
+    return sorted(str(key) for key in properties)
+
+
+def _argument_error(tool_name: str, message: str, *, allowed: list[str]) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "ok": False,
+        "error": message,
+        "retry_same_call": False,
+        "allowed_arguments": allowed,
+    }
+    return result
+
+
+def _validate_backend_arguments(
+    tool_name: str,
+    schema: dict[str, Any],
+    arguments_json: str,
+) -> tuple[str | None, dict[str, Any] | None]:
+    allowed = _provider_argument_names(schema)
+    allowed_set = set(allowed)
     try:
         args = json.loads(arguments_json or "{}")
-    except Exception:
-        return arguments_json or "{}"
+    except (TypeError, ValueError) as exc:
+        return None, _argument_error(
+            tool_name,
+            f"Invalid JSON arguments for {tool_name}: {exc}.",
+            allowed=allowed,
+        )
     if not isinstance(args, dict):
-        return arguments_json or "{}"
-    filtered = {key: value for key, value in args.items() if str(key) in allowed}
-    return json.dumps(filtered, separators=(",", ":"))
+        return None, _argument_error(
+            tool_name,
+            f"Arguments for {tool_name} must be a JSON object.",
+            allowed=allowed,
+        )
+    unsupported = sorted(str(key) for key in args if str(key) not in allowed_set)
+    if unsupported:
+        if allowed:
+            allowed_text = ", ".join(allowed)
+            guidance = f"Use only: {allowed_text}."
+        else:
+            guidance = "This tool does not accept arguments."
+        message = (
+            f"Unsupported argument(s) for {tool_name}: "
+            f"{', '.join(unsupported)}. {guidance}"
+        )
+        error = _argument_error(tool_name, message, allowed=allowed)
+        error["unsupported_arguments"] = unsupported
+        return None, error
+    return json.dumps(args, separators=(",", ":")), None
 
 
 def _schema_type_contains(value: Any, expected: str) -> bool:
@@ -663,14 +705,16 @@ def create_provider_tool(
     FunctionTool: Any,
 ) -> Any:
     async def _invoke(_tool_context, arguments_json: str):
-        filtered_arguments_json = _filter_backend_arguments(
-            schema, arguments_json or "{}"
+        valid_arguments_json, argument_error = _validate_backend_arguments(
+            tool_name, schema, arguments_json or "{}"
         )
+        if argument_error is not None:
+            return argument_error
         conn.send(
             {
                 "type": "tool",
                 "tool_name": tool_name,
-                "arguments_json": filtered_arguments_json,
+                "arguments_json": valid_arguments_json,
             }
         )
         response = conn.recv()
