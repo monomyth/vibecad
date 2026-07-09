@@ -84,7 +84,7 @@ class TestVibeCADWorkbenchPacks(SettingsSnapshotTestCase):
         registered = registered_tool_names()
         missing = []
         for pack in WORKBENCH_TOOL_PACKS.values():
-            for tool_name in pack.tool_names:
+            for tool_name in pack.provider_tool_names():
                 if tool_name not in registered:
                     missing.append((pack.workbench, tool_name))
         self.assertEqual(missing, [])
@@ -134,7 +134,7 @@ class TestVibeCADWorkbenchPacks(SettingsSnapshotTestCase):
         pack_union = {
             tool_name
             for pack in WORKBENCH_TOOL_PACKS.values()
-            for tool_name in pack.tool_names
+            for tool_name in pack.provider_tool_names()
         }
         self.assertEqual(set(), pack_union - provider_names, sorted(pack_union - provider_names))
         self.assertEqual(
@@ -146,34 +146,37 @@ class TestVibeCADWorkbenchPacks(SettingsSnapshotTestCase):
     def test_native_pack_tools_belong_to_that_workbench(self):
         service = VibeCADService()
         offenders = []
+        adjacent_offenders = []
         for workbench, pack in WORKBENCH_TOOL_PACKS.items():
             for tool_name in pack.tool_names:
                 tool = service.registry.get(tool_name)
                 owner = tool.workbench
+                if owner != workbench:
+                    offenders.append((workbench, tool_name, owner))
+            for tool_name in pack.required_adjacent_tool_names:
+                tool = service.registry.get(tool_name)
+                owner = tool.workbench
                 if owner == workbench:
-                    continue
-                if (
-                    workbench == "PartDesignWorkbench"
-                    and owner == "SketcherWorkbench"
-                    and tool_name.startswith("sketcher.")
-                    and tool_name != "sketcher.create_sketch"
-                ):
-                    continue
-                offenders.append((workbench, tool_name, owner))
+                    adjacent_offenders.append((workbench, tool_name, owner))
         self.assertEqual([], offenders)
+        self.assertEqual([], adjacent_offenders)
 
     def test_workbench_tool_pack_summary_includes_tool_names(self):
         pack = get_tool_pack("SketcherWorkbench")
         summary = pack.summary()
         self.assertIn("tool_names", summary)
+        self.assertIn("required_adjacent_tool_names", summary)
+        self.assertIn("provider_tool_names", summary)
         self.assertIn("sketcher.add_geometry", summary["tool_names"])
         self.assertIn("sketcher.add_constraint", summary["tool_names"])
 
     def test_partdesign_pack_includes_sketcher_tools_but_not_create_sketch(self):
         pack = get_tool_pack("PartDesignWorkbench")
-        self.assertIn("sketcher.add_geometry", pack.tool_names)
+        self.assertNotIn("sketcher.add_geometry", pack.tool_names)
+        self.assertIn("sketcher.add_geometry", pack.required_adjacent_tool_names)
+        self.assertIn("sketcher.add_geometry", pack.provider_tool_names())
         self.assertIn("partdesign.extrude", pack.tool_names)
-        self.assertNotIn("sketcher.create_sketch", pack.tool_names)
+        self.assertNotIn("sketcher.create_sketch", pack.provider_tool_names())
         self.assertIn("partdesign.create_sketch", pack.tool_names)
 
     def test_cam_pack_covers_machine_validated_machining_workflow(self):

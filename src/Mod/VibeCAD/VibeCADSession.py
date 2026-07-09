@@ -448,39 +448,59 @@ def _native_pack_tool_names_for_workbench(
     workbench: str | None,
     pack: Any,
 ) -> set[str]:
-    """Return pack tools whose service declaration actually belongs here."""
+    """Return explicitly declared native and adjacent tools for ``workbench``."""
     names: set[str] = set()
     for tool_name in getattr(pack, "tool_names", ()):
-        try:
-            tool = service.registry.get(tool_name)
-        except KeyError:
-            continue
+        tool = service.registry.get(tool_name)
+        owner = getattr(tool, "workbench", None)
+        if owner != workbench:
+            raise RuntimeError(
+                f"Workbench pack {workbench} declares {tool_name} as an owned "
+                f"tool, but the service registry owner is {owner}."
+            )
+        names.add(tool_name)
+    for tool_name in getattr(pack, "required_adjacent_tool_names", ()):
+        tool = service.registry.get(tool_name)
         owner = getattr(tool, "workbench", None)
         if owner == workbench:
-            names.add(tool_name)
-            continue
-        if (
-            workbench == "PartDesignWorkbench"
-            and owner == "SketcherWorkbench"
-            and tool_name.startswith("sketcher.")
-            and tool_name != "sketcher.create_sketch"
-        ):
-            names.add(tool_name)
+            raise RuntimeError(
+                f"Workbench pack {workbench} declares {tool_name} as adjacent, "
+                "but that tool is owned by the same workbench."
+            )
+        names.add(tool_name)
     return names
+
+
+def _is_required_adjacent_tool_for_workbench(
+    workbench: str | None,
+    tool_name: str,
+) -> bool:
+    pack = get_tool_pack(workbench)
+    if pack is None:
+        return False
+    return tool_name in set(getattr(pack, "required_adjacent_tool_names", ()))
+
+
+def _adjacent_tool_can_execute_in_current_workbench(
+    tool: Any,
+    actual_workbench: str | None,
+    provider_workbench: str | None,
+) -> bool:
+    if not _is_required_adjacent_tool_for_workbench(provider_workbench, tool.name):
+        return False
+    if (
+        provider_workbench == "PartDesignWorkbench"
+        and actual_workbench == "PartDesignWorkbench"
+        and getattr(tool, "workbench", None) == "SketcherWorkbench"
+    ):
+        return True
+    return False
 
 
 def is_provider_tool_kind_allowed(safety: SafetyLevel, tool_name: str) -> bool:
     return safety in {SafetyLevel.READ, SafetyLevel.VIEW} or (
         safety is SafetyLevel.SAFE_WRITE and tool_name in PROVIDER_COMMAND_WRITE_TOOLS
     )
-
-
-def _is_partdesign_sketcher_tool(tool_name: str) -> bool:
-    """Sketcher tools usable inside PartDesign, per the PartDesign pack."""
-    pack = get_tool_pack("PartDesignWorkbench")
-    if pack is None:
-        return False
-    return tool_name.startswith("sketcher.") and tool_name in pack.tool_names
 
 
 def _is_tool_available_for_provider_context(
@@ -490,7 +510,7 @@ def _is_tool_available_for_provider_context(
 ) -> bool:
     if tool.is_available_for(workbench):
         return True
-    if workbench == "PartDesignWorkbench" and _is_partdesign_sketcher_tool(tool.name):
+    if _is_required_adjacent_tool_for_workbench(workbench, tool.name):
         return True
     return False
 
@@ -2938,7 +2958,9 @@ def _is_tool_available_in_live_context(
 ) -> bool:
     if tool.is_available_for(workbench):
         return True
-    if workbench == "PartDesignWorkbench" and _is_partdesign_sketcher_tool(tool.name):
+    if _is_required_adjacent_tool_for_workbench(workbench, tool.name):
+        if getattr(tool, "workbench", None) != "SketcherWorkbench":
+            return True
         try:
             return tool.name == "sketcher.inspect_sketch" or bool(
                 service.sketcher_summary().get("found")
@@ -3067,9 +3089,10 @@ def _ensure_tool_execution_workbench(
     target = str(tool.workbench or "").strip()
     if not target or target == actual_workbench:
         return None
-    if target == "SketcherWorkbench" and provider_workbench == "PartDesignWorkbench":
-        if actual_workbench == "PartDesignWorkbench":
-            return None
+    if _adjacent_tool_can_execute_in_current_workbench(
+        tool, actual_workbench, provider_workbench
+    ):
+        return None
     try:
         result = service.activate_workbench(target)
     except Exception as exc:

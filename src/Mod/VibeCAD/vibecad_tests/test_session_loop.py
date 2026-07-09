@@ -743,7 +743,7 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
 
         all_native_pack_tools: set[str] = set()
         for pack in WORKBENCH_TOOL_PACKS.values():
-            all_native_pack_tools.update(pack.tool_names)
+            all_native_pack_tools.update(pack.provider_tool_names())
         for read_tools in WORKBENCH_READ_TOOLS.values():
             all_native_pack_tools.update(read_tools)
 
@@ -760,14 +760,7 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
                 owner = getattr(tool, "workbench", None)
                 if owner == workbench:
                     allowed.add(tool_name)
-                    continue
-                if (
-                    workbench == "PartDesignWorkbench"
-                    and owner == "SketcherWorkbench"
-                    and tool_name.startswith("sketcher.")
-                    and tool_name != "sketcher.create_sketch"
-                ):
-                    allowed.add(tool_name)
+            allowed.update(pack.required_adjacent_tool_names)
             return allowed
 
         for workbench in sorted(WORKBENCH_TOOL_PACKS):
@@ -857,8 +850,9 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
             leaked = retired_sketcher & names
             self.assertFalse(leaked, (label, sorted(leaked)))
 
-        # PartDesign pack: consolidated features + sketcher tools minus
-        # sketcher.create_sketch (Body sketches come from partdesign.create_sketch).
+        # PartDesign pack: consolidated features + required adjacent Sketcher
+        # tools minus sketcher.create_sketch (Body sketches come from
+        # partdesign.create_sketch).
         self.assertIn("partdesign.get_bodies", partdesign_names)
         self.assertIn("partdesign.create_body", partdesign_names)
         self.assertIn("partdesign.create_sketch", partdesign_names)
@@ -1086,7 +1080,7 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
             pd_scope.tool_names,
             set(CORE_PROVIDER_TOOLS)
             | {"partdesign.get_bodies"}
-            | set(pd_pack.tool_names),
+            | set(pd_pack.provider_tool_names()),
         )
         self.assertNotIn("sketcher.create_sketch", pd_scope.tool_names)
         self.assertIn("partdesign.create_sketch", pd_scope.tool_names)

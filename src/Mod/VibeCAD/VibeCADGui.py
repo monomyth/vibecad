@@ -1660,31 +1660,17 @@ def _build_panel_widget():
     return root
 
 
-def _register_native_dock(widget) -> Any | None:
-    """Register through DockWindowManager for a native dock; None on failure."""
+def _register_native_dock(widget) -> Any:
+    """Register through DockWindowManager for a native dock."""
     main_window = Gui.getMainWindow()
     if main_window is None:
-        return None
+        raise RuntimeError("FreeCAD main window is not available.")
     add_dock_window = getattr(main_window, "addDockWindow", None)
     if not callable(add_dock_window):
-        return None
-    try:
-        return add_dock_window(widget, DOCK_NAME, "right")
-    except Exception as exc:
-        _warn(f"VibeCAD native dock registration failed: {exc}")
-        return None
-
-
-def _fallback_plain_dock(widget):
-    """Plain QDockWidget fallback for builds without MainWindow.addDockWindow."""
-    from PySide import QtCore, QtWidgets
-
-    main_window = Gui.getMainWindow()
-    dock = QtWidgets.QDockWidget("VibeCAD", main_window)
-    dock.setObjectName(DOCK_NAME)
-    dock.setWidget(widget)
-    main_window.addDockWidget(QtCore.Qt.RightDockWidgetArea, dock)
-    return dock
+        raise RuntimeError(
+            "FreeCAD main window does not expose DockWindowManager.addDockWindow."
+        )
+    return add_dock_window(widget, DOCK_NAME, "right")
 
 
 def _show_panel(text: str = "") -> None:
@@ -1705,9 +1691,13 @@ def _show_panel(text: str = "") -> None:
                 old.deleteLater()
             dock.setWidget(widget)
         else:
-            dock = _register_native_dock(widget)
-            if dock is None:
-                dock = _fallback_plain_dock(widget)
+            try:
+                dock = _register_native_dock(widget)
+            except Exception as exc:
+                message = f"VibeCAD assistant panel could not open: {exc}"
+                _warn(message)
+                _print(message)
+                return
             dock.setMinimumWidth(300)
 
     dock.show()

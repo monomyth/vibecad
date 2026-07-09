@@ -35,10 +35,6 @@ SKETCHER_PACK_TOOL_NAMES: tuple[str, ...] = (
     "sketcher.set_construction",
 )
 
-# PartDesign owns its sketches, so the PartDesign pack includes the sketcher
-# tool set in addition to the native feature tools. ``sketcher.create_sketch``
-# is deliberately excluded: inside PartDesign, sketches must be created with
-# ``partdesign.create_sketch`` so they belong to the active Body.
 PARTDESIGN_PACK_TOOL_NAMES: tuple[str, ...] = (
     "partdesign.get_bodies",
     "partdesign.find_subelements",
@@ -56,7 +52,12 @@ PARTDESIGN_PACK_TOOL_NAMES: tuple[str, ...] = (
     "partdesign.dressup",
     "partdesign.boolean_bodies",
     "partdesign.set_feature_dimensions",
-) + tuple(
+)
+
+# PartDesign owns its sketches, so it requires the Sketcher edit/query tools
+# while keeping sketch creation on ``partdesign.create_sketch``. These are
+# adjacent tools, not PartDesign-owned tools.
+PARTDESIGN_REQUIRED_ADJACENT_TOOL_NAMES: tuple[str, ...] = tuple(
     name for name in SKETCHER_PACK_TOOL_NAMES if name != "sketcher.create_sketch"
 )
 
@@ -116,6 +117,14 @@ class WorkbenchToolPack:
     object_types: tuple[str, ...] = ()
     object_templates: tuple[dict[str, str], ...] = ()
     tool_names: tuple[str, ...] = field(default=())
+    required_adjacent_tool_names: tuple[str, ...] = field(default=())
+
+    def provider_tool_names(self) -> tuple[str, ...]:
+        names: list[str] = []
+        for tool_name in self.tool_names + self.required_adjacent_tool_names:
+            if tool_name not in names:
+                names.append(tool_name)
+        return tuple(names)
 
     def summary(self) -> dict[str, object]:
         return {
@@ -126,6 +135,8 @@ class WorkbenchToolPack:
             "object_types": list(self.object_types),
             "object_templates": list(self.object_templates),
             "tool_names": list(self.tool_names),
+            "required_adjacent_tool_names": list(self.required_adjacent_tool_names),
+            "provider_tool_names": list(self.provider_tool_names()),
         }
 
 
@@ -242,10 +253,11 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
             {"name": "sketch", "object_type": "Sketcher::SketchObject"},
         ),
         tool_names=PARTDESIGN_PACK_TOOL_NAMES,
+        required_adjacent_tool_names=PARTDESIGN_REQUIRED_ADJACENT_TOOL_NAMES,
     ),
     "PartWorkbench": WorkbenchToolPack(
         "PartWorkbench",
-        "BREP",
+        "boundary-representation solids",
         "Direct BREP edit.",
         ("Part_",),
         ("Part::",),

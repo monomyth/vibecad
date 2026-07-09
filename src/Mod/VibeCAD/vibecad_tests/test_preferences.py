@@ -139,7 +139,7 @@ class TestVibeCADPreferences(unittest.TestCase):
                 sorted(
                     workbench
                     for workbench, pack in WORKBENCH_TOOL_PACKS.items()
-                    if tuple(pack.tool_names)
+                    if tuple(pack.provider_tool_names())
                 )
             ),
         )

@@ -63,7 +63,7 @@ class VibeCADSettings:
 
     @property
     def active_model(self) -> str:
-        """Model for the selected provider (legacy Model key is the OpenAI slot)."""
+        """Model for the selected provider."""
         if normalize_provider(self.provider) == "anthropic":
             return self.anthropic_model.strip() or DEFAULT_ANTHROPIC_MODEL
         return self.model.strip() or DEFAULT_MODEL
@@ -95,7 +95,7 @@ def native_tool_workbench_choices() -> tuple[str, ...]:
         sorted(
             workbench
             for workbench, pack in WORKBENCH_TOOL_PACKS.items()
-            if tuple(pack.tool_names)
+            if tuple(pack.provider_tool_names())
         )
     )
 
@@ -250,7 +250,7 @@ class VibeCADPreferencesPage:
         self.openai_base_url.setToolTip(
             "Override the OpenAI API endpoint (include the /v1 segment). "
             "Leave blank to use the official endpoint. Use this to point at "
-            "a local or OpenAI-compatible server."
+            "a local server that implements the OpenAI API."
         )
         layout.addRow("OpenAI base URL", self.openai_base_url)
 
