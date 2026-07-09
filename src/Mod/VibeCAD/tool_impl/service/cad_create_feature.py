@@ -28,8 +28,8 @@ TOOL_SPEC = {
     "description": (
         "Create a native FreeCAD feature from named design intent: prismatic "
         "pad/pocket, revolve/groove, loft, sweep, pattern, or finishing "
-        "dressup. The tool closes sketches when needed and returns feature "
-        "effect/shape verification."
+        "dressup. The tool closes required sketches before feature creation "
+        "and blocks instead of continuing when any sketch cannot close cleanly."
     ),
     "safety": "SAFE_WRITE",
     "parameters": {
@@ -80,10 +80,69 @@ TOOL_SPEC = {
 }
 
 
-def _close_profile_if_present(service: Any, profile: str | None) -> dict[str, Any] | None:
-    if not str(profile or "").strip():
-        return None
-    return call_backend(service, "sketcher.close_sketch", sketch_name=str(profile).strip())
+def _backend_error(result: dict[str, Any]) -> str:
+    if not isinstance(result, dict):
+        return ""
+    error = str(result.get("error") or "").strip()
+    if error:
+        return error
+    transaction = result.get("transaction")
+    if isinstance(transaction, dict):
+        error = str(transaction.get("error") or "").strip()
+        if error:
+            return error
+    return ""
+
+
+def _close_required_profiles(
+    service: Any,
+    profiles: list[str],
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    results: list[dict[str, Any]] = []
+    for profile in profiles:
+        clean_profile = str(profile or "").strip()
+        if not clean_profile:
+            continue
+        result = call_backend(
+            service,
+            "sketcher.close_sketch",
+            sketch_name=clean_profile,
+        )
+        results.append(
+            {
+                "profile": clean_profile,
+                "result": result,
+            }
+        )
+        if not backend_ok(result):
+            error = _backend_error(result) or "Sketch could not be closed cleanly."
+            return results, {
+                "ok": False,
+                "error": (
+                    f"Feature creation blocked because required sketch "
+                    f"{clean_profile!r} could not be closed: {error}"
+                ),
+                "retry_same_call": False,
+                "failed_profile": clean_profile,
+                "profile_close_results": results,
+                "repair_actions": [
+                    {
+                        "tool": "cad.verify_design",
+                        "why": (
+                            "Inspect report errors, sketch profile closure, and "
+                            "solver state before another feature write."
+                        ),
+                    },
+                    {
+                        "tool": "cad.create_profile",
+                        "why": (
+                            "Repair or recreate the failing profile with explicit "
+                            "geometry that matches the intended feature."
+                        ),
+                    },
+                ],
+            }
+    return results, None
 
 
 def run(
@@ -127,12 +186,22 @@ def run(
         return {"ok": False, "error": "purpose is required."}
     clean_label = str(label or "").strip() or f"VibeCAD {op.replace('_', ' ').title()}"
 
-    close_result = None
+    profile_close_results: list[dict[str, Any]] = []
     backend_result: dict[str, Any]
     if op in {"add_prismatic", "cut_prismatic"}:
         if not str(profile or "").strip():
             return {"ok": False, "error": "profile is required for prismatic features."}
-        close_result = _close_profile_if_present(service, profile)
+        profile_close_results, close_error = _close_required_profiles(
+            service,
+            [str(profile).strip()],
+        )
+        if close_error is not None:
+            return {
+                **close_error,
+                "operation": op,
+                "purpose": clean_purpose,
+                "label": clean_label,
+            }
         backend_result = call_backend(
             service,
             "partdesign.extrude",
@@ -146,7 +215,17 @@ def run(
     elif op in {"add_revolved", "cut_revolved"}:
         if not str(profile or "").strip():
             return {"ok": False, "error": "profile is required for revolved features."}
-        close_result = _close_profile_if_present(service, profile)
+        profile_close_results, close_error = _close_required_profiles(
+            service,
+            [str(profile).strip()],
+        )
+        if close_error is not None:
+            return {
+                **close_error,
+                "operation": op,
+                "purpose": clean_purpose,
+                "label": clean_label,
+            }
         backend_result = call_backend(
             service,
             "partdesign.revolve",
@@ -162,8 +241,14 @@ def run(
         ordered = [str(item).strip() for item in (profiles or []) if str(item).strip()]
         if len(ordered) < 2:
             return {"ok": False, "error": "profiles must contain at least two sketch names for loft."}
-        for sketch in ordered:
-            call_backend(service, "sketcher.close_sketch", sketch_name=sketch)
+        profile_close_results, close_error = _close_required_profiles(service, ordered)
+        if close_error is not None:
+            return {
+                **close_error,
+                "operation": op,
+                "purpose": clean_purpose,
+                "label": clean_label,
+            }
         backend_result = call_backend(
             service,
             "partdesign.loft_profiles",
@@ -178,10 +263,17 @@ def run(
         ordered_sections = [str(item).strip() for item in (profiles or []) if str(item).strip()]
         if not str(profile or "").strip() or not str(spine or "").strip():
             return {"ok": False, "error": "profile and spine are required for sweep."}
-        call_backend(service, "sketcher.close_sketch", sketch_name=str(profile).strip())
-        call_backend(service, "sketcher.close_sketch", sketch_name=str(spine).strip())
-        for section in ordered_sections:
-            call_backend(service, "sketcher.close_sketch", sketch_name=section)
+        profile_close_results, close_error = _close_required_profiles(
+            service,
+            [str(profile).strip(), str(spine).strip(), *ordered_sections],
+        )
+        if close_error is not None:
+            return {
+                **close_error,
+                "operation": op,
+                "purpose": clean_purpose,
+                "label": clean_label,
+            }
         backend_result = call_backend(
             service,
             "partdesign.sweep_profile",
@@ -299,7 +391,7 @@ def run(
         "operation": op,
         "purpose": clean_purpose,
         "label": clean_label,
-        "close_result": close_result,
+        "profile_close_results": profile_close_results,
         "backend_result": backend_result,
         "repair_actions": repair_actions,
         "design_memory_result": memory,

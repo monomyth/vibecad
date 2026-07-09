@@ -871,6 +871,50 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         self.assertEqual(thickness_call[1]["mode"], 0)
         self.assertEqual(thickness_call[1]["join"], 2)
 
+    def test_cad_create_feature_blocks_when_required_profile_close_fails(self):
+        from tool_impl.service import cad_create_feature
+
+        class FakeRegistry:
+            def __init__(self):
+                self.calls = []
+
+            def call(self, tool_name, **kwargs):
+                self.calls.append((tool_name, kwargs))
+                if tool_name == "sketcher.close_sketch":
+                    sketch_name = kwargs.get("sketch_name")
+                    if sketch_name == "BadSection":
+                        return {
+                            "ok": False,
+                            "error": "Sketch is not closed.",
+                            "profile_status": {"closed_profile": False},
+                        }
+                    return {"ok": True, "profile_status": {"closed_profile": True}}
+                if tool_name == "core.update_design_memory":
+                    return {"ok": True}
+                return {"ok": True, "tool": tool_name}
+
+        registry = FakeRegistry()
+        service = types.SimpleNamespace(registry=registry)
+
+        result = cad_create_feature.run(
+            service,
+            operation="add_loft",
+            purpose="Loft only after every section sketch closes cleanly.",
+            profiles=["RootSection", "BadSection", "TipSection"],
+        )
+
+        self.assertFalse(result["ok"], result)
+        self.assertFalse(result["retry_same_call"], result)
+        self.assertEqual(result["failed_profile"], "BadSection")
+        self.assertIn("could not be closed", result["error"])
+        called_tools = [tool_name for tool_name, _ in registry.calls]
+        self.assertEqual(
+            called_tools,
+            ["sketcher.close_sketch", "sketcher.close_sketch"],
+        )
+        self.assertNotIn("partdesign.loft_profiles", called_tools)
+        self.assertNotIn("core.update_design_memory", called_tools)
+
     def test_provider_tool_modules_cover_provider_safe_tools(self):
         from provider_tools import registered_tool_names
 
