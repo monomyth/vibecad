@@ -90,20 +90,23 @@ class TestVibeCADWorkbenchPacks(SettingsSnapshotTestCase):
         self.assertEqual(missing, [])
 
     def test_provider_registry_service_registry_and_packs_are_consistent(self):
-        from provider_tools import registered_tool_names
+        from provider_tools import (
+            all_tool_names,
+            provider_only_tool_names,
+            registered_tool_names,
+        )
 
         provider_names = set(registered_tool_names())
+        provider_only_names = set(provider_only_tool_names())
         service = VibeCADService()
         service_names = set(service.registry.names())
 
-        # Every provider-exposed tool must have a service implementation,
-        # except provider-side context/preflight tools.
-        provider_only = provider_names - service_names
-        self.assertEqual(
-            {"core.submit_design_preflight"},
-            provider_only,
-            sorted(provider_only),
-        )
+        self.assertEqual({"core.submit_design_preflight"}, provider_only_names)
+        self.assertTrue(provider_only_names.isdisjoint(provider_names))
+        self.assertEqual(provider_names | provider_only_names, set(all_tool_names()))
+
+        # Every normal provider-exposed tool must have a service implementation.
+        self.assertEqual(set(), provider_names - service_names)
 
         # Service-only tools (no provider surface) are a small known set.
         service_only = service_names - provider_names

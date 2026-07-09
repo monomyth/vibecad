@@ -7,7 +7,7 @@ from __future__ import annotations
 from importlib import import_module
 
 
-TOOL_MODULES = {
+SERVICE_TOOL_MODULES = {
     "cad.inspect_state": "provider_tools.cad_inspect_state",
     "cad.define_component": "provider_tools.cad_define_component",
     "cad.define_interface": "provider_tools.cad_define_interface",
@@ -16,7 +16,6 @@ TOOL_MODULES = {
     "cad.create_profile": "provider_tools.cad_create_profile",
     "cad.create_feature": "provider_tools.cad_create_feature",
     "cad.verify_design": "provider_tools.cad_verify_design",
-    "core.submit_design_preflight": "provider_tools.core_submit_design_preflight",
     "core.update_design_memory": "provider_tools.core_update_design_memory",
     "core.capture_view_screenshot": "provider_tools.core_capture_view_screenshot",
     "core.set_view": "provider_tools.core_set_view",
@@ -86,6 +85,15 @@ TOOL_MODULES = {
     "model.build_from_script": "provider_tools.model_build_from_script",
 }
 
+PROVIDER_ONLY_TOOL_MODULES = {
+    "core.submit_design_preflight": "provider_tools.core_submit_design_preflight",
+}
+
+TOOL_MODULES = {
+    **SERVICE_TOOL_MODULES,
+    **PROVIDER_ONLY_TOOL_MODULES,
+}
+
 
 def create_tool(schema, conn, FunctionTool):
     tool_name = str(schema.get("name", ""))
@@ -97,4 +105,12 @@ def create_tool(schema, conn, FunctionTool):
 
 
 def registered_tool_names():
+    return set(SERVICE_TOOL_MODULES)
+
+
+def provider_only_tool_names():
+    return set(PROVIDER_ONLY_TOOL_MODULES)
+
+
+def all_tool_names():
     return set(TOOL_MODULES)

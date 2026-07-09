@@ -25,6 +25,7 @@ from VibeCADProvider import (
     _write_openai_request_dump,
 )
 from VibeCADSession import (
+    DESIGN_PREFLIGHT_SUBMIT_SCHEMA,
     _refresh_provider_context,
     make_provider_tool_runner,
     provider_tool_scope_for_context,
@@ -80,6 +81,39 @@ class TestVibeCADProviderPayloads(SettingsSnapshotTestCase):
         self.assertLessEqual(max(len(item) for item in names), 64)
         self.assertEqual(len(names), len(set(names)))
         self.assertFalse([item for item in names if " " in item or "." in item])
+
+    def test_provider_only_preflight_tool_is_creatable(self):
+        from provider_tools import (
+            create_tool,
+            provider_only_tool_names,
+            registered_tool_names,
+        )
+
+        class FakeFunctionTool:
+            def __init__(
+                self,
+                name,
+                description,
+                params_json_schema,
+                on_invoke_tool,
+                strict_json_schema,
+            ):
+                self.name = name
+                self.description = description
+                self.params_json_schema = params_json_schema
+                self.on_invoke_tool = on_invoke_tool
+                self.strict_json_schema = strict_json_schema
+
+        class FakeConn:
+            def send(self, _message):
+                raise AssertionError("tool should not be invoked while building request schema")
+
+        self.assertIn("core.submit_design_preflight", provider_only_tool_names())
+        self.assertNotIn("core.submit_design_preflight", registered_tool_names())
+        tool = create_tool(DESIGN_PREFLIGHT_SUBMIT_SCHEMA, FakeConn(), FakeFunctionTool)
+        request_schema = _provider_tool_request_schema(tool)
+        self.assertEqual(request_schema["function_name"], "core_submit_design_preflight")
+        self.assertTrue(request_schema["strict_json_schema"])
 
     def test_provider_tool_results_keep_readable_canonical_keys(self):
         long_reason = " ".join(["profile validation explanation"] * 40)
