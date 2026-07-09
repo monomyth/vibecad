@@ -240,7 +240,7 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
             self.assertTrue(point_distance["ok"], point_distance)
             point_on_axis = service.registry.call('sketcher.add_constraint', constraint_type='PointOnObject', sketch_name=sketch.Name, first_geometry_handle='name:upright_edge', first_point='start', second_geometry_handle='axis:H')
             self.assertTrue(point_on_axis["ok"], point_on_axis)
-            angle = service.registry.call('sketcher.add_constraint', constraint_type='Angle', sketch_name=sketch.Name, first_geometry_handle='name:base_edge', second_geometry_handle='name:upright_edge', value=90)
+            angle = service.registry.call('sketcher.add_constraint', constraint_type='Angle', sketch_name=sketch.Name, first_geometry_handle='name:base_edge', first_point='whole', second_geometry_handle='name:upright_edge', second_point='whole', value=90)
             self.assertTrue(angle["ok"], angle)
             block = service.registry.call('sketcher.add_constraint', constraint_type='Block', sketch_name=sketch.Name, first_geometry_handle='name:locator_circle')
             self.assertTrue(block["ok"], block)
@@ -1447,6 +1447,12 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
             properties = service.registry.get("sketcher.add_constraint").to_schema()[
                 "parameters"
             ]["properties"]
+            required = set(
+                service.registry.get("sketcher.add_constraint").to_schema()[
+                    "parameters"
+                ]["required"]
+            )
+            self.assertTrue({"sketch_name", "constraint_type"} <= required)
             self.assertNotIn("first_pos", properties)
             self.assertNotIn("second_pos", properties)
             self.assertNotIn("third_pos", properties)
@@ -1487,6 +1493,28 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
                 geometry_handle="horizontal_axis",
             )
             self.assertFalse(old_axis_alias["ok"], old_axis_alias)
+            missing_sketch = service.registry.call(
+                "sketcher.add_constraint",
+                constraint_type="Lock",
+                first_geometry=0,
+                first_point="center",
+                x=5,
+                y=2,
+            )
+            self.assertFalse(missing_sketch["ok"], missing_sketch)
+            self.assertIn("sketch_name is required", missing_sketch["error"])
+            self.assertFalse(missing_sketch.get("retry_same_call", True))
+            missing_point = service.registry.call(
+                "sketcher.add_constraint",
+                constraint_type="Lock",
+                sketch_name=sketch_name,
+                first_geometry=0,
+                x=5,
+                y=2,
+            )
+            self.assertFalse(missing_point["ok"], missing_point)
+            self.assertIn("requires explicit point role", missing_point["error"])
+            self.assertFalse(missing_point.get("retry_same_call", True))
             lock = service.registry.call(
                 "sketcher.add_constraint",
                 constraint_type="Lock",

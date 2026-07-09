@@ -25,7 +25,7 @@ TOOL_SPEC = {
         "properties": {
             "sketch_name": {
                 "type": "string",
-                "description": "Sketch object name or label. Defaults to the active edit sketch or first sketch.",
+                "description": "Explicit sketch object name or label. Required; this tool never chooses a sketch implicitly.",
             },
             "constraint_type": {
                 "type": "string",
@@ -77,7 +77,7 @@ TOOL_SPEC = {
             "x": {"type": "number", "description": "Lock only: exact sketch X coordinate in mm."},
             "y": {"type": "number", "description": "Lock only: exact sketch Y coordinate in mm."},
         },
-        "required": ["constraint_type"],
+        "required": ["sketch_name", "constraint_type"],
     },
 }
 
@@ -101,6 +101,16 @@ SUPPORTED_CONSTRAINTS = {
     "Angle",
     "Lock",
 }
+
+
+def _error(message: str, **extra: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "ok": False,
+        "error": message,
+        "retry_same_call": False,
+    }
+    payload.update(extra)
+    return payload
 
 
 def _required_int(name: str, raw_value: int | None, constraint_type: str) -> int:
@@ -159,45 +169,28 @@ def _resolve_point_roles(
     position integers are resolved internally here and never exposed as
     user/model arguments.
     """
-    defaults: dict[str, tuple[str | None, str | None, str | None]] = {
-        "Coincident": ("end", "start", None),
-        "PointOnObject": ("start", None, None),
-        "Symmetric": ("start", "start", "whole"),
-        "Lock": ("start", None, None),
-        "Distance": ("start", "start", None),
-        "DistanceX": ("start", "start", None),
-        "DistanceY": ("start", "start", None),
-        "Angle": ("whole", "whole", None),
-    }
-    first_default, second_default, third_default = defaults.get(constraint_type, (None, None, None))
-    has_second = second_geometry is not None or bool(second_geometry_handle)
-    # Distance and Angle accept a single-element form; only default the first pos when the
-    # constraint is actually point-anchored (a role was named or a second target exists).
-    first_needs_default = first_default is not None and (
-        constraint_type not in {"Distance", "Angle"} or first_point is not None or has_second
-    )
     first_pos = None
-    if first_point is not None or first_needs_default:
+    if first_point is not None:
         first_pos = optional_point_position(
             first_point,
             first_geometry_handle,
-            _geometry_default_role(sketch, first_geometry, first_default or "start"),
+            "whole",
             _geometry_kind(sketch, first_geometry),
         )
     second_pos = None
-    if second_point is not None or (second_default is not None and has_second):
+    if second_point is not None:
         second_pos = optional_point_position(
             second_point,
             second_geometry_handle,
-            _geometry_default_role(sketch, second_geometry, second_default or "start"),
+            "whole",
             _geometry_kind(sketch, second_geometry),
         )
     third_pos = None
-    if third_point is not None or third_default is not None:
+    if third_point is not None:
         third_pos = optional_point_position(
             third_point,
             third_geometry_handle,
-            _geometry_default_role(sketch, third_geometry, third_default or "whole"),
+            "whole",
             _geometry_kind(sketch, third_geometry),
         )
     return first_pos, second_pos, third_pos
@@ -213,17 +206,98 @@ def _geometry_kind(sketch: Any, geometry_index: int | None) -> str | None:
     return geometry[index].__class__.__name__
 
 
-def _geometry_default_role(sketch: Any, geometry_index: int | None, default: str) -> str:
-    kind = str(_geometry_kind(sketch, geometry_index) or "").lower()
-    if kind in {"circle", "part::geomcircle", "ellipse", "part::geomellipse"} and default in {"start", "end"}:
-        return "center"
-    return default
+def _validate_point_role_contract(
+    constraint_type: str,
+    first_point: str | None,
+    has_second: bool,
+    second_point: str | None,
+    has_third: bool,
+    third_point: str | None,
+) -> dict[str, Any] | None:
+    missing: list[str] = []
+    unused: list[str] = []
+    if constraint_type == "Coincident":
+        if first_point is None:
+            missing.append("first_point")
+        if second_point is None:
+            missing.append("second_point")
+    elif constraint_type == "PointOnObject":
+        if first_point is None:
+            missing.append("first_point")
+        if second_point is not None:
+            unused.append("second_point")
+    elif constraint_type == "Symmetric":
+        if first_point is None:
+            missing.append("first_point")
+        if second_point is None:
+            missing.append("second_point")
+        if third_point is None:
+            missing.append("third_point")
+    elif constraint_type == "Lock":
+        if first_point is None:
+            missing.append("first_point")
+        if second_point is not None:
+            unused.append("second_point")
+        if third_point is not None:
+            unused.append("third_point")
+    elif constraint_type in {"DistanceX", "DistanceY"}:
+        if first_point is None:
+            missing.append("first_point")
+        if has_second and second_point is None:
+            missing.append("second_point")
+        if not has_second and second_point is not None:
+            unused.append("second_point")
+    elif constraint_type == "Distance":
+        if has_second:
+            if first_point is None:
+                missing.append("first_point")
+            if second_point is None:
+                missing.append("second_point")
+        else:
+            if first_point is not None:
+                unused.append("first_point")
+            if second_point is not None:
+                unused.append("second_point")
+    elif constraint_type == "Angle":
+        if not has_second and (first_point is not None or second_point is not None):
+            if first_point is not None:
+                unused.append("first_point")
+            if second_point is not None:
+                unused.append("second_point")
+        if has_second:
+            if first_point is None:
+                missing.append("first_point")
+            if second_point is None:
+                missing.append("second_point")
+    else:
+        for field_name, field_value in (
+            ("first_point", first_point),
+            ("second_point", second_point),
+            ("third_point", third_point),
+        ):
+            if field_value is not None:
+                unused.append(field_name)
+    if not has_third and third_point is not None:
+        unused.append("third_point")
+    if missing:
+        return _error(
+            f"{constraint_type} requires explicit point role(s): {', '.join(missing)}.",
+            constraint_type=constraint_type,
+            missing_point_roles=missing,
+        )
+    if unused:
+        return _error(
+            f"{constraint_type} does not use point role(s): {', '.join(sorted(set(unused)))}.",
+            constraint_type=constraint_type,
+            unused_point_roles=sorted(set(unused)),
+        )
+    return None
 
 
 def run(
     service: Any,
     sketch_name: str | None = None,
-    constraint_type: str = "Horizontal",
+    constraint_type: str | None = None,
     first_geometry: int | None = None,
     first_geometry_handle: str | None = None,
     first_point: str | None = None,
@@ -236,17 +310,27 @@ def run(
     value: float | None = None,
     x: float | None = None,
     y: float | None = None,
+    **kwargs: Any,
 ) -> dict[str, Any]:
+    if kwargs:
+        return _error(
+            "Unsupported sketcher.add_constraint parameter(s): "
+            + ", ".join(sorted(str(key) for key in kwargs))
+            + "."
+        )
+    if not str(sketch_name or "").strip():
+        return _error("sketch_name is required for sketcher.add_constraint.")
+    if constraint_type is None or not str(constraint_type).strip():
+        return _error("constraint_type is required for sketcher.add_constraint.")
     sketch = get_sketch(service, sketch_name)
     if sketch is None:
-        return no_sketch(sketch_name)
+        return {**no_sketch(sketch_name), "retry_same_call": False}
     clean_type = str(constraint_type or "").strip()
     if clean_type not in SUPPORTED_CONSTRAINTS:
-        return {
-            "ok": False,
-            "error": f"Unsupported Sketcher constraint type: {clean_type}",
-            "supported": sorted(SUPPORTED_CONSTRAINTS),
-        }
+        return _error(
+            f"Unsupported Sketcher constraint type: {clean_type}",
+            supported=sorted(SUPPORTED_CONSTRAINTS),
+        )
     try:
         first_geometry = resolve_geometry_index(service, sketch, first_geometry, first_geometry_handle)
         if second_geometry is not None or second_geometry_handle:
@@ -254,16 +338,25 @@ def run(
         if third_geometry is not None or third_geometry_handle:
             third_geometry = resolve_geometry_index(service, sketch, third_geometry, third_geometry_handle)
     except Exception as exc:
-        return {
-            "ok": False,
-            "error": str(exc),
-            "first_geometry": first_geometry,
-            "first_geometry_handle": first_geometry_handle,
-            "second_geometry": second_geometry,
-            "second_geometry_handle": second_geometry_handle,
-            "third_geometry": third_geometry,
-            "third_geometry_handle": third_geometry_handle,
-        }
+        return _error(
+            str(exc),
+            first_geometry=first_geometry,
+            first_geometry_handle=first_geometry_handle,
+            second_geometry=second_geometry,
+            second_geometry_handle=second_geometry_handle,
+            third_geometry=third_geometry,
+            third_geometry_handle=third_geometry_handle,
+        )
+    point_role_error = _validate_point_role_contract(
+        clean_type,
+        first_point,
+        second_geometry is not None,
+        second_point,
+        third_geometry is not None,
+        third_point,
+    )
+    if point_role_error is not None:
+        return point_role_error
     try:
         first_pos, second_pos, third_pos = _resolve_point_roles(
             sketch,
@@ -279,19 +372,18 @@ def run(
             third_geometry,
         )
     except ValueError as exc:
-        return {
-            "ok": False,
-            "error": str(exc),
-            "constraint_type": clean_type,
-            "first_geometry": first_geometry,
-            "second_geometry": second_geometry,
-            "third_geometry": third_geometry,
-            "required_next_action": {
+        return _error(
+            str(exc),
+            constraint_type=clean_type,
+            first_geometry=first_geometry,
+            second_geometry=second_geometry,
+            third_geometry=third_geometry,
+            required_next_action={
                 "tool": "sketcher.inspect_sketch",
                 "arguments": {"sketch_name": sketch.Name, "include": ["geometry"]},
                 "why": "Inspect geometry types and use a valid point role such as start/end for lines or center for circles.",
             },
-        }
+        )
 
     def _make_constraint():
         import FreeCAD as App
