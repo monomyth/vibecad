@@ -337,7 +337,7 @@ def _emit(progress_callback: ProgressCallback | None, event: dict[str, Any]) -> 
     progress_callback(event)
 
 
-_TRACE_ITEM_LIMIT = 16
+_TRACE_ITEM_LIMIT = 32
 _TRACE_STRING_LIMIT = 1400
 _TRACE_DEPTH_LIMIT = 6
 
@@ -414,44 +414,12 @@ def _bounded_trace_value(
 
 
 def _trace_result(payload: dict[str, Any]) -> dict[str, Any]:
-    failure_keys = (
-        "tool",
-        "failure_code",
-        "failure_stage",
-        "error",
-        "requested",
-        "normalized",
-        "observed",
-        "candidates",
-        "allowed_values",
-        "state_change",
-        "native_diagnostics",
-        "retry",
-    )
-    success_keys = (
-        "document",
-        "body",
-        "sketch",
-        "feature",
-        "operation",
-        "geometry_index",
-        "constraint_index",
-        "mutation",
-        "profile_status",
-        "solver_status",
-        "feature_effect",
-        "measurement",
-        "resolved_selection",
-        "state_change",
-        "answers",
-        "cancelled",
-    )
-    keys = failure_keys if not bool(payload.get("ok")) else success_keys
-    selected: dict[str, Any] = {"ok": bool(payload.get("ok"))}
-    for key in keys:
-        value = payload.get(key)
-        if value not in (None, "", [], {}):
-            selected[key] = value
+    selected = {
+        key: value
+        for key, value in payload.items()
+        if value not in (None, "", [], {})
+    }
+    selected["ok"] = bool(payload.get("ok"))
     truncated: list[dict[str, Any]] = []
     result = _bounded_trace_value(
         selected,

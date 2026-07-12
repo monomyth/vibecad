@@ -90,8 +90,10 @@ def shape_profile_diagnostics(obj: Any) -> dict[str, Any]:
             endpoints = [vector_values(first), vector_values(last)]
         try:
             wire_valid = bool(wire.isValid())
-        except Exception:
+            wire_valid_error = None
+        except Exception as exc:
             wire_valid = None
+            wire_valid_error = str(exc)
         wire_facts.append(
             {
                 "index": index,
@@ -99,6 +101,7 @@ def shape_profile_diagnostics(obj: Any) -> dict[str, Any]:
                 "vertex_count": len(wire_vertices),
                 "closed": closed,
                 "valid": wire_valid,
+                "validity_error": wire_valid_error,
                 "endpoints": endpoints,
                 "endpoint_gap_mm": endpoint_gap,
             }
@@ -320,18 +323,28 @@ def bound_box_summary(bound_box: Any) -> dict[str, Any] | None:
             "ylength": float(bound_box.YLength),
             "zlength": float(bound_box.ZLength),
         }
-    except Exception:
-        return None
+    except Exception as exc:
+        raise RuntimeError(f"FreeCAD could not read shape bounds: {exc}") from exc
 
 
 def shape_summary(obj: Any) -> dict[str, Any]:
     try:
         shape = getattr(obj, "Shape", None)
-    except Exception:
-        shape = None
+    except Exception as exc:
+        return {
+            "available": False,
+            "inspection_complete": False,
+            "solids": 0,
+            "faces": 0,
+            "edges": 0,
+            "vertices": 0,
+            "volume": 0.0,
+            "error": str(exc),
+        }
     if shape is None:
         return {
             "available": False,
+            "inspection_complete": True,
             "solids": 0,
             "faces": 0,
             "edges": 0,
@@ -341,6 +354,7 @@ def shape_summary(obj: Any) -> dict[str, Any]:
     try:
         summary = {
             "available": True,
+            "inspection_complete": True,
             "solids": len(getattr(shape, "Solids", []) or []),
             "faces": len(getattr(shape, "Faces", []) or []),
             "edges": len(getattr(shape, "Edges", []) or []),
@@ -350,6 +364,7 @@ def shape_summary(obj: Any) -> dict[str, Any]:
     except Exception as exc:
         return {
             "available": False,
+            "inspection_complete": False,
             "solids": 0,
             "faces": 0,
             "edges": 0,
@@ -359,8 +374,10 @@ def shape_summary(obj: Any) -> dict[str, Any]:
         }
     try:
         bound_box = bound_box_summary(getattr(shape, "BoundBox", None))
-    except Exception:
+    except Exception as exc:
         bound_box = None
+        summary["inspection_complete"] = False
+        summary["bound_box_error"] = str(exc)
     if bound_box:
         summary["bound_box"] = bound_box
     return summary
@@ -377,6 +394,8 @@ def shape_health(obj: Any) -> dict[str, Any]:
         "feature_state": state,
         "valid_non_null": bool(
             summary.get("available")
+            and summary.get("inspection_complete") is True
+            and state.get("inspection_complete") is True
             and not state.get("shape_null")
             and state.get("shape_valid") is True
             and not state.get("marked_invalid")
@@ -626,10 +645,12 @@ def feature_state_summary(feature: Any) -> dict[str, Any]:
     Captures FreeCAD's ``State`` flags (``Invalid``/``Touched``/...), whether
     the feature's own shape passes ``isValid()``, and the feature name.
     """
+    field_errors: list[dict[str, str]] = []
     try:
         state = [str(item) for item in (getattr(feature, "State", []) or [])]
-    except Exception:
+    except Exception as exc:
         state = []
+        field_errors.append({"field": "State", "error": str(exc)})
     shape_valid: bool | None = None
     shape_null = True
     try:
@@ -637,8 +658,9 @@ def feature_state_summary(feature: Any) -> dict[str, Any]:
         shape_null = shape is None or bool(shape.isNull())
         if not shape_null:
             shape_valid = bool(shape.isValid())
-    except Exception:
+    except Exception as exc:
         shape_valid = None
+        field_errors.append({"field": "Shape", "error": str(exc)})
     return {
         "name": getattr(feature, "Name", None),
         "label": getattr(feature, "Label", getattr(feature, "Name", None)),
@@ -647,6 +669,8 @@ def feature_state_summary(feature: Any) -> dict[str, Any]:
         "marked_invalid": any("Invalid" in item for item in state),
         "shape_null": shape_null,
         "shape_valid": shape_valid,
+        "inspection_complete": not field_errors,
+        "field_errors": field_errors,
     }
 
 
@@ -663,7 +687,11 @@ def invalid_partdesign_tip(body: Any) -> dict[str, Any] | None:
     }:
         return None
     state = feature_state_summary(tip)
-    if state.get("marked_invalid") or state.get("shape_valid") is False:
+    if (
+        state.get("inspection_complete") is not True
+        or state.get("marked_invalid")
+        or state.get("shape_valid") is not True
+    ):
         return state
     if type_id.startswith("PartDesign::") and state.get("shape_null"):
         return state
@@ -780,9 +808,11 @@ def partdesign_feature_response(
     feature_state = result.get("feature_state") or {}
     failure_kind = None
     if not ok:
-        if feature_state.get("marked_invalid"):
+        if feature_state.get("inspection_complete") is not True:
+            failure_kind = "feature_state_inspection_incomplete"
+        elif feature_state.get("marked_invalid"):
             failure_kind = "freecad_feature_invalid"
-        elif feature_state.get("shape_valid") is False:
+        elif feature_state.get("shape_valid") is not True:
             failure_kind = "freecad_shape_invalid"
         elif not bool((effect or {}).get("feature_has_shape")):
             failure_kind = "feature_has_no_shape"
@@ -989,9 +1019,11 @@ def part_feature_result(
     )
     shape_ok = (
         bool(shape.get("available"))
+        and shape.get("inspection_complete") is True
         and has_geometry
+        and feature_state.get("inspection_complete") is True
         and not feature_state.get("marked_invalid")
-        and feature_state.get("shape_valid") is not False
+        and feature_state.get("shape_valid") is True
     )
     envelope["ok"] = bool(envelope.get("ok")) and shape_ok
     envelope["operation"] = operation
@@ -1277,13 +1309,18 @@ def material_summary(service: Any) -> dict[str, Any]:
     return {"object_count": len(objects), "objects": objects}
 
 
-def placement_summary(obj: Any) -> dict[str, Any] | None:
+def placement_summary(obj: Any) -> dict[str, Any]:
     """JSON-safe snapshot of an object's stored local Placement property."""
     placement = getattr(obj, "Placement", None)
     if placement is None:
-        return None
+        return {
+            "supported": False,
+            "placement": None,
+            "reason": "Object has no native Placement property.",
+        }
     try:
         return {
+            "supported": True,
             "position": {
                 "x": float(placement.Base.x),
                 "y": float(placement.Base.y),
@@ -1296,8 +1333,8 @@ def placement_summary(obj: Any) -> dict[str, Any] | None:
             },
             "rotation_angle_degrees": math.degrees(float(placement.Rotation.Angle)),
         }
-    except Exception:
-        return None
+    except Exception as exc:
+        return {"supported": True, "placement": None, "error": str(exc)}
 
 
 def global_placement_summary(obj: Any) -> dict[str, Any]:

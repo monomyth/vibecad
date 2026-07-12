@@ -479,8 +479,11 @@ def _constraint_indices(raw_value: Any) -> int | list[int]:
         return []
     try:
         return int(raw_value)
-    except Exception:
-        return []
+    except (TypeError, ValueError) as exc:
+        raise TypeError(
+            "FreeCAD addConstraint() returned an unsupported constraint-index value: "
+            f"{raw_value!r}."
+        ) from exc
 
 
 def _name_geometry(service: Any, sketch: Any, indices: list[int], prefix: str) -> None:

@@ -102,7 +102,14 @@ App::DocumentObjectExecReturn* Thickness::execute()
         try {
             face = TopShape.getSubShape(it.c_str());
         }
-        catch (...) {
+        catch (const Base::Exception& e) {
+            return new App::DocumentObjectExecReturn(
+                std::string("Failed to resolve selected face '") + it + "': " + e.what());
+        }
+        catch (const Standard_Failure& e) {
+            return new App::DocumentObjectExecReturn(
+                std::string("Failed to resolve selected face '") + it + "': "
+                + e.GetMessageString());
         }
         if (face.IsNull()) {
             return new App::DocumentObjectExecReturn(
@@ -112,8 +119,9 @@ App::DocumentObjectExecReturn* Thickness::execute()
         // We found the sub element (face) so let's get its history index in our shape
         int index = TopShape.findAncestor(face, TopAbs_SOLID);
         if (!index) {
-            FC_WARN(getFullName() << ": Ignore non-solid face  " << it);
-            continue;
+            return new App::DocumentObjectExecReturn(
+                std::string("Selected face '") + it
+                + "' is not owned by a solid in the source shape");
         }
         closeFaces[index].emplace_back(face);
     }
@@ -162,7 +170,9 @@ App::DocumentObjectExecReturn* Thickness::execute()
             }
             catch (Standard_Failure& e) {
                 FC_ERR("Exception on making thick solid: " << e.GetMessageString());
-                return new App::DocumentObjectExecReturn("Failed to make thick solid");
+                return new App::DocumentObjectExecReturn(
+                    std::string("Failed to make thick solid for source solid ")
+                    + std::to_string(loopIndex) + ": " + e.GetMessageString());
             }
             if (mapIterator != closeFaces.end()) {
                 ++mapIterator;

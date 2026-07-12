@@ -609,7 +609,12 @@ def _resolve_sources(service: Any, feature_names: Any) -> dict[str, Any]:
         }:
             return _invalid(f"Object {name} is not a transformable PartDesign feature.")
         state = domain_runtime.feature_state_summary(feature)
-        if state.get("marked_invalid") or state.get("shape_null") or state.get("shape_valid") is False:
+        if (
+            state.get("inspection_complete") is not True
+            or state.get("marked_invalid")
+            or state.get("shape_null")
+            or state.get("shape_valid") is not True
+        ):
             return _invalid(f"Source feature {name} is invalid or has no shape.", feature_state=state)
         features.append(feature)
     return {"ok": True, "body": body, "features": features, "names": names}

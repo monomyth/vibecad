@@ -1106,8 +1106,12 @@ def _visible_container_closure(document: Any, object_names: list[str]) -> set[st
                 continue
             try:
                 candidate = method()
-            except Exception:
-                candidate = None
+            except Exception as exc:
+                raise RuntimeError(
+                    f"FreeCAD failed to resolve "
+                    f"{getattr(obj, 'Name', '<unnamed>')}'s parent with "
+                    f"{method_name}(): {exc}"
+                ) from exc
             if candidate is not None:
                 parent = candidate
                 break

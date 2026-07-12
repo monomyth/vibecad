@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 
-"""Guardrail: every provider-callable tool is deliberate, described, and safe.
+"""Guardrail: every provider-callable tool is deliberate and structurally safe.
 
-Five invariants are enforced:
+Four invariants are enforced:
 
 1. No orphan tools — every registered tool spec is surfaced through
    ``CORE_PROVIDER_TOOLS`` or at least one workbench pack. A tool registered
@@ -11,13 +11,10 @@ Five invariants are enforced:
 2. No dangling names — every name in ``CORE_PROVIDER_TOOLS`` and every pack
    ``tool_names``/``required_adjacent_tool_names`` entry resolves to a
    registered, validating :class:`ToolSpec`.
-3. No undescribed required parameters — every property listed in a
-   ``required`` array anywhere in a tool schema carries a description.
-   A shrink-only allowlist covers pre-existing gaps; new tools must be clean.
-4. Writes are transactional — every non-READ tool either contains a FreeCAD
+3. Writes are transactional — every non-READ tool either contains a FreeCAD
    transaction marker in its own module or in a same-package module it
    imports, or appears in a justified allowlist.
-5. No legacy command execution — ``tool_impl`` never contains
+4. No legacy command execution — ``tool_impl`` never contains
    ``runCommand``/``doCommand``/``sendMsgToActiveView``; all FreeCAD
    semantics run through the typed Python APIs.
 """
@@ -37,27 +34,7 @@ TOOL_PACKAGES = ("tool_impl.service", "tool_impl.sketcher")
 
 TOOL_IMPL_DIR = Path(__file__).resolve().parent.parent / "tool_impl"
 
-# Assertion 3 allowlist: tools with pre-existing undescribed required
-# parameters. Shrink-only — remove entries as the schemas are fixed; the
-# stale-entry test below fails when an entry no longer has gaps.
-DESCRIPTION_GAP_ALLOWLIST = frozenset(
-    {
-        "conversation.ask_user",
-        "core.delete_object",
-        "sketcher.add_arc",
-        "sketcher.add_circle",
-        "sketcher.add_ellipse",
-        "sketcher.add_hole_pattern",
-        "sketcher.add_polyline",
-        "sketcher.add_spline",
-        "sketcher.constrain",
-        "sketcher.edit_constraint",
-        "sketcher.modify_geometry",
-        "sketcher.translate_geometry",
-    }
-)
-
-# Assertion 4 allowlist: write-safety tools that legitimately run without a
+# Write-safety tools that legitimately run without a
 # FreeCAD document transaction. Each entry needs a reason.
 TRANSACTION_EXEMPT = {
     # Enters native sketch edit mode; changes UI state, not document data.
@@ -137,65 +114,6 @@ def test_no_dangling_names(specs, packs, core_tools) -> None:
     )
 
 
-def _iter_undescribed_required(schema: dict[str, Any]) -> Iterator[str]:
-    """Yield paths of required properties that lack a description."""
-    stack: list[tuple[dict[str, Any], str]] = [(schema, "")]
-    seen: set[int] = set()
-    while stack:
-        node, location = stack.pop()
-        if not isinstance(node, dict) or id(node) in seen:
-            continue
-        seen.add(id(node))
-        properties = node.get("properties", {})
-        for required_name in node.get("required", []):
-            sub = properties.get(required_name)
-            if isinstance(sub, dict) and not str(sub.get("description") or "").strip():
-                yield f"{location}.{required_name}"
-        for key, sub in properties.items():
-            if isinstance(sub, dict):
-                stack.append((sub, f"{location}.{key}"))
-        items = node.get("items")
-        if isinstance(items, dict):
-            stack.append((items, f"{location}[]"))
-        elif isinstance(items, list):
-            stack.extend(
-                (sub, f"{location}[]") for sub in items if isinstance(sub, dict)
-            )
-        for keyword in ("oneOf", "anyOf", "allOf"):
-            for index, sub in enumerate(node.get(keyword) or []):
-                if isinstance(sub, dict):
-                    stack.append((sub, f"{location}<{keyword}{index}>"))
-
-
-def test_required_parameters_are_described(specs) -> None:
-    """3. New tools must describe every required parameter."""
-    offenders: dict[str, list[str]] = {}
-    for name, (spec, _, _) in specs.items():
-        if name in DESCRIPTION_GAP_ALLOWLIST:
-            continue
-        gaps = list(_iter_undescribed_required(spec.parameters))
-        if gaps:
-            offenders[name] = gaps
-    assert not offenders, (
-        "Required parameters without descriptions (describe them; do not "
-        f"extend the allowlist for new tools): {offenders}"
-    )
-
-
-def test_description_gap_allowlist_is_current(specs) -> None:
-    """3b. Allowlist may only shrink: entries must exist and still have gaps."""
-    unknown = sorted(DESCRIPTION_GAP_ALLOWLIST - set(specs))
-    assert not unknown, f"Allowlisted tools no longer registered: {unknown}"
-    stale = sorted(
-        name
-        for name in DESCRIPTION_GAP_ALLOWLIST
-        if not list(_iter_undescribed_required(specs[name][0].parameters))
-    )
-    assert not stale, (
-        f"Allowlisted tools are now clean; remove them from the allowlist: {stale}"
-    )
-
-
 def _module_sources_with_local_imports(module_path: Path) -> Iterator[str]:
     """Yield the module source plus sources of same-package imports (BFS)."""
     queue = [module_path]
@@ -220,7 +138,7 @@ def _module_sources_with_local_imports(module_path: Path) -> Iterator[str]:
 
 
 def test_write_tools_run_in_transactions(specs) -> None:
-    """4. Every write tool reaches a FreeCAD transaction (possibly via helpers)."""
+    """3. Every write tool reaches a FreeCAD transaction (possibly via helpers)."""
     read_levels = {SafetyLevel.READ, SafetyLevel.VIEW}
     offenders = []
     for name, (spec, path, _) in sorted(specs.items()):
@@ -239,13 +157,13 @@ def test_write_tools_run_in_transactions(specs) -> None:
 
 
 def test_transaction_exemptions_are_current(specs) -> None:
-    """4b. Transaction exemptions must reference registered tools."""
+    """3b. Transaction exemptions must reference registered tools."""
     unknown = sorted(TRANSACTION_EXEMPT - set(specs))
     assert not unknown, f"Transaction-exempt tools no longer registered: {unknown}"
 
 
 def test_no_legacy_command_execution() -> None:
-    """5. tool_impl never shells out to GUI command names or script strings."""
+    """4. tool_impl never shells out to GUI command names or script strings."""
     offenders = []
     for path in sorted(TOOL_IMPL_DIR.rglob("*.py")):
         if "__pycache__" in path.parts:

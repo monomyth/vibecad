@@ -713,8 +713,10 @@ def _validate_faces(
         shape = getattr(obj, "Shape", None)
         try:
             element = shape.getElement(face_name) if shape is not None else None
-        except Exception:
-            element = None
+        except Exception as exc:
+            return [], details, (
+                f"FreeCAD failed while resolving {object_name}.{face_name}: {exc}"
+            )
         if element is None:
             return [], details, f"Face not found on {object_name}: {face_name}"
         reference = (object_name, face_name)

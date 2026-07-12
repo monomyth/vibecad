@@ -147,7 +147,7 @@ def run(
             {
                 "name": "surface_created",
                 "ok": int(shape.get("faces", 0)) > 0
-                and state.get("shape_valid") is not False
+                and state.get("shape_valid") is True
                 and not state.get("marked_invalid"),
                 "actual": shape,
             },

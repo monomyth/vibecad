@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import json
-import math
 from typing import Any
 
 from VibeCADTransactions import run_freecad_transaction
@@ -120,13 +119,22 @@ def geometry_metadata(sketch: Any) -> dict[str, Any]:
         return {"names": {}}
     try:
         parsed = json.loads(str(raw))
-    except Exception:
-        return {"names": {}}
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            f"Sketch {getattr(sketch, 'Name', '<unnamed>')} has invalid "
+            f"{GEOMETRY_METADATA_PROPERTY} JSON: {exc}"
+        ) from exc
     if not isinstance(parsed, dict):
-        return {"names": {}}
+        raise ValueError(
+            f"Sketch {getattr(sketch, 'Name', '<unnamed>')} has non-object "
+            f"{GEOMETRY_METADATA_PROPERTY} data."
+        )
     names = parsed.get("names")
     if not isinstance(names, dict):
-        parsed["names"] = {}
+        raise ValueError(
+            f"Sketch {getattr(sketch, 'Name', '<unnamed>')} has invalid "
+            f"{GEOMETRY_METADATA_PROPERTY}.names data."
+        )
     return parsed
 
 
@@ -144,14 +152,11 @@ def set_geometry_metadata(sketch: Any, metadata: dict[str, Any]) -> None:
 def _rounded_point(value: Any) -> list[float] | None:
     if value is None:
         return None
-    try:
-        return [
-            round(float(value[0]), 6),
-            round(float(value[1]), 6),
-            round(float(value[2]), 6),
-        ]
-    except Exception:
-        return None
+    return [
+        round(float(value[0]), 6),
+        round(float(value[1]), 6),
+        round(float(value[2]), 6),
+    ]
 
 
 def geometry_fingerprint(summary: dict[str, Any]) -> dict[str, Any]:
@@ -499,6 +504,7 @@ def subelement_references(obj: Any) -> list[dict[str, Any]]:
                     getattr(item, "Curve", getattr(item, "Surface", item))
                 ).__name__,
             }
+            field_errors: list[dict[str, str]] = []
             try:
                 center = getattr(item, "CenterOfMass", None)
                 if center is not None:
@@ -507,16 +513,18 @@ def subelement_references(obj: Any) -> list[dict[str, Any]]:
                         float(center.y),
                         float(center.z),
                     ]
-            except Exception:
-                pass
-            try:
-                entry["length"] = float(getattr(item, "Length"))
-            except Exception:
-                pass
-            try:
-                entry["area"] = float(getattr(item, "Area"))
-            except Exception:
-                pass
+            except Exception as exc:
+                field_errors.append({"field": "center", "error": str(exc)})
+            if prefix == "Edge":
+                try:
+                    entry["length"] = float(item.Length)
+                except Exception as exc:
+                    field_errors.append({"field": "length", "error": str(exc)})
+            if prefix == "Face":
+                try:
+                    entry["area"] = float(item.Area)
+                except Exception as exc:
+                    field_errors.append({"field": "area", "error": str(exc)})
             try:
                 bounds = item.BoundBox
                 entry["bounds"] = {
@@ -528,8 +536,10 @@ def subelement_references(obj: Any) -> list[dict[str, Any]]:
                         float(bounds.ZLength),
                     ],
                 }
-            except Exception:
-                pass
+            except Exception as exc:
+                field_errors.append({"field": "bounds", "error": str(exc)})
+            if field_errors:
+                entry["field_errors"] = field_errors
             refs.append(entry)
     return refs
 
@@ -537,10 +547,12 @@ def subelement_references(obj: Any) -> list[dict[str, Any]]:
 def solver_status(service: Any, sketch: Any | None) -> dict[str, Any]:
     if sketch is None:
         return {"found": False, "error": "Sketch not found."}
+    field_diagnostics: list[dict[str, str]] = []
     try:
         degrees_of_freedom = int(getattr(sketch, "DoF"))
-    except Exception:
+    except Exception as exc:
         degrees_of_freedom = None
+        field_diagnostics.append({"field": "DoF", "error": str(exc)})
     constraints = list(getattr(sketch, "Constraints", []) or [])
     geometry = list(getattr(sketch, "Geometry", []) or [])
     has_geometry = bool(geometry)
@@ -571,6 +583,7 @@ def solver_status(service: Any, sketch: Any | None) -> dict[str, Any]:
         "solver_message": None,
         "conflicting_constraint_indices": [],
         "redundant_constraint_indices": [],
+        "field_diagnostics": field_diagnostics,
     }
     for attr, key in (
         ("ConflictingConstraints", "conflicting_constraint_indices"),
@@ -578,342 +591,24 @@ def solver_status(service: Any, sketch: Any | None) -> dict[str, Any]:
     ):
         try:
             values = getattr(sketch, attr)
-        except Exception:
+        except Exception as exc:
+            field_diagnostics.append({"field": attr, "error": str(exc)})
             continue
         if values:
             try:
                 status[key] = [int(item) for item in values]
-            except Exception:
-                status[key] = list(values)
+            except Exception as exc:
+                field_diagnostics.append({"field": attr, "error": str(exc)})
     return status
-
-
-def _point_key(point: Any, tolerance: float = 1e-6) -> tuple[int, int, int]:
-    return (
-        int(round(float(point.x) / tolerance)),
-        int(round(float(point.y) / tolerance)),
-        int(round(float(point.z) / tolerance)),
-    )
-
-
-def _point_list(point: Any) -> list[float]:
-    return [float(point.x), float(point.y), float(point.z)]
-
-
-def _distance(a: Any, b: Any) -> float:
-    return math.sqrt(
-        (float(a.x) - float(b.x)) ** 2
-        + (float(a.y) - float(b.y)) ** 2
-        + (float(a.z) - float(b.z)) ** 2
-    )
-
-
-def _line_segment_intersection_2d(
-    a1: Any, a2: Any, b1: Any, b2: Any, tolerance: float
-) -> dict[str, Any] | None:
-    x1, y1 = float(a1.x), float(a1.y)
-    x2, y2 = float(a2.x), float(a2.y)
-    x3, y3 = float(b1.x), float(b1.y)
-    x4, y4 = float(b2.x), float(b2.y)
-    den = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
-    if abs(den) <= tolerance:
-        return None
-    px = ((x1 * y2 - y1 * x2) * (x3 - x4) - (x1 - x2) * (x3 * y4 - y3 * x4)) / den
-    py = ((x1 * y2 - y1 * x2) * (y3 - y4) - (y1 - y2) * (x3 * y4 - y3 * x4)) / den
-
-    def between(value: float, lo: float, hi: float) -> bool:
-        return min(lo, hi) + tolerance < value < max(lo, hi) - tolerance
-
-    if (
-        between(px, x1, x2)
-        and between(py, y1, y2)
-        and between(px, x3, x4)
-        and between(py, y3, y4)
-    ):
-        return {"point": [px, py, 0.0]}
-    return None
-
-
-def profile_validation_deep(
-    service: Any, sketch: Any | None, tolerance: float = 1e-6
-) -> dict[str, Any]:
-    if sketch is None:
-        return {"found": False, "error": "Sketch not found."}
-    base = profile_validation(service, sketch)
-    summary = service.sketcher_summary(getattr(sketch, "Name", None))
-    geometry_summaries = summary.get("geometry", [])
-    geometry = list(getattr(sketch, "Geometry", []) or [])
-    nonconstruction_edges: list[dict[str, Any]] = []
-    endpoint_nodes: dict[tuple[int, int, int], dict[str, Any]] = {}
-    tiny_edges: list[dict[str, Any]] = []
-    duplicate_edges: list[dict[str, Any]] = []
-    seen_edge_keys: dict[tuple[tuple[int, int, int], tuple[int, int, int]], int] = {}
-
-    for index, item in enumerate(geometry):
-        try:
-            if bool(sketch.getConstruction(index)):
-                continue
-        except Exception:
-            pass
-        start = getattr(item, "StartPoint", None)
-        end = getattr(item, "EndPoint", None)
-        if start is None or end is None:
-            continue
-        geometry_summary = service._geometry_summary(item, index, sketch)
-        stable_handle = str(geometry_summary["handle"])
-        length = float(
-            geometry_summary.get("curve_length")
-            if geometry_summary.get("curve_length") is not None
-            else _distance(start, end)
-        )
-        start_key = _point_key(start, tolerance)
-        end_key = _point_key(end, tolerance)
-        edge = {
-            "geometry_index": index,
-            "geometry_handle": stable_handle,
-            "type": item.__class__.__name__,
-            "start": _point_list(start),
-            "end": _point_list(end),
-            "length": length,
-            "start_node": str(start_key),
-            "end_node": str(end_key),
-            "_start_key": start_key,
-            "_end_key": end_key,
-        }
-        nonconstruction_edges.append(edge)
-        if length <= tolerance:
-            tiny_edges.append(edge)
-        for role, key, point in (("start", start_key, start), ("end", end_key, end)):
-            node = endpoint_nodes.setdefault(
-                key, {"node": str(key), "point": _point_list(point), "endpoints": []}
-            )
-            node["endpoints"].append(
-                {
-                    "geometry_index": index,
-                    "geometry_handle": stable_handle,
-                    "role": role,
-                }
-            )
-        unordered_key = tuple(sorted((start_key, end_key)))
-        if unordered_key in seen_edge_keys:
-            duplicate_edges.append(
-                {
-                    "first_geometry_index": seen_edge_keys[unordered_key],
-                    "first_geometry_handle": geometry_handle(
-                        sketch, seen_edge_keys[unordered_key]
-                    ),
-                    "second_geometry_index": index,
-                    "second_geometry_handle": stable_handle,
-                }
-            )
-        else:
-            seen_edge_keys[unordered_key] = index
-
-    open_nodes = [
-        node for node in endpoint_nodes.values() if len(node["endpoints"]) == 1
-    ]
-    t_junctions = [
-        node for node in endpoint_nodes.values() if len(node["endpoints"]) > 2
-    ]
-    connected_components: list[dict[str, Any]] = []
-    adjacency: dict[tuple[int, int, int], set[tuple[int, int, int]]] = {}
-    edge_by_nodes: dict[
-        tuple[tuple[int, int, int], tuple[int, int, int]], list[int]
-    ] = {}
-    for edge in nonconstruction_edges:
-        start_key = edge["_start_key"]
-        end_key = edge["_end_key"]
-        adjacency.setdefault(start_key, set()).add(end_key)
-        adjacency.setdefault(end_key, set()).add(start_key)
-        edge_by_nodes.setdefault((start_key, end_key), []).append(
-            edge["geometry_index"]
-        )
-        edge_by_nodes.setdefault((end_key, start_key), []).append(
-            edge["geometry_index"]
-        )
-
-    visited: set[tuple[int, int, int]] = set()
-    for start_key in adjacency:
-        if start_key in visited:
-            continue
-        stack = [start_key]
-        nodes: set[tuple[int, int, int]] = set()
-        edge_indices: set[int] = set()
-        while stack:
-            key = stack.pop()
-            if key in nodes:
-                continue
-            nodes.add(key)
-            for neighbor in adjacency.get(key, set()):
-                edge_indices.update(edge_by_nodes.get((key, neighbor), []))
-                if neighbor not in nodes:
-                    stack.append(neighbor)
-        visited.update(nodes)
-        node_degrees = [len(adjacency.get(key, set())) for key in nodes]
-        connected_components.append(
-            {
-                "node_count": len(nodes),
-                "edge_count": len(edge_indices),
-                "geometry_indices": sorted(edge_indices),
-                "geometry_handles": [
-                    f"geometry:{index}" for index in sorted(edge_indices)
-                ],
-                "open_node_count": sum(
-                    1
-                    for key in nodes
-                    if len(endpoint_nodes.get(key, {}).get("endpoints", [])) == 1
-                ),
-                "closed_loop_candidate": bool(
-                    nodes and all(degree == 2 for degree in node_degrees)
-                ),
-            }
-        )
-
-    line_intersections: list[dict[str, Any]] = []
-    for offset, first in enumerate(nonconstruction_edges):
-        first_geo = geometry[first["geometry_index"]]
-        if first_geo.__class__.__name__ != "LineSegment":
-            continue
-        for second in nonconstruction_edges[offset + 1 :]:
-            second_geo = geometry[second["geometry_index"]]
-            if second_geo.__class__.__name__ != "LineSegment":
-                continue
-            intersection = _line_segment_intersection_2d(
-                getattr(first_geo, "StartPoint"),
-                getattr(first_geo, "EndPoint"),
-                getattr(second_geo, "StartPoint"),
-                getattr(second_geo, "EndPoint"),
-                tolerance,
-            )
-            if intersection:
-                intersection.update(
-                    {
-                        "first_geometry_index": first["geometry_index"],
-                        "first_geometry_handle": first["geometry_handle"],
-                        "second_geometry_index": second["geometry_index"],
-                        "second_geometry_handle": second["geometry_handle"],
-                    }
-                )
-                line_intersections.append(intersection)
-
-    blockers = []
-    if open_nodes:
-        blockers.append(
-            {"severity": "error", "kind": "open_endpoints", "count": len(open_nodes)}
-        )
-    if tiny_edges:
-        blockers.append(
-            {
-                "severity": "error",
-                "kind": "tiny_or_zero_length_edges",
-                "count": len(tiny_edges),
-            }
-        )
-    if duplicate_edges:
-        blockers.append(
-            {
-                "severity": "warning",
-                "kind": "duplicate_edges",
-                "count": len(duplicate_edges),
-            }
-        )
-    if t_junctions:
-        blockers.append(
-            {
-                "severity": "warning",
-                "kind": "t_junction_or_nonmanifold_nodes",
-                "count": len(t_junctions),
-            }
-        )
-    if line_intersections:
-        blockers.append(
-            {
-                "severity": "warning",
-                "kind": "line_self_intersections",
-                "count": len(line_intersections),
-            }
-        )
-    error_blockers = [item for item in blockers if item.get("severity") == "error"]
-
-    return {
-        **base,
-        "ok": True,
-        "tolerance": float(tolerance),
-        "geometry": geometry_summaries,
-        "nonconstruction_edge_count": len(nonconstruction_edges),
-        "nonconstruction_edges": [
-            {key: value for key, value in edge.items() if not str(key).startswith("_")}
-            for edge in nonconstruction_edges
-        ],
-        "endpoint_node_count": len(endpoint_nodes),
-        "open_nodes": open_nodes,
-        "t_junction_nodes": t_junctions,
-        "tiny_edges": tiny_edges,
-        "duplicate_edges": duplicate_edges,
-        "line_self_intersections": line_intersections,
-        "connected_components": connected_components,
-        "wire_count": base.get("wire_count"),
-        "closed_wire_count": base.get("closed_wire_count"),
-        "face_build_errors": base.get("face_build_errors"),
-        "feature_readiness": {
-            "pad": bool(base.get("ready_for_pad")) and not error_blockers,
-            "pocket": bool(base.get("ready_for_pocket")) and not error_blockers,
-            "blockers": blockers,
-        },
-    }
 
 
 def profile_validation(service: Any, sketch: Any | None) -> dict[str, Any]:
     if sketch is None:
         return {"found": False, "error": "Sketch not found."}
-    geometry = list(getattr(sketch, "Geometry", []) or [])
-    shape = getattr(sketch, "Shape", None)
-    edges = list(getattr(shape, "Edges", []) or []) if shape is not None else []
-    endpoints: list[dict[str, Any]] = []
-    endpoint_counts: dict[tuple[float, float, float], int] = {}
-    for index, item in enumerate(geometry):
-        try:
-            if bool(sketch.getConstruction(index)):
-                continue
-        except Exception:
-            pass
-        for role, point in (
-            ("start", getattr(item, "StartPoint", None)),
-            ("end", getattr(item, "EndPoint", None)),
-        ):
-            if point is None:
-                continue
-            key = (
-                round(float(point.x), 6),
-                round(float(point.y), 6),
-                round(float(point.z), 6),
-            )
-            endpoint_counts[key] = endpoint_counts.get(key, 0) + 1
-            endpoints.append(
-                {"geometry_index": index, "role": role, "point": list(key)}
-            )
-    open_endpoints = [
-        endpoint
-        for endpoint in endpoints
-        if endpoint_counts[tuple(endpoint["point"])] == 1
-    ]
     profile_status = service._sketch_profile_status(sketch)
     return {
-        "found": True,
-        "sketch": getattr(sketch, "Name", None),
-        "edge_count": len(edges),
-        "wire_count": profile_status.get("wire_count"),
-        "closed_wire_count": profile_status.get("closed_wire_count"),
-        "face_build_errors": profile_status.get("face_build_errors"),
-        "closed_profile": bool(profile_status.get("closed_profile")),
-        "closed_edge_loop": bool(profile_status.get("closed_edge_loop")),
-        "ready_for_pad": bool(profile_status.get("ready_for_pad")),
-        "open_endpoint_count": len(open_endpoints),
-        "open_endpoints": open_endpoints[:40],
-        "construction_geometry_count": profile_status.get(
-            "construction_geometry_count"
-        ),
-        "reason": profile_status.get("reason"),
+        **profile_status,
+        "diagnostic_source": "SketchObject.getProfileDiagnostics",
     }
 
 
@@ -982,7 +677,6 @@ __all__ = [
     "get_sketch",
     "no_sketch",
     "profile_validation",
-    "profile_validation_deep",
     "resolve_geometry_index",
     "resolve_geometry_names",
     "run_freecad_transaction",

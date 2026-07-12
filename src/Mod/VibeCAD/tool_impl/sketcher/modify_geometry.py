@@ -574,10 +574,9 @@ def _run_fillet(
 
 
 def _point_xy(point: Any) -> tuple[float, float] | None:
-    try:
-        return (float(point.x), float(point.y))
-    except Exception:
+    if point is None:
         return None
+    return (float(point.x), float(point.y))
 
 
 def _geometry_endpoints(geometry: Any) -> list[dict[str, Any]]:

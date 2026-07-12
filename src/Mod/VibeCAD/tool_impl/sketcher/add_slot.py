@@ -171,10 +171,12 @@ def run(
         doc = App.ActiveDocument
         if doc is not None:
             doc.recompute()
+        degrees_of_freedom_error = None
         try:
             degrees_of_freedom = int(getattr(target, "DoF"))
-        except Exception:
+        except Exception as exc:
             degrees_of_freedom = None
+            degrees_of_freedom_error = str(exc)
         fully_constrained = (
             degrees_of_freedom == 0 if degrees_of_freedom is not None else False
         )
@@ -227,6 +229,7 @@ def run(
                 ]
             ),
             "degrees_of_freedom": degrees_of_freedom,
+            "degrees_of_freedom_error": degrees_of_freedom_error,
             "fully_constrained": fully_constrained,
             "construction": bool(construction),
         }

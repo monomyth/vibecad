@@ -207,7 +207,7 @@ def run(
                 "ok": bool(result_shape.get("available"))
                 and int(result_shape.get("solids", 0)) > 0
                 and not bool((result.get("feature_state") or {}).get("marked_invalid"))
-                and (result.get("feature_state") or {}).get("shape_valid") is not False,
+                and (result.get("feature_state") or {}).get("shape_valid") is True,
                 "actual": result_shape,
             },
             {

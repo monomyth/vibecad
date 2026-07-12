@@ -143,14 +143,47 @@ def normalize_tool_failure(
     native_diagnostics = raw.get("native_diagnostics")
     if native_diagnostics is None:
         native_diagnostics = []
-    common = tool_failure(
+    observed = raw.get("observed", {})
+    if not isinstance(observed, Mapping):
+        observed = {"raw_observed": observed}
+    else:
+        observed = dict(observed)
+    reserved_input = {
+        "ok",
+        "tool",
+        "failure_code",
+        "failure_stage",
+        "error",
+        "requested",
+        "normalized",
+        "observed",
+        "candidates",
+        "allowed_values",
+        "state_change",
+        "native_diagnostics",
+        "retry",
+        "retry_same_call",
+        "required_changes",
+        "document_delta",
+        "transaction_opened",
+        "mutation_started",
+        "commit_attempted",
+        "commit_succeeded",
+        "repair_targets",
+    }
+    tool_details = {
+        key: value for key, value in raw.items() if key not in reserved_input
+    }
+    if tool_details:
+        observed["tool_details"] = tool_details
+    return tool_failure(
         tool,
         str(raw.get("failure_code") or "TOOL_EXECUTION_FAILED"),
         stage,
         str(raw.get("error") or "Tool call failed."),
         requested=raw.get("requested", dict(requested or {})),
         normalized=raw.get("normalized", {}),
-        observed=raw.get("observed", {}),
+        observed=observed,
         candidates=raw.get("candidates", []),
         allowed_values=raw.get("allowed_values", []),
         state_change=change,
@@ -158,9 +191,6 @@ def normalize_tool_failure(
         retry_same_call=bool(retry.get("same_call", False)),
         required_changes=list(retry.get("required_changes") or []),
     )
-    reserved = set(common) | {"retry_same_call", "required_changes"}
-    details = {key: value for key, value in raw.items() if key not in reserved}
-    return {**details, **common}
 
 
 class ToolArgumentValidationError(ValueError):

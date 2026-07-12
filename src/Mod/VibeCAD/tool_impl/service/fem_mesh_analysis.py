@@ -62,6 +62,40 @@ _OPERATION_SCHEMA = {
     "additionalProperties": False,
 }
 
+_PARAMETER_PROPERTIES = {
+    "action": {
+        "type": "string",
+        "enum": ["start", "status", "cancel"],
+        "description": "Start, inspect, or cancel one exact Gmsh operation.",
+    },
+    "analysis_name": {
+        "type": "string",
+        "description": "Exact FEM analysis name; required only for action='start'.",
+    },
+    "source_object_name": {
+        "type": "string",
+        "description": "Exact shaped solid to mesh; required only for action='start'.",
+    },
+    "max_element_size_mm": {
+        "type": "number",
+        "minimum": 0,
+        "description": "Maximum element edge length for action='start'.",
+    },
+    "element_order": {
+        "type": "string",
+        "enum": ["1st", "2nd"],
+        "description": "Element order for action='start'.",
+    },
+    "label": {
+        "type": "string",
+        "description": "Visible mesh-object label for action='start'.",
+    },
+    "operation_id": {
+        "type": "string",
+        "description": "Exact operation ID for action='status' or action='cancel'.",
+    },
+}
+
 
 TOOL_SPEC = {
     "name": "fem.mesh_analysis",
@@ -76,7 +110,11 @@ TOOL_SPEC = {
     "safety": "SAFE_WRITE",
     "workbench": "FemWorkbench",
     "edit_modes": ["none"],
-    "parameters": {"oneOf": [_START_SCHEMA, _OPERATION_SCHEMA]},
+    "parameters": {
+        "type": "object",
+        "properties": _PARAMETER_PROPERTIES,
+        "oneOf": [_START_SCHEMA, _OPERATION_SCHEMA],
+    },
 }
 
 

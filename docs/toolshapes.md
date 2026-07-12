@@ -1,6 +1,45 @@
 # VibeCAD Tool Shapes Audit
 
-## Scope and verdict
+## Remediation status
+
+The findings below are the pre-remediation baseline. The current provider surface has
+**115 tools across 21 workbench surfaces**. The count fell from 120 because unsafe tools
+were deleted rather than hidden, and the broad Sketcher transform tool was replaced by one
+native translation operation.
+
+All findings in this audit have now been acted on:
+
+| Area | Current contract |
+| --- | --- |
+| Provider dispatch | Every attempted call, including JSON, schema, surface, edit-state, cancellation, and question-UI rejection, reaches one structured failure envelope and one bounded trace path. Tool-specific facts are retained under `observed`; truncation is explicit. |
+| Transactions | Every write reports the actual transaction lifecycle and retained document delta. Failed mutations are never described as rolled back or cleaned up. |
+| FreeCAD diagnostics | `Document.getRecomputeDiagnostics()` exposes generation-scoped stable codes, object, property/subelement, algorithm, severity, and message. VibeCAD no longer scrapes Report View. |
+| Sketcher | Native profile/FaceMaker diagnostics, non-mutating constraint feasibility, internal B-spline geometry attribution, and geometry/constraint mutation maps are exposed and consumed. The redundant custom deep-profile classifier was deleted. |
+| PartDesign and Part | Profile/support/extent/axis variants are discriminated; selection is count guarded; exact native state is read back; unknown validity is failure. Hole catalogs and transform occurrence/child diagnostics come from native APIs. Native dress-up code no longer skips invalid requested edges/faces. |
+| Draft, Spreadsheet, Surface | Inputs are preflighted, partial writes and per-field failures are explicit, requested properties are read back, and required counts/parameter bounds cannot silently become unknown. |
+| Assembly and BIM | Component identity, source/container membership, local/global placement, hierarchy, host opening effects, joint references, and native solver diagnostics are verified. Missing native structure is not auto-created as a compatibility path. |
+| TechDraw, Material, Mesh | Projected geometry/source maps, material UUID/property readback, appearance subsets, complete mesh defect status, repair deltas, and conversion postconditions are structured. |
+| FEM | Gmsh and CalculiX run through asynchronous, cancellable native process APIs with operation IDs, process diagnostics, prerequisite checks, and solve-generation result attribution. |
+| CAM | Jobs, stock, tools, controllers, and operation properties are exact and read back. Native generation diagnostics and queryable stock/collision simulation are required. Circular cutter sweeps use exact OCC geometry; no chord-discretization fallback remains. |
+
+Deleted provider affordances: `part.create_primitive`, `partdesign.edit_feature`,
+`part.set_placement`, non-translation `sketcher.transform_geometry`,
+`openscad.list_csg`, and `reveng.list_candidates`. There are no compatibility aliases for
+them.
+
+Verification completed during remediation:
+
+- Registry import: 115 unique tools, 21 packs, exact pack/registry set equality, no orphan,
+  dangling, duplicate, or workbench-ownership mismatch.
+- Native live probes: Sketcher profile/feasibility/mutation APIs; exact
+  `BREP_FILLET_FAILED` diagnostics with `Base/Edge99`; exact ball-end, chamfer, and V-bit
+  circular sweeps; CAM face/profile/drilling chains; TechDraw, Mesh, FEM, and provider trace
+  contracts.
+- Targeted native builds for App, Part, PartDesign, Sketcher, Path, PathSimulator, and
+  VibeCAD completed successfully. A complete incremental build then completed all 615
+  remaining application, workbench, and native-test actions with no errors.
+
+## Baseline scope and verdict
 
 This audit covers every provider-visible tool in the authoritative registry and every
 configured workbench surface as of 2026-07-11.
@@ -20,7 +59,7 @@ problem is therefore not that the wrappers point at nonexistent APIs. The proble
 many wrappers expose a valid native symbol through an incomplete semantic contract, ignore
 unsupported behavior, or cannot explain why the native operation failed.
 
-## Current provider surface
+## Baseline provider surface
 
 All 120 tools are registered unconditionally, then filtered for the active workbench and
 edit mode. Raw FreeCAD command wrappers are not currently provider-visible. The 33 tools in

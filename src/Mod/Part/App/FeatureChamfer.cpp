@@ -59,8 +59,6 @@ App::DocumentObjectExecReturn* Chamfer::execute()
         TopTools_IndexedMapOfShape mapOfEdges;
         std::vector<Part::FilletElement> edges = Edges.getValues();
         TopExp::MapShapes(baseShape, TopAbs_EDGE, mapOfEdges);
-        std::string fullErrMsg;
-
         const auto& vals = EdgeLinks.getSubValues();
         const auto& subs = EdgeLinks.getShadowSubs();
         if (subs.size() != (size_t)Edges.getSize()) {
@@ -74,14 +72,8 @@ App::DocumentObjectExecReturn* Chamfer::execute()
             ++i;
 
             if (Data::hasMissingElement(ref.c_str()) || Data::hasMissingElement(oldName.c_str())) {
-                fullErrMsg.append("Missing edge link: ");
-                fullErrMsg.append(ref);
-                fullErrMsg.append("\n");
-
-                auto removeIt = std::remove(edges.begin(), edges.end(), info);
-                edges.erase(removeIt, edges.end());
-
-                continue;
+                return new App::DocumentObjectExecReturn(
+                    std::string("Missing selected edge link: ") + ref);
             }
             // Toponaming project March 2024:  Replaced this code because it wouldn't work:
             //            TopoDS_Shape edge;
@@ -91,18 +83,14 @@ App::DocumentObjectExecReturn* Chamfer::execute()
             auto id = Data::MappedName(ref.c_str()).toIndexedName().getIndex();
             const TopoDS_Edge& edge = TopoDS::Edge(mapOfEdges.FindKey(id));
             if (edge.IsNull()) {
-                return new App::DocumentObjectExecReturn("Invalid edge link");
+                return new App::DocumentObjectExecReturn(
+                    std::string("Invalid selected edge link: ") + ref);
             }
             double radius1 = info.radius1;
             double radius2 = info.radius2;
             const TopoDS_Face& face = TopoDS::Face(mapEdgeFace.FindFromKey(edge).First());
             mkChamfer.Add(radius1, radius2, TopoDS::Edge(edge), face);
         }
-
-        if (!fullErrMsg.empty()) {
-            return new App::DocumentObjectExecReturn(fullErrMsg);
-        }
-        Edges.setValues(edges);
 
         Part::SignalException sig;
         TopoDS_Shape shape = mkChamfer.Shape();

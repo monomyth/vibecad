@@ -217,7 +217,29 @@ def run(
             }
         )
         current_stage = "document_fingerprint"
-        document_visual_fingerprint = _document_visual_fingerprint(document)
+        fingerprint_state = _document_visual_fingerprint(document)
+        if not fingerprint_state["complete"]:
+            stages.append(
+                {
+                    "stage": current_stage,
+                    "ok": False,
+                    "errors": fingerprint_state["errors"],
+                }
+            )
+            return _remember_failure(
+                service,
+                "DOCUMENT_VISUAL_FINGERPRINT_FAILED",
+                "precondition",
+                "FreeCAD could not read complete visual state for the active document.",
+                requested=requested,
+                normalized=normalized,
+                observed={
+                    "stages": stages,
+                    "fingerprint_errors": fingerprint_state["errors"],
+                    "camera_before": camera_before,
+                },
+            )
+        document_visual_fingerprint = fingerprint_state["sha256"]
         stages.append({"stage": current_stage, "ok": True})
         previous_capture = (
             dict(service._last_view_screenshot)
@@ -527,10 +549,7 @@ def _safe_camera_state(view: Any) -> dict[str, Any]:
 
 
 def _pixel_fingerprint(path: Path) -> str:
-    try:
-        from PySide import QtGui
-    except Exception:
-        from PySide6 import QtGui
+    from PySide import QtGui
     image = QtGui.QImage(str(path))
     if image.isNull():
         raise RuntimeError(f"Qt could not decode screenshot image: {path}")
@@ -544,10 +563,7 @@ def _pixel_fingerprint(path: Path) -> str:
 
 
 def _pixel_difference(first_path: Path, second_path: Path) -> float:
-    try:
-        from PySide import QtGui
-    except Exception:
-        from PySide6 import QtGui
+    from PySide import QtGui
     first = QtGui.QImage(str(first_path))
     second = QtGui.QImage(str(second_path))
     if first.isNull() or second.isNull():
@@ -572,11 +588,13 @@ def _pixel_difference(first_path: Path, second_path: Path) -> float:
     return round(difference / max(1, samples * 255), 8)
 
 
-def _document_visual_fingerprint(document: Any) -> str:
+def _document_visual_fingerprint(document: Any) -> dict[str, Any]:
     records = []
+    errors: list[dict[str, str]] = []
     for obj in list(document.Objects):
         shape = getattr(obj, "Shape", None)
         shape_hash = None
+        shape_hash_error = None
         type_id = str(getattr(obj, "TypeId", "") or "")
         is_reference_geometry = type_id in {
             "PartDesign::Line",
@@ -593,28 +611,55 @@ def _document_visual_fingerprint(document: Any) -> str:
                 and not bool(shape.isNull())
             ):
                 shape_hash = int(shape.hashCode())
-        except Exception:
-            shape_hash = None
+        except Exception as exc:
+            shape_hash_error = str(exc)
+            errors.append(
+                {"object": str(obj.Name), "field": "Shape.hashCode", "error": str(exc)}
+            )
         placement_method = getattr(obj, "getGlobalPlacement", None)
+        placement_error = None
+        placement_source = (
+            "object.getGlobalPlacement" if callable(placement_method) else "object.Placement"
+        )
         try:
             placement = (
                 placement_method()
                 if callable(placement_method)
                 else getattr(obj, "Placement", None)
             )
-        except Exception:
-            placement = getattr(obj, "Placement", None)
+        except Exception as exc:
+            placement = None
+            placement_error = str(exc)
+            errors.append(
+                {
+                    "object": str(obj.Name),
+                    "field": placement_source,
+                    "error": str(exc),
+                }
+            )
+        placement_matrix = None
+        if placement is not None:
+            try:
+                placement_matrix = [float(value) for value in placement.toMatrix().A]
+            except Exception as exc:
+                placement_error = str(exc)
+                errors.append(
+                    {
+                        "object": str(obj.Name),
+                        "field": f"{placement_source}.toMatrix",
+                        "error": str(exc),
+                    }
+                )
         view_object = getattr(obj, "ViewObject", None)
         records.append(
             {
                 "name": str(obj.Name),
                 "type": type_id,
                 "shape_hash": shape_hash,
-                "placement": (
-                    [float(value) for value in placement.toMatrix().A]
-                    if placement is not None
-                    else None
-                ),
+                "shape_hash_error": shape_hash_error,
+                "placement": placement_matrix,
+                "placement_source": placement_source,
+                "placement_error": placement_error,
                 "visible": bool(view_object.Visibility)
                 if view_object is not None
                 else None,
@@ -631,7 +676,12 @@ def _document_visual_fingerprint(document: Any) -> str:
             }
         )
     payload = json.dumps(records, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return {
+        "complete": not errors,
+        "sha256": hashlib.sha256(payload.encode("utf-8")).hexdigest(),
+        "errors": errors,
+        "object_count": len(records),
+    }
 
 
 def _screenshot_artifact_dir(service: Any) -> Path:

@@ -190,8 +190,11 @@ def _constraint_table(service: Any, sketch: Any | None) -> list[dict[str, Any]]:
                 "constraints", []
             )
         )
-    except (RuntimeError, AttributeError, KeyError, TypeError):
-        return []
+    except (RuntimeError, AttributeError, KeyError, TypeError) as exc:
+        raise RuntimeError(
+            f"Could not read the live constraint table for sketch "
+            f"{getattr(sketch, 'Name', '<unnamed>')}: {exc}"
+        ) from exc
 
 
 def _native_property_status(constraint: Any) -> dict[str, Any]:

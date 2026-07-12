@@ -3386,21 +3386,36 @@ int Document::_recomputeFeature(DocumentObject* Feat) // NOLINT
     catch (Base::Exception& e) {
         e.reportException();
         FC_LOG("Failed to recompute " << Feat->getFullName() << ": " << e.what());
-        d->addRecomputeLog(e.what(), Feat, "BASE_EXCEPTION", "Document::_recomputeFeature");
+        const auto [property, subelement] = recomputeFailureReference(Feat);
+        d->addRecomputeLog(e.what(),
+                           Feat,
+                           recomputeFailureCode(Feat),
+                           Feat->getTypeId().getName(),
+                           property,
+                           subelement);
         return 1;
     }
     catch (std::exception& e) {
         FC_ERR("Exception in " << Feat->getFullName() << " thrown: " << e.what());
-        d->addRecomputeLog(e.what(), Feat, "STD_EXCEPTION", "Document::_recomputeFeature");
+        const auto [property, subelement] = recomputeFailureReference(Feat);
+        d->addRecomputeLog(e.what(),
+                           Feat,
+                           recomputeFailureCode(Feat),
+                           Feat->getTypeId().getName(),
+                           property,
+                           subelement);
         return 1;
     }
 #ifndef FC_DEBUG
     catch (...) {
         FC_ERR("Unknown exception in " << Feat->getFullName() << " thrown");
+        const auto [property, subelement] = recomputeFailureReference(Feat);
         d->addRecomputeLog("Unknown exception!",
                            Feat,
-                           "UNKNOWN_EXCEPTION",
-                           "Document::_recomputeFeature");
+                           recomputeFailureCode(Feat),
+                           Feat->getTypeId().getName(),
+                           property,
+                           subelement);
         return 1;
     }
 #endif

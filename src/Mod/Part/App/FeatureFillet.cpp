@@ -66,8 +66,6 @@ App::DocumentObjectExecReturn* Fillet::execute()
         TopTools_IndexedMapOfShape mapOfEdges;
         TopExp::MapShapes(baseShape, TopAbs_EDGE, mapOfEdges);
         std::vector<Part::FilletElement> edges = Edges.getValues();
-        std::string fullErrMsg;
-
         const auto& vals = EdgeLinks.getSubValues(true);
         const auto& subs = EdgeLinks.getShadowSubs();
         if (subs.size() != (size_t)Edges.getSize()) {
@@ -81,14 +79,8 @@ App::DocumentObjectExecReturn* Fillet::execute()
             ++i;
 
             if (Data::hasMissingElement(ref.c_str()) || Data::hasMissingElement(oldName.c_str())) {
-                fullErrMsg.append("Missing edge link: ");
-                fullErrMsg.append(ref);
-                fullErrMsg.append("\n");
-
-                auto removeIt = std::remove(edges.begin(), edges.end(), info);
-                edges.erase(removeIt, edges.end());
-
-                continue;
+                return new App::DocumentObjectExecReturn(
+                    std::string("Missing selected edge link: ") + ref);
             }
 
             // Toponaming project March 2024:  Replaced this code because it wouldn't work:
@@ -100,18 +92,14 @@ App::DocumentObjectExecReturn* Fillet::execute()
             const TopoDS_Edge& edge = TopoDS::Edge(mapOfEdges.FindKey(id));
 
             if (edge.IsNull()) {
-                return new App::DocumentObjectExecReturn("Invalid edge link");
+                return new App::DocumentObjectExecReturn(
+                    std::string("Invalid selected edge link: ") + ref);
             }
 
             double radius1 = info.radius1;
             double radius2 = info.radius2;
             mkFillet.Add(radius1, radius2, TopoDS::Edge(edge));
         }
-
-        if (!fullErrMsg.empty()) {
-            return new App::DocumentObjectExecReturn(fullErrMsg);
-        }
-        Edges.setValues(edges);
 
         TopoDS_Shape shape = mkFillet.Shape();
         if (shape.IsNull()) {
@@ -126,6 +114,7 @@ App::DocumentObjectExecReturn* Fillet::execute()
         return new App::DocumentObjectExecReturn(e.GetMessageString());
     }
     catch (...) {
-        return new App::DocumentObjectExecReturn("A fatal error occurred when making fillets");
+        return new App::DocumentObjectExecReturn(
+            "Fillet failed with an unknown OpenCascade exception");
     }
 }

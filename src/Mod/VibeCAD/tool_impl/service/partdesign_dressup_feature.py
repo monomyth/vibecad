@@ -406,9 +406,11 @@ def _resolve_base(service: Any, name: str) -> dict[str, Any]:
     state = domain_runtime.feature_state_summary(feature)
     shape = domain_runtime.shape_summary(feature)
     if (
-        state.get("marked_invalid")
+        state.get("inspection_complete") is not True
+        or state.get("marked_invalid")
         or state.get("shape_null")
-        or state.get("shape_valid") is False
+        or state.get("shape_valid") is not True
+        or shape.get("inspection_complete") is not True
         or int(shape.get("solids", 0) or 0) != 1
     ):
         return _invalid(
@@ -685,11 +687,13 @@ def _feature_parameters(feature: Any, operation: str) -> dict[str, Any]:
     }
 
 
-def _link_sub_summary(value: Any) -> dict[str, Any] | None:
+def _link_sub_summary(value: Any) -> dict[str, Any]:
     try:
         obj, subelements = value
-    except (TypeError, ValueError):
-        return None
+    except (TypeError, ValueError) as exc:
+        raise TypeError(
+            f"FreeCAD returned an invalid LinkSub value: {value!r}."
+        ) from exc
     return {
         "object": getattr(obj, "Name", None),
         "subelements": [str(item) for item in list(subelements or [])],

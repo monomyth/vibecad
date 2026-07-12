@@ -293,8 +293,10 @@ def run(
         state = domain_runtime.feature_state_summary(feature)
         shape = domain_runtime.shape_summary(feature)
         if (
-            state.get("marked_invalid")
+            state.get("inspection_complete") is not True
+            or state.get("marked_invalid")
             or state.get("shape_valid") is not True
+            or shape.get("inspection_complete") is not True
             or int(shape.get("solids", 0) or 0) != 1
         ):
             raise RuntimeError(
@@ -682,7 +684,7 @@ def _build_section_wire(
             details={"section_index": index, "sketch": sketch.Name, "direction": direction},
         )
     state = domain_runtime.feature_state_summary(sketch)
-    if state.get("marked_invalid"):
+    if state.get("inspection_complete") is not True or state.get("marked_invalid"):
         raise ThinLoftBuildError(
             f"Section sketch {sketch.Name} is marked Invalid.",
             stage="section_preflight",
@@ -963,7 +965,7 @@ def _invalid_body_history(body: Any) -> list[dict[str, Any]]:
         if not str(getattr(item, "TypeId", "")).startswith("PartDesign::"):
             continue
         state = domain_runtime.feature_state_summary(item)
-        if state.get("marked_invalid"):
+        if state.get("inspection_complete") is not True or state.get("marked_invalid"):
             invalid.append(state)
     return invalid
 

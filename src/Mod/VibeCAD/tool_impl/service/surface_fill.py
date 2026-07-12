@@ -143,7 +143,7 @@ def run(
             {
                 "name": "surface_created",
                 "ok": int(shape.get("faces", 0)) > 0
-                and state.get("shape_valid") is not False
+                and state.get("shape_valid") is True
                 and not state.get("marked_invalid"),
                 "actual": shape,
             },
@@ -226,7 +226,15 @@ def validate_curve_refs(
                 )
             ref_pairs = [(object_name, name) for name in edge_names]
             edge_name = edge_names[0] if len(edge_names) == 1 else ""
-            geometry = _edge_summaries(service, obj, edge_names)
+            try:
+                geometry = _edge_summaries(service, obj, edge_names)
+            except RuntimeError as exc:
+                return _invalid(
+                    str(exc),
+                    reference_index=ref_index,
+                    object_name=object_name,
+                    requested_edges=edge_names,
+                )
         else:
             selection_state = partdesign_dressup_feature.resolve_selection(
                 service,
@@ -355,8 +363,21 @@ def boundary_diagnostics(service: Any, refs: list[tuple[str, str]]) -> dict[str,
                         "native_error": str(exc),
                     }
                 )
+    descriptor_errors = [
+        {
+            "curve_index": index,
+            "object_name": curve.get("object_name"),
+            "edge_name": curve.get("edge_name"),
+            "native_stage": "BRepAdaptor_Curve::tangentAt",
+            "native_error": curve.get("tangent_error"),
+        }
+        for index, curve in enumerate(curves)
+        if curve.get("tangent_error")
+    ]
     closed_single = len(curves) == 1 and bool(curves[0].get("closed"))
-    closed_loop = bool((connected or closed_single) and not intersections)
+    closed_loop = bool(
+        (connected or closed_single) and not intersections and not descriptor_errors
+    )
     return {
         "closed_loop": closed_loop,
         "connected_in_supplied_order": connected,
@@ -364,6 +385,9 @@ def boundary_diagnostics(service: Any, refs: list[tuple[str, str]]) -> dict[str,
         "curves": curves,
         "ordered_endpoint_gaps": pair_gaps,
         "nonadjacent_intersections": intersections,
+        "descriptor_errors": descriptor_errors,
+        "complete": not descriptor_errors
+        and not any(item.get("native_error") for item in intersections),
         "tolerance_mm": 1.0e-6,
     }
 
@@ -457,9 +481,19 @@ def _edge_summaries(service: Any, obj: Any, names: list[str]) -> list[dict[str, 
         element_type="edge",
     )
     if not result.get("ok"):
-        return []
+        raise RuntimeError(
+            "Could not inspect the requested source edges: "
+            f"{result.get('failure_code') or 'SUBELEMENT_INSPECTION_FAILED'}: "
+            f"{result.get('error') or 'no native diagnostic message'}"
+        )
     by_name = {item["name"]: item for item in result.get("matches") or []}
-    return [by_name[name] for name in names if name in by_name]
+    missing = [name for name in names if name not in by_name]
+    if missing:
+        raise RuntimeError(
+            f"FreeCAD did not return descriptors for source edges {missing}; "
+            f"available edges were {sorted(by_name)}."
+        )
+    return [by_name[name] for name in names]
 
 
 def _edge_name_in_shape(shape: Any, edge: Any) -> str | None:
@@ -467,20 +501,24 @@ def _edge_name_in_shape(shape: Any, edge: Any) -> str | None:
         try:
             if edge.isSame(candidate):
                 return f"Edge{index}"
-        except Exception:
-            continue
+        except Exception as exc:
+            raise RuntimeError(
+                f"FreeCAD could not compare a wire edge with source Edge{index}: {exc}"
+            ) from exc
     return None
 
 
 def _native_edge_descriptor(object_name: str, edge_name: str, edge: Any) -> dict[str, Any]:
     first = edge.valueAt(edge.FirstParameter)
     last = edge.valueAt(edge.LastParameter)
+    tangent_error = None
     try:
         first_tangent = edge.tangentAt(edge.FirstParameter)
         last_tangent = edge.tangentAt(edge.LastParameter)
-    except Exception:
+    except Exception as exc:
         first_tangent = None
         last_tangent = None
+        tangent_error = str(exc)
     return {
         "object_name": object_name,
         "edge_name": edge_name,
@@ -491,6 +529,7 @@ def _native_edge_descriptor(object_name: str, edge_name: str, edge: Any) -> dict
         "end": domain_runtime.vector_values(last),
         "start_tangent": domain_runtime.vector_values(first_tangent) if first_tangent is not None else None,
         "end_tangent": domain_runtime.vector_values(last_tangent) if last_tangent is not None else None,
+        "tangent_error": tangent_error,
     }
 
 

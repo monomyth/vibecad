@@ -150,7 +150,7 @@ App::DocumentObjectExecReturn* Boolean::execute()
         catch (Standard_Failure& e) {
             FC_ERR("Boolean operation failed: " << e.GetMessageString());
             return new App::DocumentObjectExecReturn(
-                QT_TRANSLATE_NOOP("Exception", "Boolean operation failed")
+                std::string("Boolean operation failed: ") + e.GetMessageString()
             );
         }
     }

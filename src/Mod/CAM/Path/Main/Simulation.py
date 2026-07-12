@@ -206,12 +206,12 @@ def _radial_profile(tool, direction, position, axial_extension=0.0):
     )
 
 
-def _swept_tool(tool, command, start, arc_chord_tolerance_mm):
+def _swept_tool(tool, command, start):
     edge = Path.Geom.edgeForCmd(command, start)
     if edge is None:
         end = Path.Geom.commandEndPoint(command, FreeCAD.Vector(start))
         if float((end - FreeCAD.Vector(start)).Length) <= 1.0e-12:
-            return None, end, None
+            return None, end
         raise ValueError(
             f"{command.Name} targets {list(end)} but native edge construction failed."
         )
@@ -250,10 +250,10 @@ def _swept_tool(tool, command, start, arc_chord_tolerance_mm):
                 raise RuntimeError(
                     f"Exact linear endmill sweep for {command.Name} is not one valid solid."
                 )
-            return swept_solid, end, None
+            return swept_solid, end
         if type(edge.Curve).__name__ == "Circle":
             swept_solid = _planar_circular_endmill_sweep(edge, radius, height)
-            return swept_solid, end, None
+            return swept_solid, end
         edge_z = float(edge.Vertexes[0].Point.z)
         planar_edge = edge.copy()
         planar_edge.translate(FreeCAD.Vector(0.0, 0.0, -edge_z))
@@ -273,48 +273,7 @@ def _swept_tool(tool, command, start, arc_chord_tolerance_mm):
             raise RuntimeError(
                 f"Exact planar endmill sweep for {command.Name} is not one valid solid."
             )
-        return swept_solid.removeSplitter(), end, None
-    if type(edge.Curve).__name__ == "Circle":
-        points = edge.discretize(Deflection=float(arc_chord_tolerance_mm))
-        if len(points) < 2:
-            raise RuntimeError(f"Circular move {command.Name} did not discretize into a path.")
-        segment_sweeps = []
-        segment_start = FreeCAD.Vector(start)
-        for point in points[1:]:
-            segment = Path.Command(
-                "G1",
-                {"X": float(point.x), "Y": float(point.y), "Z": float(point.z)},
-            )
-            sweep, segment_end, approximation = _swept_tool(
-                tool,
-                segment,
-                segment_start,
-                arc_chord_tolerance_mm,
-            )
-            if approximation is not None:
-                raise RuntimeError("A discretized line unexpectedly required approximation.")
-            if sweep is not None:
-                segment_sweeps.append(sweep)
-            segment_start = segment_end
-        if not segment_sweeps:
-            return None, end, {
-                "method": "bounded_chord_discretization",
-                "maximum_chord_error_mm": float(arc_chord_tolerance_mm),
-                "segment_count": 0,
-            }
-        fused = segment_sweeps[0]
-        if len(segment_sweeps) > 1:
-            fused = fused.multiFuse(segment_sweeps[1:]).removeSplitter()
-        if fused.isNull() or not fused.isValid():
-            raise RuntimeError(
-                f"Discretized circular tool sweep for {command.Name} is invalid."
-            )
-        return fused, end, {
-            "method": "bounded_chord_discretization",
-            "maximum_chord_error_mm": float(arc_chord_tolerance_mm),
-            "segment_count": len(segment_sweeps),
-            "curve_radius_mm": float(edge.Curve.Radius),
-        }
+        return swept_solid.removeSplitter(), end
     delta = end - FreeCAD.Vector(start)
     if math.hypot(float(delta.x), float(delta.y)) <= 1.0e-12:
         lower = FreeCAD.Vector(start) if float(start.z) <= float(end.z) else FreeCAD.Vector(end)
@@ -339,7 +298,7 @@ def _swept_tool(tool, command, start, arc_chord_tolerance_mm):
             raise RuntimeError(
                 f"Axial tool sweep for {command.Name} is not one valid solid."
             )
-        return solid.removeSplitter(), end, None
+        return solid.removeSplitter(), end
     start_direction = edge.tangentAt(edge.FirstParameter)
     end_direction = edge.tangentAt(edge.LastParameter)
     start_profile = _radial_profile(tool, start_direction, start)
@@ -350,6 +309,13 @@ def _swept_tool(tool, command, start, arc_chord_tolerance_mm):
     mirrored_profile = start_profile.transformGeometry(rotation)
     full_profile = Part.Wire([start_profile, mirrored_profile])
     path_wire = Part.Wire(edge)
+    if edge.isClosed():
+        solid = path_wire.makePipeShell([full_profile], True, True).removeSplitter()
+        if solid.isNull() or not solid.isValid() or len(solid.Solids) != 1:
+            raise RuntimeError(
+                f"Closed-path tool sweep for {command.Name} is not one valid solid."
+            )
+        return solid, end
     path_shell = path_wire.makePipeShell([full_profile], False, True)
     start_cap = start_profile.revolve(start, FreeCAD.Vector(0.0, 0.0, 1.0), -180.0)
     end_profile = _radial_profile(tool, end_direction, end)
@@ -358,7 +324,7 @@ def _swept_tool(tool, command, start, arc_chord_tolerance_mm):
     solid = Part.makeSolid(shell).removeSplitter()
     if solid.isNull() or not solid.isValid() or len(solid.Solids) != 1:
         raise RuntimeError(f"Tool sweep for {command.Name} is not one valid solid.")
-    return solid, end, None
+    return solid, end
 
 
 def _planar_circular_endmill_sweep(edge, tool_radius, tool_height):
@@ -455,7 +421,6 @@ def analyze_operation(
     operation,
     simulation_resolution_mm,
     volume_tolerance=1.0e-7,
-    arc_chord_tolerance_mm=0.01,
 ):
     """Simulate one generated operation and return structured native facts.
 
@@ -517,19 +482,13 @@ def analyze_operation(
     unsupported = []
     collision_commands = []
     collision_shapes = []
-    approximations = []
     cut_sweep_count = 0
 
     def apply(command, source_index, rapid):
         nonlocal position, cut_sweep_count
         start = FreeCAD.Vector(position.Base)
         try:
-            sweep, geometric_end, approximation = _swept_tool(
-                tool,
-                command,
-                start,
-                arc_chord_tolerance_mm,
-            )
+            sweep, geometric_end = _swept_tool(tool, command, start)
         except Exception as exc:
             raise RuntimeError(
                 f"Command {source_index} {_canonical_command(command.Name)} "
@@ -542,14 +501,6 @@ def analyze_operation(
                 f"Native simulator endpoint {list(position.Base)} diverged from "
                 f"Path.Geom endpoint {list(geometric_end)} at command {source_index} "
                 f"with parameters {dict(command.Parameters)}."
-            )
-        if approximation is not None:
-            approximations.append(
-                {
-                    "command_index": source_index,
-                    "command": _canonical_command(command.Name),
-                    **approximation,
-                }
             )
         if sweep is None:
             executed.append(
@@ -658,14 +609,15 @@ def analyze_operation(
         "complete": True,
         "stage": "complete",
         "error": None,
+        "simulation_scope": "single_operation_against_initial_job_stock",
         "command_count": len(commands),
         "executed_sweeps": len(executed),
         "cutting_sweeps": cut_sweep_count,
         "unsupported_commands": [],
-        "approximations": approximations,
         "stock": {
             "object": stock_obj.Name,
             "method": "PathSimulator height field",
+            "volume_method": "height_field_cell_quadrature",
             "endpoint_tolerance_mm": endpoint_tolerance,
             **simulation_stats,
         },

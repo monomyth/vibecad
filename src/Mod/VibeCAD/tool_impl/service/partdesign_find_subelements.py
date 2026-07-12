@@ -225,45 +225,54 @@ def _bounding_box_dict(bound_box: Any) -> dict[str, float]:
     }
 
 
-def _surface_normal(face: Any) -> Any | None:
+def _surface_normal(face: Any) -> tuple[Any | None, dict[str, Any] | None]:
     try:
         u_min, u_max, v_min, v_max = face.ParameterRange
         normal = face.normalAt((u_min + u_max) / 2.0, (v_min + v_max) / 2.0)
-    except Exception:
-        return None
+    except Exception as exc:
+        return None, {
+            "native_stage": "TopoDS_Face::normalAt",
+            "native_error": str(exc),
+        }
     if float(normal.Length) <= 1e-9:
-        return None
-    return normal.normalize()
+        return None, {
+            "native_stage": "TopoDS_Face::normalAt",
+            "native_error": "The evaluated face normal has zero length.",
+        }
+    return normal.normalize(), None
 
 
-def _outward_normal(shape: Any, face: Any) -> Any | None:
+def _outward_normal(shape: Any, face: Any) -> tuple[Any | None, dict[str, Any] | None]:
     """Return a geometrically verified outward normal for a planar solid face."""
-    normal = _surface_normal(face)
+    normal, diagnostic = _surface_normal(face)
     if normal is None:
-        return None
+        return None, diagnostic
     try:
         if float(getattr(shape, "Volume", 0.0) or 0.0) <= 0.0:
-            return None
+            return None, {
+                "native_stage": "outward_normal_classification",
+                "native_error": "The source shape has no positive solid volume.",
+            }
         diagonal = float(shape.BoundBox.DiagonalLength)
         offset = max(diagonal * 1e-3, 1e-4)
         probe = face.CenterOfMass.add(
             type(normal)(normal.x * offset, normal.y * offset, normal.z * offset)
         )
         if shape.isInside(probe, offset * 0.1, False):
-            return normal.multiply(-1.0)
-    except Exception:
-        return None
-    return normal
+            return normal.multiply(-1.0), None
+    except Exception as exc:
+        return None, {
+            "native_stage": "TopoShape::isInside",
+            "native_error": str(exc),
+        }
+    return normal, None
 
 
 def _element_radius(geometry: Any) -> float | None:
     radius = getattr(geometry, "Radius", None)
     if radius is None:
         return None
-    try:
-        return float(radius)
-    except (TypeError, ValueError):
-        return None
+    return float(radius)
 
 
 def run(
@@ -382,6 +391,7 @@ def run(
 
     matches: list[dict[str, Any]] = []
     distance_errors: list[dict[str, Any]] = []
+    geometry_errors: list[dict[str, Any]] = []
     target_vertex = None
     if target_point is not None:
         import Part
@@ -416,7 +426,16 @@ def run(
         outward = None
         edge_direction = None
         if kind == "face" and canonical == "plane":
-            outward = _outward_normal(shape, element)
+            outward, normal_error = _outward_normal(shape, element)
+            if normal_error:
+                geometry_errors.append(
+                    {
+                        "name": f"{name_prefix}{index + 1}",
+                        "field": "outward_normal",
+                        "required_by_filter": wanted_normal is not None,
+                        **normal_error,
+                    }
+                )
         if kind == "edge" and canonical == "line":
             try:
                 edge_direction = element.tangentAt(element.FirstParameter)
@@ -424,8 +443,17 @@ def run(
                     edge_direction.normalize()
                 else:
                     edge_direction = None
-            except Exception:
+            except Exception as exc:
                 edge_direction = None
+                geometry_errors.append(
+                    {
+                        "name": f"{name_prefix}{index + 1}",
+                        "field": "direction",
+                        "required_by_filter": wanted_direction is not None,
+                        "native_stage": "TopoDS_Edge::tangentAt",
+                        "native_error": str(exc),
+                    }
+                )
         if wanted_normal is not None:
             if outward is None:
                 continue
@@ -495,6 +523,24 @@ def run(
             "partial_matches": matches,
         }
 
+    required_geometry_errors = [
+        item for item in geometry_errors if item.get("required_by_filter")
+    ]
+    if required_geometry_errors:
+        return {
+            "ok": False,
+            "found": True,
+            "failure_code": "SUBELEMENT_GEOMETRY_INSPECTION_FAILED",
+            "failure_stage": "native_call",
+            "error": (
+                "Native geometry inspection failed for one or more subelements "
+                "required by the requested filter."
+            ),
+            "object": service._document_object_summary(obj),
+            "geometry_errors": required_geometry_errors,
+            "partial_matches": matches,
+        }
+
     return {
         "ok": True,
         "found": True,
@@ -503,6 +549,8 @@ def run(
         "total_elements": len(elements),
         "match_count": len(matches),
         "matches": matches,
+        "inspection_complete": not geometry_errors,
+        "geometry_errors": geometry_errors,
         "filters": {
             "geometry_type": requested_type,
             "normal": _vector_dict(wanted_normal) if wanted_normal is not None else None,

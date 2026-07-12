@@ -324,19 +324,23 @@ def _coincident_positions(positions: list[Any]) -> list[dict[str, Any]]:
     return collisions
 
 
-def _native_instance_count(obj: Any, kind: str) -> int | None:
+def _native_instance_count(obj: Any, kind: str) -> int:
     try:
         if kind == "orthogonal":
             return int(obj.NumberX) * int(obj.NumberY) * int(obj.NumberZ)
         return int(obj.NumberPolar)
-    except Exception:
-        return None
+    except Exception as exc:
+        raise RuntimeError(
+            f"FreeCAD could not read the native {kind} array instance count: {exc}"
+        ) from exc
 
 
-def _child_shape_count(shape: Any) -> int | None:
+def _child_shape_count(shape: Any) -> int:
     if shape is None or bool(shape.isNull()):
         return 0
     try:
         return len(list(shape.childShapes()))
-    except Exception:
-        return None
+    except Exception as exc:
+        raise RuntimeError(
+            f"FreeCAD could not enumerate the array result's child shapes: {exc}"
+        ) from exc

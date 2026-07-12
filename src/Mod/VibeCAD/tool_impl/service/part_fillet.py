@@ -157,7 +157,7 @@ def run_edge_finish(
                 "name": "valid_dressup_shape",
                 "ok": bool(result_shape.get("available"))
                 and int(result_shape.get("solids", 0)) > 0
-                and feature_state.get("shape_valid") is not False
+                and feature_state.get("shape_valid") is True
                 and not feature_state.get("marked_invalid"),
                 "actual": result_shape,
             },

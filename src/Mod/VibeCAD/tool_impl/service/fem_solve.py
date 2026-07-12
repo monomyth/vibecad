@@ -45,6 +45,22 @@ _OPERATION_SCHEMA = {
     "additionalProperties": False,
 }
 
+_PARAMETER_PROPERTIES = {
+    "action": {
+        "type": "string",
+        "enum": ["start", "status", "cancel"],
+        "description": "Start, inspect, or cancel one exact CalculiX operation.",
+    },
+    "analysis_name": {
+        "type": "string",
+        "description": "Exact FEM analysis name; required only for action='start'.",
+    },
+    "operation_id": {
+        "type": "string",
+        "description": "Exact operation ID for action='status' or action='cancel'.",
+    },
+}
+
 
 TOOL_SPEC = {
     "name": "fem.solve",
@@ -59,7 +75,11 @@ TOOL_SPEC = {
     "safety": "SAFE_WRITE",
     "workbench": "FemWorkbench",
     "edit_modes": ["none"],
-    "parameters": {"oneOf": [_START_SCHEMA, _OPERATION_SCHEMA]},
+    "parameters": {
+        "type": "object",
+        "properties": _PARAMETER_PROPERTIES,
+        "oneOf": [_START_SCHEMA, _OPERATION_SCHEMA],
+    },
 }
 
 

@@ -190,7 +190,7 @@ def run(
             {
                 "name": "extended_surface_created",
                 "ok": int(shape.get("faces", 0)) > 0
-                and state.get("shape_valid") is not False
+                and state.get("shape_valid") is True
                 and not state.get("marked_invalid"),
                 "actual": shape,
             },
@@ -209,7 +209,7 @@ def _invalid(message: str, **details: Any) -> dict[str, Any]:
     return {"ok": False, "error": message, "retry_same_call": False, **details}
 
 
-def _parameter_range(face: Any) -> dict[str, float] | None:
+def _parameter_range(face: Any) -> dict[str, float]:
     try:
         u_min, u_max, v_min, v_max = face.ParameterRange
         return {
@@ -218,5 +218,7 @@ def _parameter_range(face: Any) -> dict[str, float] | None:
             "v_min": float(v_min),
             "v_max": float(v_max),
         }
-    except Exception:
-        return None
+    except Exception as exc:
+        raise RuntimeError(
+            f"FreeCAD could not read the face parameter range: {exc}"
+        ) from exc

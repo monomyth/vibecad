@@ -145,7 +145,7 @@ def run(
         shape = domain_runtime.shape_summary(binder)
         valid = (
             not state.get("marked_invalid")
-            and state.get("shape_valid") is not False
+            and state.get("shape_valid") is True
             and bool(shape.get("available"))
             and (
                 int(shape.get("faces", 0) or 0) > 0

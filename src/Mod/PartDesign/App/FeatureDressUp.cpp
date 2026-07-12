@@ -197,16 +197,17 @@ std::vector<TopoShape> DressUp::getContinuousEdges(const TopoShape& shape)
 
         auto faces = shape.findAncestorsShapes(subshape, TopAbs_FACE);
         if (faces.size() != 2) {
-            FC_WARN(getFullName() << ": skip edge " << ref << " with less two attaching faces");
-            return;
+            FC_THROWM(Base::CADKernelError,
+                      "Selected edge '" << ref << "' has " << faces.size()
+                                        << " adjacent faces; exactly two are required");
         }
         const TopoDS_Shape& face1 = faces.front();
         const TopoDS_Shape& face2 = faces.back();
         GeomAbs_Shape cont
             = BRep_Tool::Continuity(TopoDS::Edge(subshape), TopoDS::Face(face1), TopoDS::Face(face2));
         if (cont != GeomAbs_C0) {
-            FC_WARN(getFullName() << ": skip edge " << ref << " that is not C0 continuous");
-            return;
+            FC_THROWM(Base::CADKernelError,
+                      "Selected edge '" << ref << "' is not C0 continuous");
         }
         ret.push_back(subshape);
     };
@@ -228,10 +229,9 @@ std::vector<TopoShape> DressUp::getContinuousEdges(const TopoShape& shape)
             }
         }
         else {
-            FC_WARN(
-                getFullName() << ": skip invalid shape '" << ref << "' with type "
-                              << TopoShape::shapeName(subshape.ShapeType())
-            );
+            FC_THROWM(Base::CADKernelError,
+                      "Selected reference '" << ref << "' has unsupported shape type "
+                                              << TopoShape::shapeName(subshape.ShapeType()));
         }
     }
     return ret;
@@ -253,7 +253,14 @@ std::vector<TopoShape> DressUp::getFaces(const TopoShape& shape)
         try {
             subshape = shape.getSubTopoShape(ref.c_str());
         }
-        catch (...) {
+        catch (const Base::Exception& e) {
+            FC_THROWM(Base::CADKernelError,
+                      "Failed to resolve selected face '" << ref << "': " << e.what());
+        }
+        catch (const Standard_Failure& e) {
+            FC_THROWM(Base::CADKernelError,
+                      "Failed to resolve selected face '" << ref
+                                                          << "': " << e.GetMessageString());
         }
 
         if (subshape.isNull()) {
@@ -262,11 +269,10 @@ std::vector<TopoShape> DressUp::getFaces(const TopoShape& shape)
         }
 
         if (subshape.shapeType() != TopAbs_FACE) {
-            FC_WARN(
-                getFullName() << ": skip invalid shape '" << ref << "' with type "
-                              << subshape.shapeName()
-            );
-            continue;
+            FC_THROWM(Base::CADKernelError,
+                      "Selected reference '" << ref << "' has shape type "
+                                              << subshape.shapeName()
+                                              << "; a face is required");
         }
         ret.push_back(subshape);
     }
