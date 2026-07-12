@@ -150,7 +150,8 @@ App::DocumentObjectExecReturn* Boolean::execute()
         std::unique_ptr<BRepAlgoAPI_BooleanOperation> mkBool(makeOperation(BaseShape, ToolShape));
         if (!mkBool->IsDone()) {
             std::stringstream error;
-            error << "Boolean operation failed";
+            error << "Boolean operation did not complete";
+            mkBool->DumpErrors(error);
             if (BaseShape.ShapeType() != TopAbs_SOLID) {
                 error << std::endl << base->Label.getValue() << " is not a solid";
             }

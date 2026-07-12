@@ -22,6 +22,7 @@
 # ***************************************************************************
 
 import FreeCAD
+import copy
 from PathScripts.PathUtils import waiting_effects
 from PySide.QtCore import QT_TRANSLATE_NOOP
 import Path
@@ -147,6 +148,29 @@ def _transform_shape_with_arc_fix(shape, matrix):
     if any_converted:
         return Part.makeCompound(fixed_edges)
     return transformed
+
+
+def _shapeGenerationFacts(shape):
+    if shape is None or shape.isNull():
+        return {
+            "null": True,
+            "valid": None,
+            "solids": 0,
+            "faces": 0,
+            "bounds": None,
+        }
+    bounds = shape.BoundBox
+    return {
+        "null": False,
+        "valid": bool(shape.isValid()),
+        "solids": len(shape.Solids),
+        "faces": len(shape.Faces),
+        "bounds": {
+            "min": [bounds.XMin, bounds.YMin, bounds.ZMin],
+            "max": [bounds.XMax, bounds.YMax, bounds.ZMax],
+            "size": [bounds.XLength, bounds.YLength, bounds.ZLength],
+        },
+    }
 
 
 class ObjectOp(object):
@@ -450,6 +474,8 @@ class ObjectOp(object):
         self.vertRapid = None
         self.addNewProps = None
         self.isBaseValid = True
+        self._generation_sequence = 0
+        self._generation_diagnostics = None
 
         self.initOperation(obj)
 
@@ -470,6 +496,62 @@ class ObjectOp(object):
                 job.SetupSheet.Proxy.setOperationProperties(obj, name)
                 obj.recompute()
                 obj.Proxy = self
+
+    def _beginGenerationDiagnostics(self, obj):
+        """Start one authoritative, queryable path-generation record."""
+        self._generation_sequence += 1
+        base = []
+        if hasattr(obj, "Base"):
+            for source, subelements in obj.Base or []:
+                base.append(
+                    {
+                        "object": getattr(source, "Name", None),
+                        "subelements": list(subelements or []),
+                    }
+                )
+        self._generation_diagnostics = {
+            "generation": self._generation_sequence,
+            "operation": obj.Name,
+            "operation_type": obj.Proxy.__class__.__name__ if obj.Proxy else None,
+            "status": "running",
+            "stage": "preflight",
+            "base": base,
+            "tool_controller": getattr(getattr(obj, "ToolController", None), "Name", None),
+            "error": None,
+            "depths": None,
+            "command_count": 0,
+            "command_types": {},
+        }
+
+    def _updateGenerationDiagnostics(self, stage, status=None, **details):
+        if self._generation_diagnostics is None:
+            return
+        self._generation_diagnostics["stage"] = stage
+        if status is not None:
+            self._generation_diagnostics["status"] = status
+        self._generation_diagnostics.update(details)
+
+    def _failGeneration(self, obj, stage, code, message, **details):
+        obj.Path = Path.Path()
+        self._updateGenerationDiagnostics(
+            stage,
+            status="failed",
+            error={"code": code, "message": str(message), **details},
+        )
+
+    def getGenerationDiagnostics(self, obj=None):
+        """Return structured facts from the most recent execute() call."""
+        if self._generation_diagnostics is None:
+            return {
+                "generation": 0,
+                "operation": getattr(obj, "Name", None),
+                "status": "not_run",
+                "stage": "not_started",
+                "error": None,
+                "command_count": 0,
+                "command_types": {},
+            }
+        return copy.deepcopy(self._generation_diagnostics)
 
     @classmethod
     def opPropertyEnumerations(self, dataType="data"):
@@ -1085,22 +1167,63 @@ class ObjectOp(object):
         the receiver's Path property from the command list.
         """
         Path.Log.track()
+        self._beginGenerationDiagnostics(obj)
 
         job = getattr(self, "job", None) or PathUtils.findParentJob(obj)
         if job and "freezed" in job.getStatusString().casefold():
+            self._updateGenerationDiagnostics(
+                "job_state",
+                status="skipped",
+                error={
+                    "code": "job_frozen",
+                    "message": "The parent CAM job is frozen.",
+                },
+            )
             return
 
         if not obj.Active:
             path = Path.Path("(inactive operation)")
             obj.Path = path
+            self._updateGenerationDiagnostics(
+                "operation_state",
+                status="skipped",
+                error={
+                    "code": "operation_inactive",
+                    "message": "The CAM operation is inactive.",
+                },
+                command_count=len(path.Commands),
+                command_types={command.Name: 1 for command in path.Commands},
+            )
             return
 
         if not self._setBaseAndStock(obj):
+            parent = PathUtils.findParentJob(obj)
+            if parent is None:
+                self._failGeneration(
+                    obj,
+                    "job_preflight",
+                    "no_parent_job",
+                    "No parent CAM job was found for the operation.",
+                )
+            else:
+                self._failGeneration(
+                    obj,
+                    "job_preflight",
+                    "job_has_no_model",
+                    "The parent CAM job has no model objects.",
+                    job=parent.Name,
+                )
             return
 
         # make sure Base is still valid
         if not self.checkBase(obj):
-            obj.Path = Path.Path()
+            self._failGeneration(
+                obj,
+                "base_validation",
+                "stale_base_geometry",
+                "One or more operation base references are stale.",
+                base=self._generation_diagnostics["base"],
+            )
             raise Exception("Base geometry error!")
 
         if FeatureTool & self.opFeatures(obj):
@@ -1111,6 +1234,14 @@ class ObjectOp(object):
                         "CAM",
                         "No Tool Controller is selected. We need a tool to build a Path.",
                     )
+                )
+                self._failGeneration(
+                    obj,
+                    "tool_validation",
+                    "missing_tool_controller",
+                    "No nonzero tool controller is selected.",
+                    tool_controller=getattr(tc, "Name", None),
+                    tool_number=getattr(tc, "ToolNumber", None),
                 )
                 return
             else:
@@ -1126,6 +1257,15 @@ class ObjectOp(object):
                             "No Tool found or diameter is zero. We need a tool to build a Path.",
                         )
                     )
+                    self._failGeneration(
+                        obj,
+                        "tool_validation",
+                        "invalid_tool",
+                        "The selected controller has no usable nonzero-diameter tool.",
+                        tool_controller=tc.Name,
+                        tool=getattr(tool, "Name", None),
+                        diameter=float(getattr(tool, "Diameter", 0.0) or 0.0),
+                    )
                     return
                 self.radius = float(tool.Diameter) / 2.0
                 self.tool = tool
@@ -1138,10 +1278,27 @@ class ObjectOp(object):
         # if rotation is required but unavailable — otherwise downstream
         # geometry ops would fail with confusing errors against unrotated input.
         if not self._setup_workplane_transform(obj):
-            obj.Path = Path.Path("(workplane rotation unavailable)")
+            self._failGeneration(
+                obj,
+                "workplane_setup",
+                "workplane_rotation_unavailable",
+                "The operation workplane could not be transformed into the machining frame.",
+                workplane=tuple(obj.Workplane) if hasattr(obj, "Workplane") else None,
+            )
             return
 
-        self.updateDepths(obj)
+        self._updateGenerationDiagnostics("depth_resolution")
+        try:
+            self.updateDepths(obj)
+        except Exception as exc:
+            self._failGeneration(
+                obj,
+                "depth_resolution",
+                "depth_resolution_failed",
+                str(exc),
+                exception_type=type(exc).__name__,
+            )
+            raise
         # now that all op values are set make sure the user properties get updated accordingly,
         # in case they still have an expression referencing any op values
         obj.recompute()
@@ -1175,8 +1332,26 @@ class ObjectOp(object):
             if self.stock and hasattr(self.stock, "Shape") and self.stock.Shape:
                 self.stock = transform_shape(self.stock)
 
+        self._updateGenerationDiagnostics(
+            "path_generation",
+            depths={
+                name: getattr(getattr(obj, name, None), "Value", None)
+                for name in ("StartDepth", "FinalDepth", "StepDown")
+                if hasattr(obj, name)
+            },
+        )
         try:
             result = self.opExecute(obj)
+        except Exception as exc:
+            self._failGeneration(
+                obj,
+                "path_generation",
+                "native_generation_exception",
+                str(exc),
+                exception_type=type(exc).__name__,
+                base=self._generation_diagnostics["base"],
+            )
+            raise
         finally:
             # Always restore originals, even if opExecute raises
             self.model = saved_model
@@ -1238,6 +1413,62 @@ class ObjectOp(object):
         obj.Path = path
         obj.CycleTime = getCycleTimeEstimate(obj)
         self.job.Proxy.getCycleTime()
+        command_types = {}
+        for command in path.Commands:
+            command_types[command.Name] = command_types.get(command.Name, 0) + 1
+        cutting_commands = sum(
+            command_types.get(name, 0)
+            for name in ("G1", "G01", "G2", "G02", "G3", "G03", "G73", "G81", "G82", "G83")
+        )
+        if cutting_commands == 0:
+            operation_properties = {}
+            for name in (
+                "StartDepth",
+                "FinalDepth",
+                "StepDown",
+                "StepOver",
+                "BoundaryShape",
+                "Side",
+                "ClearingPattern",
+            ):
+                if not hasattr(obj, name):
+                    continue
+                value = getattr(obj, name)
+                operation_properties[name] = (
+                    float(value.Value) if hasattr(value, "Value") else str(value)
+                )
+            removal_shape = getattr(obj, "removalshape", None)
+            self._updateGenerationDiagnostics(
+                "path_generation",
+                status="failed",
+                error={
+                    "code": "no_cutting_commands",
+                    "message": "Native generation produced no cutting motion commands.",
+                    "operation_properties": operation_properties,
+                    "removal_shape": _shapeGenerationFacts(removal_shape),
+                    "stock": _shapeGenerationFacts(getattr(self.stock, "Shape", None)),
+                    "models": [
+                        {
+                            "object": getattr(model, "Name", None),
+                            "shape": _shapeGenerationFacts(getattr(model, "Shape", None)),
+                        }
+                        for model in (self.model or [])
+                    ],
+                },
+                command_count=len(path.Commands),
+                command_types=command_types,
+                cutting_command_count=0,
+            )
+        else:
+            self._updateGenerationDiagnostics(
+                "complete",
+                status="succeeded",
+                error=None,
+                command_count=len(path.Commands),
+                command_types=command_types,
+                cutting_command_count=cutting_commands,
+                cycle_time=obj.CycleTime,
+            )
         return result
 
     def addBase(self, obj, base, sub):

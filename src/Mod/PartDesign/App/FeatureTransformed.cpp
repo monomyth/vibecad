@@ -72,6 +72,20 @@ Transformed::Transformed()
 
     ADD_PROPERTY(TransformMode, (static_cast<long>(Mode::Features)));
     TransformMode.setEnums(transformModeEnums.data());
+    ADD_PROPERTY_TYPE(
+        GeneratedOccurrenceCount,
+        (0),
+        "Transformation diagnostics",
+        App::Prop_ReadOnly,
+        "Native transformation count generated during the latest execute"
+    );
+    ADD_PROPERTY_TYPE(
+        RejectedSolidCount,
+        (0),
+        "Transformation diagnostics",
+        App::Prop_ReadOnly,
+        "Disconnected solids rejected by the latest execute"
+    );
 }
 
 void Transformed::positionBySupport()
@@ -326,6 +340,8 @@ void Transformed::onChanged(const App::Property* prop)
 
 App::DocumentObjectExecReturn* Transformed::execute()
 {
+    GeneratedOccurrenceCount.setValue(0);
+    RejectedSolidCount.setValue(0);
     if (isMultiTransformChild()) {
         return App::DocumentObject::StdReturn;
     }
@@ -362,6 +378,7 @@ App::DocumentObjectExecReturn* Transformed::execute()
     if (transformations.empty()) {
         return App::DocumentObject::StdReturn;  // No transformations defined, exit silently
     }
+    GeneratedOccurrenceCount.setValue(static_cast<int>(transformations.size()));
 
     // Get the support
     Part::Feature* supportFeature = nullptr;
@@ -468,6 +485,11 @@ App::DocumentObjectExecReturn* Transformed::execute()
     this->Shape.setValue(getSolid(supportShape));
     if (singleSolidRuleMode() == SingleSolidRuleMode::Enforced) {
         rejected = getRemainingSolids(supportShape.getShape());
+        int rejectedCount = 0;
+        for (TopExp_Explorer explorer(rejected, TopAbs_SOLID); explorer.More(); explorer.Next()) {
+            ++rejectedCount;
+        }
+        RejectedSolidCount.setValue(rejectedCount);
     }
     else {
         rejected.Nullify();

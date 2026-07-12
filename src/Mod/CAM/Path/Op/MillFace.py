@@ -24,6 +24,7 @@
 
 import FreeCAD
 import Path
+import Path.Op.Area as PathAreaOp
 import Path.Op.PocketBase as PathPocketBase
 import PathScripts.PathUtils as PathUtils
 from PySide.QtCore import QT_TRANSLATE_NOOP
@@ -117,6 +118,15 @@ class ObjectFace(PathPocketBase.ObjectPocket):
 
     def pocketInvertExtraOffset(self):
         return True
+
+    def opExecute(self, obj):
+        """Generate facing paths with or without an explicit Base selection.
+
+        PocketBase suppresses execution when Base is empty, but facing against
+        the stock/model boundary intentionally uses an empty Base. Bypass only
+        that pocket-specific gate and run the common Area operation directly.
+        """
+        return PathAreaOp.ObjectOp.opExecute(self, obj)
 
     def areaOpOnChanged(self, obj, prop):
         """areaOpOnChanged(obj, prop) ... facing specific depths calculation."""

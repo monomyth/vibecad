@@ -275,6 +275,8 @@ class GmshTools(ObjectTools):
             "LogVerbosity", "3"
         )
         command_list = ["-v", log_level, "-", self.model_file]
+        self.program = self.gmsh_bin
+        self.arguments = list(command_list)
         self.process.start(self.gmsh_bin, command_list)
         return self.process
 

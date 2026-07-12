@@ -3,3 +3,4 @@
 import _PartDesign
 
 makeFilletArc = _PartDesign.makeFilletArc
+getHoleThreadCatalog = _PartDesign.getHoleThreadCatalog

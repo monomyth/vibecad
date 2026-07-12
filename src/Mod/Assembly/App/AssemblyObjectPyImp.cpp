@@ -26,6 +26,10 @@
 #include "AssemblyObjectPy.h"
 #include "AssemblyObjectPy.cpp"
 
+#include <algorithm>
+
+#include <App/PropertyLinks.h>
+
 using namespace Assembly;
 
 // returns a string which represents the object e.g. when printed in python
@@ -120,6 +124,100 @@ PyObject* AssemblyObjectPy::updateSolveStatus(PyObject* args) const
 
     this->getAssemblyObjectPtr()->updateSolveStatus();
     Py_Return;
+}
+
+PyObject* AssemblyObjectPy::getSolverDiagnostics(PyObject* args) const
+{
+    if (!PyArg_ParseTuple(args, "")) {
+        return nullptr;
+    }
+
+    auto* assembly = this->getAssemblyObjectPtr();
+    auto stringList = [](const std::vector<std::string>& values) {
+        Py::List result;
+        for (const auto& value : values) {
+            result.append(Py::String(value));
+        }
+        return result;
+    };
+
+    const auto& conflicting = assembly->getLastConflicting();
+    const auto& redundant = assembly->getLastRedundant();
+    const auto& partial = assembly->getLastPartiallyRedundant();
+    const auto& malformed = assembly->getLastMalformed();
+
+    Py::List jointDiagnostics;
+    for (const auto& native : assembly->getLastJointDiagnostics()) {
+        Py::Dict joint;
+        joint["joint"] = Py::String(native.jointName);
+        joint["constraint_count"] = Py::Long(native.constraintCount);
+        joint["removed_degrees_of_freedom"] = Py::Long(native.removedDegreesOfFreedom);
+        joint["redundant_constraint_count"] = Py::Long(native.redundantConstraintCount);
+        joint["maximum_absolute_residual"] = Py::Float(native.maximumAbsoluteResidual);
+        std::string status = "satisfied";
+        if (std::find(malformed.begin(), malformed.end(), native.jointName) != malformed.end()) {
+            status = "malformed";
+        }
+        else if (std::find(conflicting.begin(), conflicting.end(), native.jointName)
+                 != conflicting.end()) {
+            status = "conflicting";
+        }
+        else if (std::find(redundant.begin(), redundant.end(), native.jointName)
+                 != redundant.end()) {
+            status = "redundant";
+        }
+        else if (std::find(partial.begin(), partial.end(), native.jointName) != partial.end()) {
+            status = "partially_redundant";
+        }
+        joint["status"] = Py::String(status);
+        Py::List constraints;
+        for (const auto& nativeConstraint : native.constraints) {
+            Py::Dict constraint;
+            constraint["specification"] = Py::String(nativeConstraint.specification);
+            constraint["residual"] = Py::Float(nativeConstraint.residual);
+            constraint["absolute_residual"] = Py::Float(std::abs(nativeConstraint.residual));
+            constraint["redundant"] = Py::Boolean(nativeConstraint.redundant);
+            constraints.append(constraint);
+        }
+        joint["constraints"] = constraints;
+        jointDiagnostics.append(joint);
+    }
+
+    Py::List grounded;
+    for (auto* groundedJoint : assembly->getGroundedJoints()) {
+        if (!groundedJoint) {
+            continue;
+        }
+        Py::Dict item;
+        item["joint"] = Py::String(groundedJoint->getNameInDocument());
+        auto* link = groundedJoint->getPropertyByName<App::PropertyLink>("ObjectToGround");
+        auto* component = link ? link->getValue() : nullptr;
+        item["component"] = component
+            ? Py::String(component->getNameInDocument())
+            : Py::String("");
+        grounded.append(item);
+    }
+
+    Py::Dict result;
+    result["solver_status"] = Py::Long(assembly->getLastSolverStatus());
+    result["solver_message"] = Py::String(assembly->getLastSolverMessage());
+    result["remaining_degrees_of_freedom"] = Py::Long(assembly->getLastDoF());
+    result["has_conflicts"] = Py::Boolean(assembly->getLastHasConflicts());
+    result["has_redundancies"] = Py::Boolean(assembly->getLastHasRedundancies());
+    result["has_partial_redundancies"] = Py::Boolean(
+        assembly->getLastHasPartialRedundancies()
+    );
+    result["has_malformed_constraints"] = Py::Boolean(
+        assembly->getLastHasMalformedConstraints()
+    );
+    result["conflicting_joints"] = stringList(conflicting);
+    result["redundant_joints"] = stringList(redundant);
+    result["partially_redundant_joints"] = stringList(partial);
+    result["malformed_joints"] = stringList(malformed);
+    result["grounded_components"] = grounded;
+    result["joints"] = jointDiagnostics;
+    result["residual_tolerance"] = Py::Float(1.0e-6);
+    return Py::new_reference_to(result);
 }
 
 PyObject* AssemblyObjectPy::undoSolve(PyObject* args) const

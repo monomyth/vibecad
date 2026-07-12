@@ -173,6 +173,11 @@ public:
     }
     static std::string internalAlignmentTypeToString(InternalAlignmentType alignment);
 
+    const boost::uuids::uuid& getTag() const
+    {
+        return tag;
+    }
+
     friend class PropertyConstraintList;
 
 private:

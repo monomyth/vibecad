@@ -14,6 +14,12 @@ Unicode true
 # enable support for high DPI resolution
 ManifestDPIAware true
 
+# Product identity must be available while Settings.nsh resolves the default
+# installer filename. It can still be overridden from makensis with /DAPP_NAME.
+!ifndef APP_NAME
+!define APP_NAME "VibeCAD"
+!endif
+
 # installer settings like version numbers
 !include settings.nsh
 
@@ -69,4 +75,3 @@ ManifestDPIAware true
 # Output file
 
 Outfile "${SETUP_EXE}"
-

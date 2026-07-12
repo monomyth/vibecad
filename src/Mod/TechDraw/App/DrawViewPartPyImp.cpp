@@ -22,10 +22,20 @@
 
 
 # include <BRepBuilderAPI_MakeVertex.hxx>
+# include <BRepBndLib.hxx>
+# include <BRepGProp.hxx>
+# include <BRep_Tool.hxx>
+# include <Bnd_Box.hxx>
+# include <GProp_GProps.hxx>
+# include <Precision.hxx>
+# include <TopExp_Explorer.hxx>
+# include <TopExp.hxx>
+# include <TopTools_IndexedMapOfShape.hxx>
 # include <gp_Pnt.hxx>
 # include <TopoDS.hxx>
 # include <TopoDS_Edge.hxx>
 # include <TopoDS_Shape.hxx>
+# include <TopoDS_Vertex.hxx>
 
 
 #include <Base/Console.h>
@@ -38,10 +48,12 @@
 
 #include "CenterLine.h"
 #include "DrawViewPart.h"
+#include "DrawProjectSplit.h"
 #include "Geometry.h"
 #include "GeometryObject.h"
 #include "Cosmetic.h"
 #include "DrawUtil.h"
+#include "ShapeExtractor.h"
 
 // inclusion of the generated files (generated out of DrawViewPartPy.xml)
 #include <Mod/TechDraw/App/CosmeticVertexPy.h>
@@ -51,6 +63,201 @@
 
 using namespace TechDraw;
 using DU = DrawUtil;
+
+namespace {
+
+const char* edgeClassName(EdgeClass edgeClass)
+{
+    switch (edgeClass) {
+        case EdgeClass::UVISO:
+            return "iso";
+        case EdgeClass::OUTLINE:
+            return "outline";
+        case EdgeClass::SMOOTH:
+            return "smooth";
+        case EdgeClass::SEAM:
+            return "seam";
+        case EdgeClass::HARD:
+            return "hard";
+        case EdgeClass::NONE:
+            return "none";
+    }
+    return "unknown";
+}
+
+Py::Dict vectorDescriptor(const Base::Vector3d& value)
+{
+    Py::Dict result;
+    result.setItem("x", Py::Float(value.x));
+    result.setItem("y", Py::Float(value.y));
+    return result;
+}
+
+Py::Dict edgeBounds(const TopoDS_Edge& edge)
+{
+    Bnd_Box box;
+    box.SetGap(0.0);
+    BRepBndLib::AddOptimal(edge, box);
+    Standard_Real xmin = 0.0;
+    Standard_Real ymin = 0.0;
+    Standard_Real zmin = 0.0;
+    Standard_Real xmax = 0.0;
+    Standard_Real ymax = 0.0;
+    Standard_Real zmax = 0.0;
+    box.Get(xmin, ymin, zmin, xmax, ymax, zmax);
+    Py::Dict result;
+    result.setItem("min_x", Py::Float(xmin));
+    result.setItem("min_y", Py::Float(ymin));
+    result.setItem("max_x", Py::Float(xmax));
+    result.setItem("max_y", Py::Float(ymax));
+    result.setItem("width", Py::Float(xmax - xmin));
+    result.setItem("height", Py::Float(ymax - ymin));
+    return result;
+}
+
+struct ProjectedSourceEdge
+{
+    std::string objectName;
+    std::string subelement;
+    TopoDS_Edge edge;
+};
+
+struct ProjectedSourceVertex
+{
+    std::string objectName;
+    std::string subelement;
+    Base::Vector3d point;
+};
+
+struct ProjectedSources
+{
+    std::vector<ProjectedSourceEdge> edges;
+    std::vector<ProjectedSourceVertex> vertices;
+};
+
+ProjectedSources projectSourceSubelements(DrawViewPart* view)
+{
+    ProjectedSources result;
+    const Base::Vector3d centroid = view->getOriginalCentroid();
+    const gp_Ax2 projectionCS = view->getProjectionCS();
+
+    for (App::DocumentObject* source : view->getAllSources()) {
+        if (!source || !source->getNameInDocument()) {
+            continue;
+        }
+        TopoDS_Shape transformed = ShapeExtractor::getLocatedShape(source);
+        if (transformed.IsNull()) {
+            continue;
+        }
+        DrawViewPart::centerScaleRotate(view, transformed, centroid);
+        const std::string objectName = source->getNameInDocument();
+
+        TopTools_IndexedMapOfShape sourceEdges;
+        TopExp::MapShapes(transformed, TopAbs_EDGE, sourceEdges);
+        for (int edgeIndex = 1; edgeIndex <= sourceEdges.Extent(); ++edgeIndex) {
+            const TopoDS_Edge sourceEdge = TopoDS::Edge(sourceEdges(edgeIndex));
+            try {
+                const TopoDS_Shape projected = GeometryObject::projectSimpleShape(
+                    sourceEdge, projectionCS, true);
+                for (TopExp_Explorer projectedEdges(projected, TopAbs_EDGE);
+                     projectedEdges.More(); projectedEdges.Next()) {
+                    result.edges.push_back({objectName,
+                                            "Edge" + std::to_string(edgeIndex),
+                                            TopoDS::Edge(projectedEdges.Current())});
+                }
+            }
+            catch (...) {
+                // The descriptor reports an unmapped element instead of
+                // inventing a source when OCCT cannot project this edge.
+            }
+        }
+
+        TopTools_IndexedMapOfShape sourceVertices;
+        TopExp::MapShapes(transformed, TopAbs_VERTEX, sourceVertices);
+        for (int vertexIndex = 1; vertexIndex <= sourceVertices.Extent(); ++vertexIndex) {
+            const gp_Pnt point = BRep_Tool::Pnt(
+                TopoDS::Vertex(sourceVertices(vertexIndex)));
+            const Base::Vector3d projected = view->projectPoint(
+                Base::Vector3d(point.X(), point.Y(), point.Z()), true);
+            result.vertices.push_back(
+                {objectName, "Vertex" + std::to_string(vertexIndex), projected});
+        }
+    }
+    return result;
+}
+
+Py::Dict sourceMappingForEdge(const TopoDS_Edge& edge,
+                              EdgeClass edgeClass,
+                              const ProjectedSources& sources)
+{
+    Py::List candidates;
+    for (const auto& source : sources.edges) {
+        if (!DrawProjectSplit::boxesIntersect(source.edge, edge)) {
+            continue;
+        }
+        // A result of 1 means the projected view edge is wholly contained in
+        // the projection of this source edge. This handles HLR edge splitting
+        // without claiming a mapping for merely crossing curves.
+        if (DrawProjectSplit::isSubset(source.edge, edge) != 1) {
+            continue;
+        }
+        Py::Dict candidate;
+        candidate.setItem("object_name", Py::String(source.objectName));
+        candidate.setItem("subelement", Py::String(source.subelement));
+        candidates.append(candidate);
+    }
+
+    Py::Dict result;
+    result.setItem("candidates", candidates);
+    if (candidates.size() == 1) {
+        result.setItem("status", Py::String("exact"));
+    }
+    else if (candidates.size() > 1) {
+        result.setItem("status", Py::String("ambiguous"));
+    }
+    else if (edgeClass == EdgeClass::OUTLINE || edgeClass == EdgeClass::SMOOTH) {
+        result.setItem("status", Py::String("generated_projection"));
+    }
+    else {
+        result.setItem("status", Py::String("unmapped"));
+    }
+    return result;
+}
+
+Py::Dict sourceMappingForVertex(const Base::Vector3d& point,
+                                bool isCenter,
+                                const ProjectedSources& sources)
+{
+    Py::List candidates;
+    const double tolerance = std::max(Precision::Confusion(), 1.0e-6);
+    for (const auto& source : sources.vertices) {
+        if (!point.IsEqual(source.point, tolerance)) {
+            continue;
+        }
+        Py::Dict candidate;
+        candidate.setItem("object_name", Py::String(source.objectName));
+        candidate.setItem("subelement", Py::String(source.subelement));
+        candidates.append(candidate);
+    }
+    Py::Dict result;
+    result.setItem("candidates", candidates);
+    if (candidates.size() == 1) {
+        result.setItem("status", Py::String("exact"));
+    }
+    else if (candidates.size() > 1) {
+        result.setItem("status", Py::String("ambiguous"));
+    }
+    else if (isCenter) {
+        result.setItem("status", Py::String("generated_center"));
+    }
+    else {
+        result.setItem("status", Py::String("unmapped"));
+    }
+    return result;
+}
+
+}  // namespace
+
 // returns a string which represents the object e.g. when printed in python
 std::string DrawViewPartPy::representation() const
 {
@@ -133,6 +340,76 @@ PyObject* DrawViewPartPy::getVisibleVertexes(PyObject *args)
     }
 
     return Py::new_reference_to(pVertexList);
+}
+
+PyObject* DrawViewPartPy::getProjectedElementDescriptors(PyObject* args)
+{
+    if (!PyArg_ParseTuple(args, "")) {
+        return nullptr;
+    }
+
+    DrawViewPart* view = getDrawViewPartPtr();
+    if (!view->hasGeometry()) {
+        throw Py::RuntimeError("The TechDraw view has no projected geometry.");
+    }
+
+    const ProjectedSources projectedSources = projectSourceSubelements(view);
+    Py::List edgesOut;
+    const auto edges = view->getEdgeGeometry();
+    for (size_t index = 0; index < edges.size(); ++index) {
+        const auto& geometry = edges.at(index);
+        const TopoDS_Edge edge = geometry->getOCCEdge();
+        GProp_GProps properties;
+        BRepGProp::LinearProperties(edge, properties);
+
+        Py::Dict descriptor;
+        descriptor.setItem("name", Py::String("Edge" + std::to_string(index)));
+        descriptor.setItem("element_type", Py::String("edge"));
+        descriptor.setItem("geometry_type", Py::String(geometry->geomTypeName()));
+        descriptor.setItem("edge_class", Py::String(edgeClassName(geometry->getClassOfEdge())));
+        descriptor.setItem("visible", Py::Boolean(geometry->getHlrVisible()));
+        descriptor.setItem("closed", Py::Boolean(geometry->closed()));
+        descriptor.setItem("length_view_mm", Py::Float(properties.Mass()));
+        descriptor.setItem("bounds_2d", edgeBounds(edge));
+        descriptor.setItem("start_2d", vectorDescriptor(geometry->getStartPoint()));
+        descriptor.setItem("end_2d", vectorDescriptor(geometry->getEndPoint()));
+        descriptor.setItem("midpoint_2d", vectorDescriptor(geometry->getMidPoint()));
+        descriptor.setItem("hlr_source_index", Py::Long(geometry->sourceIndex()));
+        descriptor.setItem(
+            "source_mapping",
+            sourceMappingForEdge(edge, geometry->getClassOfEdge(), projectedSources));
+
+        if (auto circle = std::dynamic_pointer_cast<TechDraw::Circle>(geometry)) {
+            descriptor.setItem("center_2d", vectorDescriptor(circle->center));
+            descriptor.setItem("radius_view_mm", Py::Float(circle->radius));
+        }
+        edgesOut.append(descriptor);
+    }
+
+    Py::List verticesOut;
+    const auto vertices = view->getVertexGeometry();
+    for (size_t index = 0; index < vertices.size(); ++index) {
+        const auto& vertex = vertices.at(index);
+        const Base::Vector3d point = vertex->point();
+        Py::Dict descriptor;
+        descriptor.setItem("name", Py::String("Vertex" + std::to_string(index)));
+        descriptor.setItem("element_type", Py::String("vertex"));
+        descriptor.setItem("point_2d", vectorDescriptor(point));
+        descriptor.setItem("visible", Py::Boolean(vertex->getHlrVisible()));
+        descriptor.setItem("is_center", Py::Boolean(vertex->isCenter()));
+        descriptor.setItem("is_reference", Py::Boolean(vertex->isReference()));
+        descriptor.setItem(
+            "source_mapping",
+            sourceMappingForVertex(point, vertex->isCenter(), projectedSources));
+        verticesOut.append(descriptor);
+    }
+
+    Py::Dict result;
+    result.setItem("coordinate_space", Py::String("view_projection_scaled_centered"));
+    result.setItem("view_scale", Py::Float(view->getScale()));
+    result.setItem("edges", edgesOut);
+    result.setItem("vertices", verticesOut);
+    return Py::new_reference_to(result);
 }
 
 PyObject* DrawViewPartPy::getHiddenVertexes(PyObject *args)
@@ -981,4 +1258,3 @@ int DrawViewPartPy::setCustomAttributes(const char* /*attr*/, PyObject* /*obj*/)
 {
     return 0;
 }
-

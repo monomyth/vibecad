@@ -124,6 +124,7 @@ SET(Python_SRCS
     BodyPyImp.cpp
     Feature.pyi
     FeaturePyImp.cpp
+    FeatureRefinePyImp.cpp
 )
 SOURCE_GROUP("Python" FILES ${Python_SRCS})
 

@@ -450,6 +450,11 @@ Py::Object MainWindowPy::addDockWindow(const Py::Tuple& args, const Py::Dict& kw
         throw Py::RuntimeError("addDockWindow: failed to create the dock window");
     }
 
+    // DockWindowManager reparents the widget in C++, outside PySide's view.
+    // Mirror that ownership change so the Python wrapper cannot delete the
+    // native panel when the caller's temporary reference goes out of scope.
+    PythonWrapper::setParent(pyWidget, dw);
+
     // Mirror DockWindowManager::setup(): the toggle-view action data is the
     // key used for visibility persistence, and addDockWindow() hides the
     // dock by default to avoid flicker during layout restore.

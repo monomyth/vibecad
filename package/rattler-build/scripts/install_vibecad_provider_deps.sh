@@ -30,6 +30,7 @@ if [[ ! -f "${requirements}" ]]; then
 fi
 
 echo "Installing VibeCAD provider SDK dependencies into ${env_root}"
+"${python_exe}" -m pip uninstall --yes openai-agents
 "${python_exe}" -m pip install \
     --disable-pip-version-check \
     --upgrade \
@@ -38,9 +39,20 @@ echo "Installing VibeCAD provider SDK dependencies into ${env_root}"
 "${python_exe}" -m pip check
 "${python_exe}" - <<'PY'
 import importlib
+import importlib.util
+import sys
 
-for module_name in ("agents", "anthropic", "keyring"):
+for module_name in ("openai", "anthropic", "keyring", "jsonschema"):
     importlib.import_module(module_name)
 
-print("VibeCAD provider SDK and keyring imports ok")
+if sys.platform == "win32":
+    importlib.import_module("keyring.backends.Windows")
+else:
+    importlib.import_module("secretstorage")
+    importlib.import_module("keyring.backends.SecretService")
+
+if importlib.util.find_spec("agents") is not None:
+    raise RuntimeError("The removed OpenAI Agents SDK is still present in the runtime.")
+
+print("VibeCAD provider SDK, OS keyring backend, and schema validator imports ok")
 PY

@@ -6,8 +6,3 @@ VibeCAD intentionally does not register a standalone workbench. Existing
 workbenches opt in to native AI commands by calling VibeCADGui registration
 helpers from their own InitGui.py files.
 """
-
-import FreeCAD as App
-
-
-App.__unit_test__ += ["TestVibeCAD"]

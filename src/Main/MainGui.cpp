@@ -196,25 +196,26 @@ int main(int argc, char** argv)
 #endif
 
     // Name and Version of the Application
-    App::Application::Config()["ExeName"] = "FreeCAD";
-    App::Application::Config()["ExeVendor"] = "FreeCAD";
+    App::Application::Config()["ExeName"] = "VibeCAD";
+    App::Application::Config()["ExeVendor"] = "VibeCAD";
     App::Application::Config()["AppDataSkipVendor"] = "true";
-    App::Application::Config()["MaintainerUrl"] = "https://freecad.org";
+    App::Application::Config()["MaintainerUrl"] = "https://github.com/10-X-eng/vibecad";
 
     // set the banner (for logging and console)
     App::Application::Config()["CopyrightInfo"] = sBanner;
-    App::Application::Config()["AppIcon"] = "freecad";
-    App::Application::Config()["SplashScreen"] = "freecadsplash";
+    App::Application::Config()["AppIcon"] = "vibecad";
+    App::Application::Config()["SplashScreen"] = "vibecadsplash";
     App::Application::Config()["AboutImage"] = App::Application::isDevelopmentVersion()
-        ? "freecadaboutdev"
-        : "freecadabout";
+        ? "vibecadaboutdev"
+        : "vibecadabout";
     App::Application::Config()["StartWorkbench"] = "PartDesignWorkbench";
     // App::Application::Config()["HiddenDockWindow"] = "Property editor";
     App::Application::Config()["SplashAlignment"] = "Bottom|Left";
     App::Application::Config()["SplashTextColor"] = "#418FDE";
     App::Application::Config()["SplashWarningColor"] = "#CA333B";
-    App::Application::Config()["SplashInfoColor"] = "#000000";
-    App::Application::Config()["SplashInfoPosition"] = "6,75";
+    App::Application::Config()["SplashInfoColor"] = "#74c0fc";
+    App::Application::Config()["SplashInfoExeName"] = "";
+    App::Application::Config()["SplashInfoPosition"] = "250,280";
     App::Application::Config()["DesktopFileName"] = "org.freecad.FreeCAD";
 
     try {

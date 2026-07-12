@@ -112,7 +112,16 @@ public:
         double pitch;
         double TapDrill;
     };
+    struct ThreadCatalogEntry
+    {
+        std::string standard;
+        std::vector<ThreadDescription> sizes;
+        std::vector<std::string> classes;
+        std::vector<std::string> fits;
+        std::vector<std::string> holeCuts;
+    };
     static const std::vector<Hole::ThreadDescription> threadDescription[];
+    static std::vector<ThreadCatalogEntry> getThreadCatalog();
 
     static const double metricHoleDiameters[51][4];
 

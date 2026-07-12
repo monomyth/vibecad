@@ -18,26 +18,35 @@ from .common import (
 
 TOOL_SPEC = {
     "name": "sketcher.add_external_geometry",
+    "safety": "SAFE_WRITE",
+    "edit_modes": ["sketch"],
     "description": (
-        "Add one native Sketcher external geometry reference from an existing document object "
-        "subelement, equivalent to the Sketcher external geometry tool. Use to constrain sketch "
-        "geometry against edges/vertices of existing solids or other sketches; find candidates "
-        "with sketcher.inspect_sketch include=['reference_geometry']."
+        "Add one Sketcher external-geometry reference from an existing object "
+        "subelement. Use to constrain sketches to existing edges/vertices."
     ),
     "contextual": True,
     "parameters": {
         "type": "object",
         "properties": {
-            "sketch_name": {
+            "source_object": {
                 "type": "string",
-                "description": "Sketch object name or label. Defaults to the active edit sketch or first sketch.",
+                "description": "Document object name providing the subelement.",
             },
-            "source_object": {"type": "string", "description": "Document object name providing the subelement."},
-            "subelement": {"type": "string", "description": "Subelement name on the source object, e.g. Edge1 or Vertex2."},
-            "defining": {"type": "boolean", "description": "Import as defining (driving) geometry. Default false (reference only)."},
-            "intersection": {"type": "boolean", "description": "Project the subelement's intersection with the sketch plane. Default false."},
+            "subelement": {
+                "type": "string",
+                "description": "Subelement name on the source object, e.g. Edge1 or Vertex2.",
+            },
+            "defining": {
+                "type": "boolean",
+                "description": "Import as defining (driving) geometry. Default false (reference only).",
+            },
+            "intersection": {
+                "type": "boolean",
+                "description": "Project the subelement's intersection with the sketch plane. Default false.",
+            },
         },
         "required": ["source_object", "subelement"],
+        "additionalProperties": False,
     },
 }
 
@@ -50,21 +59,63 @@ def run(
     defining: bool = False,
     intersection: bool = False,
 ) -> dict[str, Any]:
-    sketch = get_sketch(service, sketch_name)
+    sketch = get_sketch(service)
     if sketch is None:
-        return {"ok": False, "error": "Sketch not found.", "requested": sketch_name}
+        return {
+            "ok": False,
+            "error": "No Sketcher sketch is currently open for editing.",
+        }
     obj = find_document_object(service, source_object)
     if obj is None:
-        return {"ok": False, "error": f"Source object not found: {source_object}"}
+        doc = service._active_document()
+        candidates = [
+            {
+                "name": getattr(candidate, "Name", None),
+                "label": getattr(candidate, "Label", getattr(candidate, "Name", None)),
+                "type": getattr(candidate, "TypeId", None),
+            }
+            for candidate in list(getattr(doc, "Objects", []) or [])
+            if getattr(candidate, "Shape", None) is not None
+        ]
+        return {
+            "ok": False,
+            "failure_code": "SOURCE_OBJECT_NOT_FOUND",
+            "failure_stage": "precondition",
+            "error": f"Source object not found: {source_object}",
+            "requested": {
+                "source_object": source_object,
+                "subelement": subelement,
+            },
+            "candidates": candidates,
+            "live_external_references": external_geometry_summary(sketch),
+            "required_changes": ["Choose one exact source object from candidates."],
+        }
     clean_subelement = str(subelement or "").strip()
     if not clean_subelement:
         return {"ok": False, "error": "subelement is required."}
-    valid = {item["subelement"] for item in subelement_references(obj)}
+    available = subelement_references(obj)
+    valid = {item["subelement"] for item in available}
     if valid and clean_subelement not in valid:
         return {
             "ok": False,
+            "failure_code": "SUBELEMENT_NOT_FOUND",
+            "failure_stage": "precondition",
             "error": f"Subelement {clean_subelement} was not found on {getattr(obj, 'Name', source_object)}.",
-            "available_subelements": sorted(valid)[:120],
+            "requested": {
+                "source_object": source_object,
+                "subelement": clean_subelement,
+            },
+            "observed": {
+                "source_object": {
+                    "name": getattr(obj, "Name", None),
+                    "label": getattr(obj, "Label", getattr(obj, "Name", None)),
+                    "type": getattr(obj, "TypeId", None),
+                }
+            },
+            "candidates": available[:120],
+            "available_subelements": available[:120],
+            "live_external_references": external_geometry_summary(sketch),
+            "required_changes": ["Choose one exact subelement from candidates."],
         }
 
     def _add() -> dict[str, Any]:
@@ -75,15 +126,28 @@ def run(
             raise RuntimeError(f"Sketch not found: {sketch.Name}")
         before = external_geometry_summary(target)
         before_count = len(before)
-        target.addExternal(getattr(obj, "Name", str(source_object)), clean_subelement, bool(defining), bool(intersection))
-        doc = App.ActiveDocument
-        if doc is not None:
-            doc.recompute()
+        target.addExternal(
+            getattr(obj, "Name", str(source_object)),
+            clean_subelement,
+            bool(defining),
+            bool(intersection),
+        )
         after = external_geometry_summary(target)
         return {
             "sketch": target.Name,
             "source_object": getattr(obj, "Name", str(source_object)),
-            "source_label": getattr(obj, "Label", getattr(obj, "Name", str(source_object))),
+            "source_label": getattr(
+                obj, "Label", getattr(obj, "Name", str(source_object))
+            ),
+            "source_type": getattr(obj, "TypeId", None),
+            "source_subelement": next(
+                (
+                    item
+                    for item in available
+                    if item.get("subelement") == clean_subelement
+                ),
+                None,
+            ),
             "subelement": clean_subelement,
             "defining": bool(defining),
             "intersection": bool(intersection),
@@ -94,4 +158,6 @@ def run(
             "external_geometry": after,
         }
 
-    return active_response(service, sketch, run_freecad_transaction("Add Sketcher external geometry", _add))
+    return active_response(
+        service, sketch, run_freecad_transaction("Add Sketcher external geometry", _add)
+    )

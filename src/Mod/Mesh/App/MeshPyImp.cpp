@@ -1152,8 +1152,51 @@ PyObject* MeshPy::hasCorruptedFacets(PyObject* args) const
     if (!PyArg_ParseTuple(args, "")) {
         return nullptr;
     }
-    bool ok = getMeshObjectPtr()->hasFacetsOutOfRange();
+    bool ok = getMeshObjectPtr()->hasCorruptedFacets();
     return Py_BuildValue("O", (ok ? Py_True : Py_False));
+}
+
+PyObject* MeshPy::countDuplicatedPoints(PyObject* args) const
+{
+    if (!PyArg_ParseTuple(args, "")) {
+        return nullptr;
+    }
+    const auto& kernel = getMeshObjectPtr()->getKernel();
+    MeshCore::MeshEvalDuplicatePoints evaluation(kernel);
+    return Py_BuildValue("k", static_cast<unsigned long>(evaluation.GetIndices().size()));
+}
+
+PyObject* MeshPy::countDuplicatedFacets(PyObject* args) const
+{
+    if (!PyArg_ParseTuple(args, "")) {
+        return nullptr;
+    }
+    const auto& kernel = getMeshObjectPtr()->getKernel();
+    MeshCore::MeshEvalDuplicateFacets evaluation(kernel);
+    return Py_BuildValue("k", static_cast<unsigned long>(evaluation.GetIndices().size()));
+}
+
+PyObject* MeshPy::countDegeneratedFacets(PyObject* args) const
+{
+    if (!PyArg_ParseTuple(args, "")) {
+        return nullptr;
+    }
+    const auto& kernel = getMeshObjectPtr()->getKernel();
+    MeshCore::MeshEvalDegeneratedFacets evaluation(kernel, 0.0F);
+    return Py_BuildValue("k", static_cast<unsigned long>(evaluation.GetIndices().size()));
+}
+
+PyObject* MeshPy::countOpenEdges(PyObject* args) const
+{
+    if (!PyArg_ParseTuple(args, "")) {
+        return nullptr;
+    }
+    const auto& facets = getMeshObjectPtr()->getKernel().GetFacets();
+    unsigned long count = 0;
+    for (const auto& facet : facets) {
+        count += facet.CountOpenEdges();
+    }
+    return Py_BuildValue("k", count);
 }
 
 PyObject* MeshPy::removeNonManifolds(PyObject* args)

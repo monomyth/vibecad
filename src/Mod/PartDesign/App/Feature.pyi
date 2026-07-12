@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from Base.Metadata import export
 from Part.PartFeature import PartFeature
+from Part.App.TopoShape import TopoShape
 from typing import Optional, overload
 
 @export(
@@ -28,5 +29,14 @@ class Feature(PartFeature):
     def getBaseObject(self) -> Optional[object]:
         """
         getBaseObject: returns feature this one fuses itself to, or None. Normally, this should be the same as BaseFeature property, except for legacy workflow. In legacy workflow, it will look up the support of referenced sketch.
+        """
+        ...
+
+    def getUnrefinedShape(self) -> TopoShape:
+        """
+        Return the operation result before optional PartDesign refinement.
+
+        Returns a null shape when this feature does not support refinement or
+        has not computed an unrefined result.
         """
         ...

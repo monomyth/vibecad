@@ -43,6 +43,20 @@ PROPERTY_SOURCE(PartDesign::MultiTransform, PartDesign::Transformed)
 
 MultiTransform::MultiTransform()
 {
+    ADD_PROPERTY_TYPE(
+        LastFailingChildIndex,
+        (-1),
+        "Transformation diagnostics",
+        App::Prop_ReadOnly,
+        "Index of the first child that failed while generating transformations"
+    );
+    ADD_PROPERTY_TYPE(
+        LastFailingChild,
+        (""),
+        "Transformation diagnostics",
+        App::Prop_ReadOnly,
+        "Name of the first child that failed while generating transformations"
+    );
     ADD_PROPERTY(Transformations, (nullptr));
     Transformations.setSize(0);
 }
@@ -80,6 +94,8 @@ const std::list<gp_Trsf> MultiTransform::getTransformations(
 )
 {
     std::vector<App::DocumentObject*> transFeatures = Transformations.getValues();
+    LastFailingChildIndex.setValue(-1);
+    LastFailingChild.setValue("");
 
     gp_Pnt cog;
     if (!originals.empty()) {
@@ -97,13 +113,29 @@ const std::list<gp_Trsf> MultiTransform::getTransformations(
     std::list<gp_Trsf> result;
     std::list<gp_Pnt> cogs;
 
+    int childIndex = 0;
     for (auto const& f : transFeatures) {
+        LastFailingChildIndex.setValue(childIndex);
+        LastFailingChild.setValue(f && f->getNameInDocument() ? f->getNameInDocument() : "");
         auto transFeature = freecad_cast<PartDesign::Transformed*>(f);
         if (!transFeature) {
+            LastFailingChildIndex.setValue(childIndex);
+            LastFailingChild.setValue(f && f->getNameInDocument() ? f->getNameInDocument() : "");
             throw Base::TypeError("Transformation features must be subclasses of Transformed");
         }
 
-        std::list<gp_Trsf> newTransformations = transFeature->getTransformations(originals);
+        std::list<gp_Trsf> newTransformations;
+        try {
+            newTransformations = transFeature->getTransformations(originals);
+            transFeature->GeneratedOccurrenceCount.setValue(
+                static_cast<int>(newTransformations.size()));
+        }
+        catch (...) {
+            LastFailingChildIndex.setValue(childIndex);
+            LastFailingChild.setValue(
+                transFeature->getNameInDocument() ? transFeature->getNameInDocument() : "");
+            throw;
+        }
         if (result.empty()) {
             // First transformation Feature
             result = newTransformations;
@@ -188,7 +220,11 @@ const std::list<gp_Trsf> MultiTransform::getTransformations(
             // as "originals" for the next transformationFeature, so that something similar to a
             // sweep for transformations could be put together?
         }
+        ++childIndex;
     }
+
+    LastFailingChildIndex.setValue(-1);
+    LastFailingChild.setValue("");
 
     return result;
 }

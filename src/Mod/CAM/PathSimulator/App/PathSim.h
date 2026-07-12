@@ -52,10 +52,14 @@ public:
     void BeginSimulation(Part::TopoShape* stock, float resolution);
     void SetToolShape(const TopoDS_Shape& toolShape, float resolution);
     Base::Placement* ApplyCommand(Base::Placement* pos, Command* cmd);
+    cStock::Statistics GetSimulationStats() const;
 
 public:
     std::unique_ptr<cStock> m_stock;
     std::unique_ptr<cSimTool> m_tool;
+    int m_cutCommands {0};
+    int m_rapidCommands {0};
+    int m_unsupportedCommands {0};
 };
 
 }  // namespace PathSimulator

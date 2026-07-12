@@ -70,6 +70,11 @@ FeatureRefine::FeatureRefine()
     this->Refine.setValue(hGrp->GetBool("RefineModel", true));
 }
 
+TopoShape FeatureRefine::getUnrefinedShape() const
+{
+    return rawShape.moved(getLocation());
+}
+
 bool FeatureRefine::onlyHaveRefined()
 {
     if (!Refine.isTouched()) {

@@ -67,6 +67,11 @@ class CalculiXTools(ObjectTools):
             mesh_obj,
             membertools.AnalysisMember(self.analysis),
         )
+        self.prerequisite_message = str(message or "")
+        if self.prerequisite_message:
+            raise RuntimeError(
+                "CalculiX prerequisites failed:\n" + self.prerequisite_message
+            )
 
         meshdatagetter = meshsetsgetter.MeshSetsGetter(
             self.analysis,
@@ -116,6 +121,8 @@ class CalculiXTools(ObjectTools):
         self.process.setWorkingDirectory(self.obj.WorkingDirectory)
 
         command_list = ["-i", os.path.join(self.obj.WorkingDirectory, self.input_deck)]
+        self.program = ccx_bin
+        self.arguments = list(command_list)
         self.process.start(ccx_bin, command_list)
 
         return self.process

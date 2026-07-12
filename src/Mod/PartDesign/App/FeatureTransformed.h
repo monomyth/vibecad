@@ -56,6 +56,8 @@ public:
     App::PropertyLinkList Originals;
     App::PropertyEnumeration TransformMode;
     App::PropertyBool Refine;
+    App::PropertyInteger GeneratedOccurrenceCount;
+    App::PropertyInteger RejectedSolidCount;
 
     /**
      * Returns the BaseFeature property's object(if any) otherwise return first original,

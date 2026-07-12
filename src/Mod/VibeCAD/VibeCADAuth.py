@@ -138,14 +138,9 @@ def read_dotenv_key(path: Path, provider: str = DEFAULT_PROVIDER) -> str | None:
 def _keyring_module() -> Any | None:
     try:
         import keyring
-
-        return keyring
-    except Exception:
+    except ImportError:
         return None
-
-
-def keyring_available() -> bool:
-    return _keyring_module() is not None
+    return keyring
 
 
 def read_keyring_key(provider: str = DEFAULT_PROVIDER) -> str | None:
@@ -153,10 +148,7 @@ def read_keyring_key(provider: str = DEFAULT_PROVIDER) -> str | None:
     keyring = _keyring_module()
     if keyring is None:
         return None
-    try:
-        return keyring.get_password(KEYRING_SERVICE, spec.keyring_username) or None
-    except Exception:
-        return None
+    return keyring.get_password(KEYRING_SERVICE, spec.keyring_username) or None
 
 
 def store_keyring_key(
@@ -207,14 +199,14 @@ def resolve_auth_credential(
     if value:
         return AuthCredential(value=value, source="environment")
 
-    value = read_keyring_key(provider=provider)
-    if value:
-        return AuthCredential(value=value, source="OS keyring")
-
     if dotenv_path is not None:
         value = read_dotenv_key(dotenv_path, provider=provider)
         if value:
             return AuthCredential(value=value, source=str(dotenv_path))
+
+    value = read_keyring_key(provider=provider)
+    if value:
+        return AuthCredential(value=value, source="OS keyring")
 
     return None
 
@@ -225,9 +217,16 @@ def resolve_auth_state(
     provider: str = DEFAULT_PROVIDER,
 ) -> AuthState:
     spec = provider_spec(provider)
-    credential = resolve_auth_credential(
-        env=env, dotenv_path=dotenv_path, provider=provider
-    )
+    try:
+        credential = resolve_auth_credential(
+            env=env, dotenv_path=dotenv_path, provider=provider
+        )
+    except Exception as exc:
+        return AuthState(
+            AuthStatus.INVALID,
+            source="OS keyring",
+            message=f"OS credential store is unavailable: {exc}",
+        )
     if credential is not None:
         return AuthState(
             AuthStatus.CONFIGURED_UNVERIFIED,
@@ -312,24 +311,6 @@ def validate_api_key(
         )
 
 
-def validate_openai_api_key(
-    api_key: str | None,
-    *,
-    source: str | None = None,
-    timeout_seconds: float = 10.0,
-    opener: Any | None = None,
-) -> AuthState:
-    """Backward-compatible wrapper around validate_api_key for OpenAI."""
-
-    return validate_api_key(
-        api_key,
-        provider="openai",
-        source=source,
-        timeout_seconds=timeout_seconds,
-        opener=opener,
-    )
-
-
 def validate_configured_auth(
     *,
     provider: str = DEFAULT_PROVIDER,
@@ -355,24 +336,6 @@ def validate_configured_auth(
         timeout_seconds=timeout_seconds,
         opener=opener,
         base_url=base_url,
-    )
-
-
-def validate_configured_openai_auth(
-    *,
-    env: dict[str, str] | None = None,
-    dotenv_path: Path | None = None,
-    timeout_seconds: float = 10.0,
-    opener: Any | None = None,
-) -> AuthState:
-    """Backward-compatible wrapper around validate_configured_auth for OpenAI."""
-
-    return validate_configured_auth(
-        provider="openai",
-        env=env,
-        dotenv_path=dotenv_path,
-        timeout_seconds=timeout_seconds,
-        opener=opener,
     )
 
 

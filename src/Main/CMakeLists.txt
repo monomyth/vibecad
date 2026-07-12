@@ -2,14 +2,29 @@
 
 configure_file(freecad.rc.cmake ${CMAKE_CURRENT_BINARY_DIR}/freecad.rc)
 configure_file(freecadCmd.rc.cmake ${CMAKE_CURRENT_BINARY_DIR}/freecadCmd.rc)
-file(COPY icon.ico DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
+file(COPY vibecad.ico DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
+
+if(WIN32)
+    set(VIBECAD_LAUNCHER_DESCRIPTION "VibeCAD portable launcher")
+    set(VIBECAD_LAUNCHER_FILENAME "VibeCAD.exe")
+    configure_file(
+        vibecadPortableLauncher.rc.cmake
+        ${CMAKE_CURRENT_BINARY_DIR}/vibecadPortableLauncher.rc
+    )
+    set(VIBECAD_LAUNCHER_DESCRIPTION "VibeCAD command-line portable launcher")
+    set(VIBECAD_LAUNCHER_FILENAME "FreeCADCmd.exe")
+    configure_file(
+        vibecadPortableLauncher.rc.cmake
+        ${CMAKE_CURRENT_BINARY_DIR}/vibecadCmdPortableLauncher.rc
+    )
+endif()
 
 ######################## FreeCADMain ########################
 if(BUILD_GUI)
 
     SET(FreeCAD_SRCS
         ${CMAKE_CURRENT_BINARY_DIR}/freecad.rc
-        icon.ico
+        vibecad.ico
         MainGui.cpp
     )
 
@@ -57,7 +72,7 @@ endif(BUILD_GUI)
 
 SET(FreeCADMainCmd_SRCS
     ${CMAKE_CURRENT_BINARY_DIR}/freecadCmd.rc
-    icon.ico
+    vibecad.ico
     MainCmd.cpp
 )
 
@@ -103,6 +118,35 @@ else()
     INSTALL(TARGETS FreeCADMainCmd
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     )
+endif()
+
+######################## VibeCAD portable launchers ########################
+if(WIN32)
+    if(BUILD_GUI)
+        add_executable(VibeCADPortableLauncher WIN32
+            VibeCADPortableLauncher.cpp
+            ${CMAKE_CURRENT_BINARY_DIR}/vibecadPortableLauncher.rc
+            vibecad.ico
+        )
+        target_compile_definitions(VibeCADPortableLauncher PRIVATE VIBECAD_GUI_LAUNCHER)
+        target_link_libraries(VibeCADPortableLauncher PRIVATE user32)
+        if(FREECAD_WARN_ERROR)
+            target_compile_warn_error(VibeCADPortableLauncher)
+        endif()
+        SET_BIN_DIR(VibeCADPortableLauncher VibeCADPortableLauncher)
+        INSTALL(TARGETS VibeCADPortableLauncher RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    endif()
+
+    add_executable(VibeCADCmdPortableLauncher
+        VibeCADPortableLauncher.cpp
+        ${CMAKE_CURRENT_BINARY_DIR}/vibecadCmdPortableLauncher.rc
+        vibecad.ico
+    )
+    if(FREECAD_WARN_ERROR)
+        target_compile_warn_error(VibeCADCmdPortableLauncher)
+    endif()
+    SET_BIN_DIR(VibeCADCmdPortableLauncher VibeCADCmdPortableLauncher)
+    INSTALL(TARGETS VibeCADCmdPortableLauncher RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
 
 ######################## FreeCADMainPy ########################

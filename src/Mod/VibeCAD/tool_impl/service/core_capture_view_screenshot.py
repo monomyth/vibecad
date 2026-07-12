@@ -1,145 +1,697 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 
-"""Service tool definition for ``core.capture_view_screenshot``."""
+"""Capture a target-aware viewport image for provider visual inspection."""
 
 from __future__ import annotations
 
+from contextlib import ExitStack
+import hashlib
+import json
 from pathlib import Path
 import re
 import time
+from typing import Any
 
-from VibeCADProject import vibecad_data_dir
+from VibeCADTools import tool_failure
 
 from . import core_set_view
 
 
-TOOL_SPEC = {'description': 'Capture the active viewport to a project PNG for visual '
-                'verification. Defaults to axometric + fit all; pass '
-                'orientation=none and fit_all=false to keep framing set by '
-                'core.set_view.',
- 'name': 'core.capture_view_screenshot',
- 'parameters': {'properties': {'orientation': {'description': 'Camera orientation applied '
-                'before capture: front, top, right, rear, bottom, left, '
-                'isometric, axometric (default), or none to keep the current '
-                'camera.',
-                'type': 'string'},
-                'fit_all': {'description': 'When true (default), zoom/fit the view to all '
-                'visible geometry before capture. Set false to preserve the '
-                'current zoom and framing.',
-                'type': 'boolean'}},
-                'type': 'object'},
- 'safety': 'VIEW'}
+CAPTURE_FRAME_MODES = ("auto",) + core_set_view.FRAME_MODES
+CAPTURE_ANNOTATION_MODES = ("clean", "current")
+DUPLICATE_VISUAL_DIFFERENCE_THRESHOLD = 0.005
 
 
-def run(service, orientation=None, fit_all=True, **kwargs):
-    orientation_name = str(orientation or "axometric").strip().lower()
-    if orientation_name not in core_set_view.ALLOWED_ORIENTATIONS:
-        result = {
-            "ok": False,
-            "captured": False,
-            "path": None,
-            "file_size": 0,
-            "error": f"Unknown orientation {orientation_name!r}.",
-            "allowed_orientations": list(core_set_view.ALLOWED_ORIENTATIONS),
-        }
-        service._last_view_screenshot = result
-        return result
+TOOL_SPEC = {
+    "description": (
+        "Capture a viewport image for visual verification from a preset or arbitrary "
+        "absolute camera direction. frame='auto' frames an open sketch from its actual "
+        "curves, otherwise the full model. "
+        "sketch_annotations='clean' removes Sketcher constraint labels, B-spline "
+        "information overlays, leaders, and internal alignment graphics from the "
+        "captured image without changing the sketch or the user's persistent "
+        "display settings."
+    ),
+    "name": "core.capture_view_screenshot",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "camera": core_set_view.camera_schema(
+                allow_auto=True,
+                default_mode="auto",
+            ),
+            "frame": {
+                "type": "string",
+                "enum": list(CAPTURE_FRAME_MODES),
+                "default": "auto",
+                "description": "Exact viewport target to frame before capture.",
+            },
+            "object_names": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1},
+                "description": "Exact internal names when frame is objects.",
+            },
+            "sketch_annotations": {
+                "type": "string",
+                "enum": list(CAPTURE_ANNOTATION_MODES),
+                "default": "clean",
+                "description": (
+                    "Temporarily hide sketch annotations for this capture or preserve "
+                    "their current display state."
+                ),
+            },
+        },
+        "additionalProperties": False,
+    },
+    "safety": "VIEW",
+}
+
+
+def run(
+    service: Any,
+    camera: dict[str, Any] | None = None,
+    frame: str = "auto",
+    object_names: list[str] | None = None,
+    sketch_annotations: str = "clean",
+) -> dict[str, Any]:
+    requested = {
+        "camera": camera,
+        "frame": frame,
+        "object_names": list(object_names or []),
+        "sketch_annotations": sketch_annotations,
+    }
+    frame_mode = str(frame or "auto").strip().lower()
+    annotation_mode = str(sketch_annotations or "clean").strip().lower()
+    if frame_mode not in CAPTURE_FRAME_MODES:
+        return _remember_failure(
+            service,
+            "FRAME_MODE_INVALID",
+            "precondition",
+            f"Unknown frame mode {frame_mode!r}.",
+            requested=requested,
+            allowed_values=list(CAPTURE_FRAME_MODES),
+        )
+    if annotation_mode not in CAPTURE_ANNOTATION_MODES:
+        return _remember_failure(
+            service,
+            "SKETCH_ANNOTATION_MODE_INVALID",
+            "precondition",
+            f"Unknown sketch_annotations mode {annotation_mode!r}.",
+            requested=requested,
+            allowed_values=list(CAPTURE_ANNOTATION_MODES),
+        )
+
     try:
         import FreeCAD as App
         import FreeCADGui as Gui
     except Exception as exc:
-        result = {"ok": False, "captured": False, "path": None, "file_size": 0, "error": str(exc)}
-        service._last_view_screenshot = result
-        return result
+        return _remember_failure(
+            service,
+            "FREECAD_GUI_UNAVAILABLE",
+            "precondition",
+            str(exc),
+            requested=requested,
+        )
 
+    document = App.ActiveDocument
+    if document is None:
+        return _remember_failure(
+            service,
+            "NO_ACTIVE_DOCUMENT",
+            "precondition",
+            "No active document.",
+            requested=requested,
+        )
+    gui_document = getattr(Gui, "ActiveDocument", None)
+    view = getattr(gui_document, "ActiveView", None) if gui_document else None
+    if view is None:
+        return _remember_failure(
+            service,
+            "NO_ACTIVE_3D_VIEW",
+            "precondition",
+            "No active 3D view is available.",
+            requested=requested,
+        )
+
+    active_sketch = service._get_sketch()
+    camera_resolution = core_set_view.resolve_camera_request(
+        camera,
+        allow_auto=True,
+        default_mode="auto",
+        active_sketch=active_sketch is not None,
+    )
+    if not camera_resolution["ok"]:
+        return _remember_failure(
+            service,
+            "CAMERA_REQUEST_INVALID",
+            "precondition",
+            str(camera_resolution.get("error") or "Camera could not be resolved."),
+            requested=requested,
+            observed={
+                key: value
+                for key, value in camera_resolution.items()
+                if key not in {"ok", "error"}
+            },
+        )
+    resolved_frame = frame_mode
+    if resolved_frame == "auto":
+        resolved_frame = "active_sketch" if active_sketch is not None else "all"
+
+    frame_resolution = core_set_view.resolve_frame_objects(
+        service,
+        document,
+        Gui,
+        resolved_frame,
+        object_names,
+    )
+    if not frame_resolution["ok"]:
+        return _remember_failure(
+            service,
+            "FRAME_TARGET_INVALID",
+            "precondition",
+            str(
+                frame_resolution.get("error")
+                or "Viewport target could not be resolved."
+            ),
+            requested=requested,
+            observed={
+                key: value
+                for key, value in frame_resolution.items()
+                if key not in {"ok", "error"}
+            },
+            candidates=core_set_view._view_object_candidates(document),
+        )
+    frame_names = list(frame_resolution.get("object_names") or [])
+    normalized = {
+        "camera": camera_resolution.get("resolved"),
+        "frame": resolved_frame,
+        "framed_objects": frame_names,
+        "sketch_annotations": annotation_mode,
+    }
+    stages: list[dict[str, Any]] = []
+    path: Path | None = None
+    camera_before = core_set_view.camera_state(view)
+    camera_result: dict[str, Any] = {}
+    framing: dict[str, Any] = {"framed": False, "method": "unchanged"}
+    annotations_excluded = False
+    information_overlay_excluded = False
+    internal_geometry_excluded = False
+    capture_width = 0
+    capture_height = 0
+
+    current_stage = "artifact_path"
     try:
         screenshot_dir = _screenshot_artifact_dir(service)
         screenshot_dir.mkdir(parents=True, exist_ok=True)
-        document_name = _slug(_active_document_name(App) or "view")
+        document_name = _slug(document.Name or "view")
         path = screenshot_dir / f"{document_name}-{int(time.time() * 1000)}.png"
-        view = Gui.ActiveDocument.ActiveView if Gui.ActiveDocument else None
-        if view is None:
-            result = {
-                "ok": False,
-                "captured": False,
-                "path": None,
-                "file_size": 0,
-                "error": "No active 3D view is available.",
+        stages.append({"stage": current_stage, "ok": True, "path": str(path)})
+
+        current_stage = "capture_size"
+        capture_width, capture_height = _capture_size(view)
+        stages.append(
+            {
+                "stage": current_stage,
+                "ok": True,
+                "size": [capture_width, capture_height],
             }
-            service._last_view_screenshot = result
-            return result
-        try:
-            if orientation_name != "none":
-                getattr(view, core_set_view.ORIENTATION_METHODS[orientation_name])()
-            if fit_all:
-                view.fitAll()
-        except Exception:
-            pass
-        view.saveImage(str(path), 1280, 900, "White")
-        captured = path.exists()
+        )
+        current_stage = "document_fingerprint"
+        fingerprint_state = _document_visual_fingerprint(document)
+        if not fingerprint_state["complete"]:
+            stages.append(
+                {
+                    "stage": current_stage,
+                    "ok": False,
+                    "errors": fingerprint_state["errors"],
+                }
+            )
+            return _remember_failure(
+                service,
+                "DOCUMENT_VISUAL_FINGERPRINT_FAILED",
+                "precondition",
+                "FreeCAD could not read complete visual state for the active document.",
+                requested=requested,
+                normalized=normalized,
+                observed={
+                    "stages": stages,
+                    "fingerprint_errors": fingerprint_state["errors"],
+                    "camera_before": camera_before,
+                },
+            )
+        document_visual_fingerprint = fingerprint_state["sha256"]
+        stages.append({"stage": current_stage, "ok": True})
+        previous_capture = (
+            dict(service._last_view_screenshot)
+            if isinstance(service._last_view_screenshot, dict)
+            else None
+        )
+
+        current_stage = "temporary_view_setup"
+        with ExitStack() as stack:
+            if resolved_frame not in {"none", "all"}:
+                stack.enter_context(
+                    core_set_view.temporarily_isolate_objects(document, frame_names)
+                )
+            if annotation_mode == "clean" and active_sketch is not None:
+                annotations_excluded = stack.enter_context(
+                    core_set_view.temporarily_detach_sketch_annotations(view)
+                )
+                information_overlay_excluded = stack.enter_context(
+                    core_set_view.temporarily_detach_sketch_information_overlay(view)
+                )
+                internal_geometry_excluded = stack.enter_context(
+                    core_set_view.temporarily_hide_sketch_internal_geometry(view)
+                )
+            stages.append(
+                {
+                    "stage": current_stage,
+                    "ok": True,
+                    "temporary": True,
+                    "isolated_objects": frame_names
+                    if resolved_frame not in {"none", "all"}
+                    else [],
+                    "annotations_excluded": bool(annotations_excluded),
+                }
+            )
+
+            current_stage = "camera"
+            camera_result = core_set_view.apply_camera(view, camera_resolution)
+            stages.append({"stage": current_stage, "ok": True, "result": camera_result})
+            current_stage = "framing"
+            if resolved_frame != "none":
+                framing = core_set_view.frame_view(
+                    service,
+                    view,
+                    document,
+                    resolved_frame,
+                    frame_names,
+                    exclude_sketch_annotations=False,
+                )
+            stages.append({"stage": current_stage, "ok": True, "result": framing})
+            current_stage = "save_image"
+            view.redraw()
+            Gui.updateGui()
+            view.saveImage(str(path), capture_width, capture_height, "White")
+            stages.append({"stage": current_stage, "ok": path.exists()})
+        current_stage = "restore_temporary_view"
+        view.redraw()
+        Gui.updateGui()
+        stages.append({"stage": current_stage, "ok": True})
+    except Exception as exc:
+        stages.append(
+            {
+                "stage": current_stage,
+                "ok": False,
+                "exception_type": exc.__class__.__name__,
+                "error": str(exc),
+            }
+        )
+        return _remember_failure(
+            service,
+            f"SCREENSHOT_{current_stage.upper()}_FAILED",
+            "native_call",
+            str(exc),
+            requested=requested,
+            normalized=normalized,
+            observed={
+                "failure_stage": current_stage,
+                "stages": stages,
+                "camera_before": camera_before,
+                "camera_after": _safe_camera_state(view),
+                "temporary_changes_restored": current_stage
+                not in {"artifact_path", "capture_size", "document_fingerprint"},
+            },
+            artifact=_artifact_state(path),
+        )
+
+    artifact = _artifact_state(path)
+    if not artifact["created"]:
+        return _remember_failure(
+            service,
+            "SCREENSHOT_FILE_NOT_CREATED",
+            "postcondition",
+            "View saveImage did not create a file.",
+            requested=requested,
+            normalized=normalized,
+            observed={"stages": stages, "camera_after": _safe_camera_state(view)},
+            artifact=artifact,
+        )
+
+    current_stage = "pixel_fingerprint"
+    try:
+        assert path is not None
+        visual_fingerprint = _pixel_fingerprint(path)
+        stages.append({"stage": current_stage, "ok": True})
+    except Exception as exc:
+        stages.append({"stage": current_stage, "ok": False, "error": str(exc)})
+        return _remember_failure(
+            service,
+            "SCREENSHOT_FINGERPRINT_FAILED",
+            "postcondition",
+            str(exc),
+            requested=requested,
+            normalized=normalized,
+            observed={"stages": stages, "camera_after": _safe_camera_state(view)},
+            artifact=artifact,
+        )
+
+    try:
+        new_observation = True
+        duplicate_of = None
+        visual_difference = None
+        if (
+            previous_capture is not None
+            and previous_capture.get("captured")
+            and previous_capture.get("document") == document.Name
+            and previous_capture.get("document_visual_fingerprint")
+            == document_visual_fingerprint
+        ):
+            previous_path = Path(str(previous_capture.get("path") or ""))
+            if previous_path.is_file():
+                visual_difference = _pixel_difference(path, previous_path)
+                if (
+                    visual_difference is not None
+                    and visual_difference <= DUPLICATE_VISUAL_DIFFERENCE_THRESHOLD
+                ):
+                    path.unlink()
+                    path = previous_path
+                    new_observation = False
+                    duplicate_of = str(previous_path)
+        stages.append(
+            {
+                "stage": "duplicate_comparison",
+                "ok": True,
+                "visual_difference": visual_difference,
+                "duplicate_of": duplicate_of,
+            }
+        )
+    except Exception as exc:
+        stages.append({"stage": "duplicate_comparison", "ok": False, "error": str(exc)})
+        return _remember_failure(
+            service,
+            "SCREENSHOT_COMPARISON_FAILED",
+            "postcondition",
+            str(exc),
+            requested=requested,
+            normalized=normalized,
+            observed={"stages": stages, "camera_after": _safe_camera_state(view)},
+            artifact=_artifact_state(path),
+        )
+
+    try:
+        result_size = [capture_width, capture_height]
+        if not new_observation and previous_capture is not None:
+            prior_size = previous_capture.get("size")
+            if isinstance(prior_size, list) and len(prior_size) == 2:
+                result_size = list(prior_size)
         result = {
-            "ok": captured,
-            "captured": captured,
-            "path": str(path) if captured else None,
-            "file_size": path.stat().st_size if captured else 0,
-            "size": [1280, 900],
+            "ok": True,
+            "captured": True,
+            "path": str(path),
+            "file_size": path.stat().st_size,
+            "size": result_size,
             "format": "png",
             "background": "White",
-            "orientation": orientation_name,
-            "fit_all": bool(fit_all),
+            "camera": camera_result,
+            "frame": resolved_frame,
+            "framing": framing,
+            "framed_objects": frame_names,
+            "sketch_annotations": annotation_mode,
+            "sketch_annotations_excluded": bool(annotations_excluded),
+            "sketch_information_overlay_excluded": bool(information_overlay_excluded),
+            "sketch_internal_geometry_excluded": bool(internal_geometry_excluded),
             "artifact_role": "visual_verification",
             "workbench": _active_workbench_name(Gui),
-            "document": _active_document_name(App),
+            "document": document.Name,
+            "visual_fingerprint": visual_fingerprint,
+            "document_visual_fingerprint": document_visual_fingerprint,
+            "new_observation": new_observation,
+            "requested": requested,
+            "normalized": normalized,
+            "stages": stages,
+            "view_changes": {
+                "camera": {
+                    "temporary": False,
+                    "before": camera_before,
+                    "after": _safe_camera_state(view),
+                },
+                "object_isolation": {"temporary": True, "restored": True},
+                "sketch_annotations": {"temporary": True, "restored": True},
+            },
+            "artifact": _artifact_state(path),
         }
-        if captured:
-            result["visual_observation"] = service._screenshot_visual_observation(path)
-        else:
-            result["error"] = "View saveImage did not create a file."
+        if visual_difference is not None:
+            result["visual_difference_from_previous"] = visual_difference
+        if duplicate_of:
+            result.update(
+                {
+                    "duplicate_of": duplicate_of,
+                    "observation_status": (
+                        "The CAD scene is unchanged and the viewport is visually "
+                        "indistinguishable from the previous capture. "
+                        "No new visual evidence was produced; edit the model or change "
+                        "the view before capturing again."
+                    ),
+                }
+            )
+        result["visual_observation"] = service._screenshot_visual_observation(path)
+        if not bool(result["visual_observation"].get("available")):
+            raise RuntimeError(
+                str(
+                    result["visual_observation"].get("error")
+                    or "Screenshot visual observation is unavailable."
+                )
+            )
+        stages.append({"stage": "visual_observation", "ok": True})
         service._last_view_screenshot = result
         return result
     except Exception as exc:
-        result = {"ok": False, "captured": False, "path": None, "file_size": 0, "error": str(exc)}
-        service._last_view_screenshot = result
-        return result
+        stages.append({"stage": "visual_observation", "ok": False, "error": str(exc)})
+        return _remember_failure(
+            service,
+            "SCREENSHOT_OBSERVATION_FAILED",
+            "postcondition",
+            str(exc),
+            requested=requested,
+            normalized=normalized,
+            observed={"stages": stages, "camera_after": _safe_camera_state(view)},
+            artifact=_artifact_state(path),
+        )
 
 
-def _active_workbench_name(gui):
+def _remember_failure(
+    service: Any,
+    failure_code: str,
+    failure_stage: str,
+    error: str,
+    *,
+    requested: dict[str, Any],
+    normalized: dict[str, Any] | None = None,
+    observed: dict[str, Any] | None = None,
+    candidates: list[dict[str, Any]] | None = None,
+    allowed_values: Any = None,
+    artifact: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    artifact_state = artifact or {"created": False, "path": None, "file_size": 0}
+    result = tool_failure(
+        TOOL_SPEC["name"],
+        failure_code,
+        failure_stage,
+        error,
+        requested=requested,
+        normalized=normalized or {},
+        observed=observed or {},
+        candidates=candidates or [],
+        allowed_values=allowed_values or [],
+        artifact=artifact_state,
+        captured=bool(artifact_state.get("created")),
+        path=artifact_state.get("path"),
+        file_size=int(artifact_state.get("file_size") or 0),
+    )
+    service._last_view_screenshot = result
+    return result
+
+
+def _active_workbench_name(gui: Any) -> str | None:
+    workbench = gui.activeWorkbench()
+    return workbench.name() if workbench else None
+
+
+def _capture_size(view: Any) -> tuple[int, int]:
+    width, height = view.getSize()
+    width = int(width)
+    height = int(height)
+    if width <= 0 or height <= 0:
+        raise RuntimeError("The active viewport has invalid dimensions.")
+    scale = min(1280.0 / width, 900.0 / height)
+    return max(1, int(round(width * scale))), max(1, int(round(height * scale)))
+
+
+def _artifact_state(path: Path | None) -> dict[str, Any]:
+    created = bool(path is not None and path.is_file())
+    return {
+        "created": created,
+        "path": str(path) if created else str(path) if path is not None else None,
+        "file_size": int(path.stat().st_size) if created and path is not None else 0,
+    }
+
+
+def _safe_camera_state(view: Any) -> dict[str, Any]:
     try:
-        workbench = gui.activeWorkbench()
-        if workbench:
-            return workbench.name()
-    except Exception:
-        pass
-    return None
+        return core_set_view.camera_state(view)
+    except Exception as exc:
+        return {
+            "available": False,
+            "exception_type": exc.__class__.__name__,
+            "error": str(exc),
+        }
 
 
-def _screenshot_artifact_dir(service) -> Path:
-    """Screenshot folder inside the per-document project directory.
+def _pixel_fingerprint(path: Path) -> str:
+    from PySide import QtGui
+    image = QtGui.QImage(str(path))
+    if image.isNull():
+        raise RuntimeError(f"Qt could not decode screenshot image: {path}")
+    sample = image.scaled(96, 96)
+    pixels = bytearray()
+    for y in range(sample.height()):
+        for x in range(sample.width()):
+            color = QtGui.QColor(sample.pixel(x, y))
+            pixels.extend((color.red(), color.green(), color.blue()))
+    return hashlib.sha256(pixels).hexdigest()
 
-    Project roots always live under the central VibeCAD data dir, so
-    screenshots are never written next to the CAD file. Without a project
-    context the fallback still lands inside ``vibecad_data_dir()``.
-    """
-    try:
-        project_context = service.project_context()
-    except Exception:
-        project_context = {}
+
+def _pixel_difference(first_path: Path, second_path: Path) -> float:
+    from PySide import QtGui
+    first = QtGui.QImage(str(first_path))
+    second = QtGui.QImage(str(second_path))
+    if first.isNull() or second.isNull():
+        raise RuntimeError(
+            f"Qt could not decode images for comparison: {first_path}, {second_path}"
+        )
+    first = first.scaled(96, 96)
+    second = second.scaled(96, 96)
+    difference = 0
+    samples = 0
+    for y in range(96):
+        for x in range(96):
+            # The navigation cube animates independently of CAD/view state.
+            if x >= 76 and y <= 24:
+                continue
+            first_color = QtGui.QColor(first.pixel(x, y))
+            second_color = QtGui.QColor(second.pixel(x, y))
+            difference += abs(first_color.red() - second_color.red())
+            difference += abs(first_color.green() - second_color.green())
+            difference += abs(first_color.blue() - second_color.blue())
+            samples += 3
+    return round(difference / max(1, samples * 255), 8)
+
+
+def _document_visual_fingerprint(document: Any) -> dict[str, Any]:
+    records = []
+    errors: list[dict[str, str]] = []
+    for obj in list(document.Objects):
+        shape = getattr(obj, "Shape", None)
+        shape_hash = None
+        shape_hash_error = None
+        type_id = str(getattr(obj, "TypeId", "") or "")
+        is_reference_geometry = type_id in {
+            "PartDesign::Line",
+            "PartDesign::Plane",
+            "PartDesign::Point",
+            "App::Line",
+            "App::Plane",
+            "App::Point",
+        }
+        try:
+            if (
+                not is_reference_geometry
+                and shape is not None
+                and not bool(shape.isNull())
+            ):
+                shape_hash = int(shape.hashCode())
+        except Exception as exc:
+            shape_hash_error = str(exc)
+            errors.append(
+                {"object": str(obj.Name), "field": "Shape.hashCode", "error": str(exc)}
+            )
+        placement_method = getattr(obj, "getGlobalPlacement", None)
+        placement_error = None
+        placement_source = (
+            "object.getGlobalPlacement" if callable(placement_method) else "object.Placement"
+        )
+        try:
+            placement = (
+                placement_method()
+                if callable(placement_method)
+                else getattr(obj, "Placement", None)
+            )
+        except Exception as exc:
+            placement = None
+            placement_error = str(exc)
+            errors.append(
+                {
+                    "object": str(obj.Name),
+                    "field": placement_source,
+                    "error": str(exc),
+                }
+            )
+        placement_matrix = None
+        if placement is not None:
+            try:
+                placement_matrix = [float(value) for value in placement.toMatrix().A]
+            except Exception as exc:
+                placement_error = str(exc)
+                errors.append(
+                    {
+                        "object": str(obj.Name),
+                        "field": f"{placement_source}.toMatrix",
+                        "error": str(exc),
+                    }
+                )
+        view_object = getattr(obj, "ViewObject", None)
+        records.append(
+            {
+                "name": str(obj.Name),
+                "type": type_id,
+                "shape_hash": shape_hash,
+                "shape_hash_error": shape_hash_error,
+                "placement": placement_matrix,
+                "placement_source": placement_source,
+                "placement_error": placement_error,
+                "visible": bool(view_object.Visibility)
+                if view_object is not None
+                else None,
+                "display_mode": (
+                    str(getattr(view_object, "DisplayMode", ""))
+                    if view_object is not None
+                    else None
+                ),
+                "transparency": (
+                    float(getattr(view_object, "Transparency", 0.0))
+                    if view_object is not None
+                    else None
+                ),
+            }
+        )
+    payload = json.dumps(records, sort_keys=True, separators=(",", ":"))
+    return {
+        "complete": not errors,
+        "sha256": hashlib.sha256(payload.encode("utf-8")).hexdigest(),
+        "errors": errors,
+        "object_count": len(records),
+    }
+
+
+def _screenshot_artifact_dir(service: Any) -> Path:
+    project_context = service.project_context()
     root = project_context.get("root") if isinstance(project_context, dict) else None
-    if root:
-        return Path(str(root)).expanduser() / "screenshots"
-    return vibecad_data_dir() / "screenshots"
+    if not root:
+        raise RuntimeError("The active document has no VibeCAD project root.")
+    return Path(str(root)).expanduser() / "screenshots"
 
 
 def _slug(value: str) -> str:
     slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "").strip()).strip("._")
     return slug[:64] or "view"
-
-
-def _active_document_name(app):
-    try:
-        document = app.ActiveDocument
-        if document is not None:
-            return document.Name
-    except Exception:
-        pass
-    return None

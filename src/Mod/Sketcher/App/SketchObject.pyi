@@ -117,7 +117,7 @@ class SketchObject(Part2DObject):
         """
         ...
 
-    def delGeometry(self, geoId: int, noSolve: bool, /) -> None:
+    def delGeometry(self, geoId: int, noSolve: bool, /) -> dict:
         """
         Delete a geometric object from the sketch.
 
@@ -129,7 +129,7 @@ class SketchObject(Part2DObject):
         """
         ...
 
-    def delGeometries(self, geoIds: List[int], noSolve: bool, /) -> None:
+    def delGeometries(self, geoIds: List[int], noSolve: bool, /) -> dict:
         """
         Delete a list of geometric objects from the sketch.
 
@@ -141,7 +141,7 @@ class SketchObject(Part2DObject):
         """
         ...
 
-    def deleteAllGeometry(self, noSolve: bool, /) -> None:
+    def deleteAllGeometry(self, noSolve: bool, /) -> dict:
         """
         Delete all the geometry objects from the sketch, except external geometry.
 
@@ -250,7 +250,15 @@ class SketchObject(Part2DObject):
         """
         ...
 
-    def delConstraint(self, constraintIndex: int, noSolve: bool, /) -> None:
+    def diagnoseAdditionalConstraints(
+        self, constraints: Union[Constraint, List[Constraint]], /
+    ) -> dict:
+        """
+        Evaluate proposed constraints without adding them and return solver diagnostics.
+        """
+        ...
+
+    def delConstraint(self, constraintIndex: int, noSolve: bool, /) -> dict:
         """
         Delete a constraint from the sketch.
 
@@ -263,7 +271,7 @@ class SketchObject(Part2DObject):
 
     def delConstraints(
         self, constraintIndices: List[int], updateGeometry: bool, noSolve: bool, /
-    ) -> None:
+    ) -> dict:
         """
         Delete multiple constraints from a sketch
 
@@ -685,25 +693,30 @@ class SketchObject(Part2DObject):
         """
         ...
 
-    def fillet(self) -> None:
+    @constmethod
+    def getProfileDiagnostics(self) -> dict:
+        """Return native wire, closure, BRep, nesting, and FaceMaker diagnostics."""
+        ...
+
+    def fillet(self) -> dict:
         """
         Create a fillet between two edges or at a point
         """
         ...
 
-    def trim(self) -> None:
+    def trim(self) -> dict:
         """
         Trim a curve with a given id at a given reference point
         """
         ...
 
-    def extend(self) -> None:
+    def extend(self) -> dict:
         """
         Extend a curve to new start and end positions
         """
         ...
 
-    def split(self) -> None:
+    def split(self) -> dict:
         """
         Split a curve with a given id at a given reference point
         """
@@ -757,9 +770,9 @@ class SketchObject(Part2DObject):
         """
         ...
 
-    def exposeInternalGeometry(self) -> None:
+    def exposeInternalGeometry(self) -> dict:
         """
-        Exposes all internal geometry of an object supporting internal geometry
+        Expose internal geometry and return created geometry IDs and semantic roles.
         """
         ...
 

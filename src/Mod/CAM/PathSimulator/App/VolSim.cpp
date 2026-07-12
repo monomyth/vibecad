@@ -62,6 +62,55 @@ cStock::cStock(float px, float py, float pz, float lx, float ly, float lz, float
 cStock::~cStock()
 {}
 
+cStock::Statistics cStock::GetStatistics() const
+{
+    Statistics stats;
+    stats.initialVolume = static_cast<double>(m_lx) * m_ly * m_lz;
+    stats.gridX = m_x;
+    stats.gridY = m_y;
+    stats.resolution = m_res;
+    stats.removedMin = Point3D(m_px + m_lx, m_py + m_ly, m_plane);
+    stats.removedMax = Point3D(m_px, m_py, m_pz);
+
+    for (int x = 0; x < m_x - 1; ++x) {
+        const double x0 = static_cast<double>(x) * m_res;
+        const double cellWidth = std::min<double>(m_res, m_lx - x0);
+        if (cellWidth <= 0.0) {
+            continue;
+        }
+        for (int y = 0; y < m_y - 1; ++y) {
+            const double y0 = static_cast<double>(y) * m_res;
+            const double cellHeight = std::min<double>(m_res, m_ly - y0);
+            if (cellHeight <= 0.0) {
+                continue;
+            }
+            const double averageTop
+                = (m_stock[x][y] + m_stock[x + 1][y] + m_stock[x][y + 1]
+                   + m_stock[x + 1][y + 1])
+                / 4.0;
+            const double clampedTop = std::clamp<double>(averageTop, m_pz, m_plane);
+            const double removedHeight
+                = std::max(0.0, static_cast<double>(m_plane) - clampedTop);
+            if (removedHeight <= SIM_EPSILON) {
+                continue;
+            }
+            ++stats.modifiedCells;
+            stats.removedVolume += removedHeight * cellWidth * cellHeight;
+            stats.hasRemovedBounds = true;
+            stats.removedMin.x = std::min(stats.removedMin.x, static_cast<float>(m_px + x0));
+            stats.removedMin.y = std::min(stats.removedMin.y, static_cast<float>(m_py + y0));
+            stats.removedMin.z = std::min(stats.removedMin.z, static_cast<float>(clampedTop));
+            stats.removedMax.x
+                = std::max(stats.removedMax.x, static_cast<float>(m_px + x0 + cellWidth));
+            stats.removedMax.y
+                = std::max(stats.removedMax.y, static_cast<float>(m_py + y0 + cellHeight));
+            stats.removedMax.z = m_plane;
+        }
+    }
+    stats.remainingVolume = std::max(0.0, stats.initialVolume - stats.removedVolume);
+    return stats;
+}
+
 
 float cStock::FindRectTop(int& xp, int& yp, int& x_size, int& y_size, bool scanHoriz)
 {

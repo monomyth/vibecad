@@ -28,6 +28,8 @@
 #include <Base/VectorPy.h>
 #include <Base/Tools.h>
 
+#include "FeatureHole.h"
+
 
 namespace PartDesign
 {
@@ -38,10 +40,46 @@ public:
         : Py::ExtensionModule<Module>("_PartDesign")
     {
         add_varargs_method("makeFilletArc", &Module::makeFilletArc, "makeFilletArc(...) -- Fillet arc.");
+        add_noargs_method(
+            "getHoleThreadCatalog",
+            &Module::getHoleThreadCatalog,
+            "Return the native Hole thread catalog without creating a document feature."
+        );
         initialize("This module is the PartDesign module.");  // register with Python
     }
 
 private:
+    Py::Object getHoleThreadCatalog()
+    {
+        Py::List catalog;
+        for (const auto& native : Hole::getThreadCatalog()) {
+            Py::Dict entry;
+            entry["standard"] = Py::String(native.standard);
+            Py::List sizes;
+            for (const auto& nativeSize : native.sizes) {
+                Py::Dict size;
+                size["designation"] = Py::String(nativeSize.designation);
+                size["diameter_mm"] = Py::Float(nativeSize.diameter);
+                size["pitch_mm"] = Py::Float(nativeSize.pitch);
+                size["tap_drill_mm"] = Py::Float(nativeSize.TapDrill);
+                sizes.append(size);
+            }
+            auto stringList = [](const std::vector<std::string>& values) {
+                Py::List result;
+                for (const auto& value : values) {
+                    result.append(Py::String(value));
+                }
+                return result;
+            };
+            entry["sizes"] = sizes;
+            entry["classes"] = stringList(native.classes);
+            entry["fits"] = stringList(native.fits);
+            entry["hole_cuts"] = stringList(native.holeCuts);
+            catalog.append(entry);
+        }
+        return catalog;
+    }
+
     Py::Object makeFilletArc(const Py::Tuple& args)
     {
         PyObject* pM1;

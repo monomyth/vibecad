@@ -762,6 +762,46 @@ PyObject* DocumentPy::recompute(PyObject* args)
     PY_CATCH;
 }
 
+PyObject* DocumentPy::getRecomputeDiagnostics(PyObject* args)
+{
+    if (!PyArg_ParseTuple(args, "")) {
+        return nullptr;
+    }
+
+    const auto* document = getDocumentPtr();
+    PyObject* result = PyDict_New();
+    PyObject* generation = PyLong_FromUnsignedLongLong(
+        document->getRecomputeDiagnosticGeneration());
+    PyDict_SetItemString(result, "generation", generation);
+    Py_DECREF(generation);
+
+    const auto& diagnostics = document->getRecomputeDiagnostics();
+    PyObject* entries = PyList_New(static_cast<Py_ssize_t>(diagnostics.size()));
+    for (std::size_t index = 0; index < diagnostics.size(); ++index) {
+        const auto& diagnostic = diagnostics[index];
+        PyObject* entry = PyDict_New();
+        auto setString = [entry](const char* key, const std::string& value) {
+            PyObject* pyValue = PyUnicode_FromString(value.c_str());
+            PyDict_SetItemString(entry, key, pyValue);
+            Py_DECREF(pyValue);
+        };
+        PyObject* itemGeneration = PyLong_FromUnsignedLongLong(diagnostic.generation);
+        PyDict_SetItemString(entry, "generation", itemGeneration);
+        Py_DECREF(itemGeneration);
+        setString("severity", diagnostic.severity);
+        setString("code", diagnostic.code);
+        setString("object", diagnostic.object);
+        setString("property", diagnostic.property);
+        setString("subelement", diagnostic.subelement);
+        setString("algorithm", diagnostic.algorithm);
+        setString("message", diagnostic.message);
+        PyList_SET_ITEM(entries, static_cast<Py_ssize_t>(index), entry);
+    }
+    PyDict_SetItemString(result, "diagnostics", entries);
+    Py_DECREF(entries);
+    return result;
+}
+
 PyObject* DocumentPy::mustExecute(PyObject* args)
 {
     if (!PyArg_ParseTuple(args, "")) {

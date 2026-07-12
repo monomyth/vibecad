@@ -419,6 +419,12 @@ class Document(PropertyContainer):
         """
         ...
 
+    def getRecomputeDiagnostics(self) -> dict:
+        """
+        Return the generation and structured diagnostics from the latest recompute.
+        """
+        ...
+
     def mustExecute(self) -> bool:
         """
         Check if any object must be recomputed

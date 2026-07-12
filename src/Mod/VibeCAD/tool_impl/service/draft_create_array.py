@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 
-"""Service tool definition for ``draft.create_array``."""
+"""Create one native Draft array (orthogonal or polar) of an exact object."""
 
 from __future__ import annotations
 
@@ -11,151 +11,334 @@ from VibeCADTransactions import run_freecad_transaction
 from . import domain_runtime
 
 
-TOOL_SPEC = {'description': 'Create a native Draft array of copies of an existing object: '
-                "array_type='ortho' for a rectangular grid, 'polar' for copies "
-                'around a center. Use for repeated whole objects (bolts, standoffs); '
-                'to repeat a feature inside a Body use partdesign.pattern. '
-                'Set fuse=true when the copies touch or overlap and must merge '
-                'into one connected solid instead of separate disjoint copies.',
- 'name': 'draft.create_array',
- 'parameters': {'properties': {'array_type': {'description': 'ortho: rectangular grid; polar: circular arrangement.',
-                                              'enum': ['ortho', 'polar'],
-                                              'type': 'string'},
-                               'center_x': {'description': 'polar only: center X in mm.',
-                                            'type': 'number'},
-                               'center_y': {'description': 'polar only: center Y in mm.',
-                                            'type': 'number'},
-                               'center_z': {'description': 'polar only: center Z in mm.',
-                                            'type': 'number'},
-                               'interval_x': {'description': 'ortho only: X spacing in mm (default 10).',
-                                              'type': 'number'},
-                               'interval_y': {'description': 'ortho only: Y spacing in mm.',
-                                              'type': 'number'},
-                               'interval_z': {'description': 'ortho only: Z spacing in mm.',
-                                              'type': 'number'},
-                               'label': {'type': 'string'},
-                               'number_x': {'description': 'ortho only: copies along X (default 2).',
-                                            'type': 'integer'},
-                               'number_y': {'description': 'ortho only: copies along Y (default 1).',
-                                            'type': 'integer'},
-                               'number_z': {'description': 'ortho only: copies along Z (default 1).',
-                                            'type': 'integer'},
-                               'object_name': {'description': 'Object name or label to array.',
-                                               'type': 'string'},
-                               'polar_angle': {'description': 'polar only: total sweep angle in degrees (default 360).',
-                                               'type': 'number'},
-                               'polar_count': {'description': 'polar only: number of copies including the original (default 4).',
-                                               'type': 'integer'},
-                               'use_link': {'description': 'Create a lightweight Link array instead of copies (default false). Link arrays cannot be fused.',
-                                            'type': 'boolean'},
-                               'fuse': {'description': 'Fuse touching/overlapping copies into one connected solid (default false; requires use_link=false).',
-                                        'type': 'boolean'}},
-                'required': ['object_name', 'array_type'],
-                'type': 'object'},
- 'safety': 'SAFE_WRITE',
- 'workbench': 'DraftWorkbench'}
+TOOL_SPEC = {
+    "name": "draft.create_array",
+    "description": (
+        "Create one native Draft array of an exact named object: an orthogonal "
+        "grid along explicit interval vectors, or a polar ring around an exact "
+        "center. The array is one parametric object linked to the source; the "
+        "source stays visible and unchanged."
+    ),
+    "contextual": True,
+    "safety": "SAFE_WRITE",
+    "workbench": "DraftWorkbench",
+    "edit_modes": ["none"],
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "source_object_name": {
+                "type": "string",
+                "description": "Exact internal name of the object to replicate.",
+            },
+            "array": {
+                "description": "Array layout; choose exactly one variant.",
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": {
+                            "type": {
+                                "const": "orthogonal",
+                                "description": (
+                                    "Grid of copies along explicit interval vectors."
+                                ),
+                            },
+                            "interval_x": domain_runtime.vector_schema(
+                                "Displacement between consecutive copies along "
+                                "the first grid direction in mm."
+                            ),
+                            "interval_y": domain_runtime.vector_schema(
+                                "Displacement between consecutive copies along "
+                                "the second grid direction in mm; use {0,0,0} "
+                                "with count_y=1 for a single row."
+                            ),
+                            "count_x": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "description": (
+                                    "Copies along interval_x, including the original."
+                                ),
+                            },
+                            "count_y": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "description": (
+                                    "Copies along interval_y, including the "
+                                    "original; 1 for a single row."
+                                ),
+                            },
+                        },
+                        "required": [
+                            "type",
+                            "interval_x",
+                            "interval_y",
+                            "count_x",
+                            "count_y",
+                        ],
+                        "additionalProperties": False,
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "type": {
+                                "const": "polar",
+                                "description": (
+                                    "Ring of copies rotated around a center point."
+                                ),
+                            },
+                            "center": domain_runtime.vector_schema(
+                                "Exact global center of rotation in mm; copies "
+                                "rotate around the global Z axis through this "
+                                "point."
+                            ),
+                            "count": {
+                                "type": "integer",
+                                "minimum": 2,
+                                "description": (
+                                    "Total copies including the original, spread "
+                                    "over total_angle_degrees."
+                                ),
+                            },
+                            "total_angle_degrees": {
+                                "type": "number",
+                                "exclusiveMinimum": 0,
+                                "maximum": 360,
+                                "description": (
+                                    "Angular span of the ring in degrees; 360 "
+                                    "for a full evenly spaced circle."
+                                ),
+                            },
+                        },
+                        "required": ["type", "center", "count", "total_angle_degrees"],
+                        "additionalProperties": False,
+                    },
+                ],
+            },
+            "label": {
+                "type": "string",
+                "description": "Visible label for the new array, e.g. 'BoltPattern'.",
+            },
+        },
+        "required": ["source_object_name", "array", "label"],
+        "additionalProperties": False,
+    },
+}
 
 
 def run(
-    service,
-    object_name: str,
-    label: str = "VibeCAD Array",
-    array_type: str = "ortho",
-    number_x: int = 2,
-    number_y: int = 1,
-    number_z: int = 1,
-    interval_x: float = 10.0,
-    interval_y: float = 0.0,
-    interval_z: float = 0.0,
-    polar_count: int = 4,
-    polar_angle: float = 360.0,
-    center_x: float = 0.0,
-    center_y: float = 0.0,
-    center_z: float = 0.0,
-    use_link: bool = False,
-    fuse: bool = False,
+    service: Any,
+    source_object_name: str,
+    array: dict[str, Any],
+    label: str,
 ) -> dict[str, Any]:
-    source = service._get_document_object(object_name)
+    clean_label = str(label or "").strip()
+    if not clean_label:
+        return _invalid("label is required.")
+    if not isinstance(array, dict):
+        return _invalid("array must be an object.")
+    kind = str(array.get("type") or "")
+    if kind not in ("orthogonal", "polar"):
+        return _invalid("array.type must be orthogonal or polar.")
+    source_name = str(source_object_name or "").strip()
+    doc = service._active_document()
+    source = doc.getObject(source_name) if doc is not None and source_name else None
     if source is None:
-        return {"ok": False, "error": f"Object not found: {object_name}"}
-    kind = str(array_type or "ortho").lower().strip()
-    if kind in {"orthogonal", "rect", "rectangular"}:
-        kind = "ortho"
-    if kind not in {"ortho", "polar"}:
-        return {"ok": False, "error": "array_type must be ortho or polar"}
-    if kind == "ortho":
-        counts = (int(number_x), int(number_y), int(number_z))
-        if any(count < 1 for count in counts) or counts == (1, 1, 1):
-            return {"ok": False, "error": "Ortho arrays need positive counts and at least one repeated axis."}
-    else:
-        if int(polar_count) < 2:
-            return {"ok": False, "error": "Polar arrays need at least two copies."}
-    if bool(fuse) and bool(use_link):
+        return _invalid(
+            f"Source object not found by exact internal name: {source_object_name}",
+            candidates=[
+                {"name": obj.Name, "label": obj.Label, "type": obj.TypeId}
+                for obj in list(getattr(doc, "Objects", []) or [])
+            ][:40],
+        )
+    source_health = domain_runtime.shape_health(source)
+    if not source_health.get("valid_non_null"):
+        return _invalid("The array source does not have a valid native shape.", source=source_health)
+    layout = _layout_preflight(array)
+    if not layout.get("ok"):
+        return _invalid(
+            "The requested array contains coincident or rank-deficient instance positions; no array was created.",
+            layout=layout,
+        )
+    if kind == "orthogonal":
+        if int(array["count_x"]) * int(array["count_y"]) < 2:
+            return _invalid(
+                "An orthogonal array needs at least 2 total copies; "
+                "increase count_x or count_y."
+            )
+
+    def create() -> dict[str, Any]:
+        import Draft
+        import FreeCAD as App
+
+        active = App.ActiveDocument
+        if active is None:
+            raise RuntimeError("No active document.")
+        base = active.getObject(source_name)
+        if base is None:
+            raise RuntimeError("The source object no longer exists.")
+        if kind == "orthogonal":
+            obj = Draft.make_ortho_array(
+                base,
+                v_x=domain_runtime.parse_vector(array["interval_x"]),
+                v_y=domain_runtime.parse_vector(array["interval_y"]),
+                v_z=App.Vector(0, 0, 0),
+                n_x=int(array["count_x"]),
+                n_y=int(array["count_y"]),
+                n_z=1,
+            )
+        else:
+            obj = Draft.make_polar_array(
+                base,
+                number=int(array["count"]),
+                angle=float(array["total_angle_degrees"]),
+                center=domain_runtime.parse_vector(array["center"]),
+            )
+        if obj is None:
+            raise RuntimeError("Draft array creation did not return an object.")
+        obj.Label = clean_label
+        active.recompute()
         return {
-            "ok": False,
-            "error": "fuse=true requires a regular array; set use_link=false.",
+            "document": active.Name,
+            "feature": obj.Name,
+            "feature_label": obj.Label,
+            "feature_type": obj.TypeId,
+            "array_type": kind,
+            "source_object": base.Name,
+            "source_shape": source_health,
+            "layout_preflight": layout,
+            "requested_instance_count": int(layout["requested_instance_count"]),
+            "actual_instance_count": _native_instance_count(obj, kind),
+            "shape_child_count": _child_shape_count(getattr(obj, "Shape", None)),
+            "native_source_link": getattr(getattr(obj, "Base", None), "Name", None),
+            "source_relationships": {
+                "in_list": [item.Name for item in list(getattr(base, "InList", []) or [])],
+                "out_list": [item.Name for item in list(getattr(base, "OutList", []) or [])],
+            },
+            "shape": domain_runtime.shape_summary(obj),
+            "feature_state": domain_runtime.feature_state_summary(obj),
         }
 
-    def _create() -> dict[str, Any]:
-        import FreeCAD as App
-        import Draft
-
-        base = service._get_document_object(object_name)
-        if base is None:
-            raise RuntimeError(f"Object not found: {object_name}")
-        if kind == "ortho":
-            array_obj = Draft.make_ortho_array(
-                base,
-                App.Vector(float(interval_x), 0, 0),
-                App.Vector(0, float(interval_y), 0),
-                App.Vector(0, 0, float(interval_z)),
-                int(number_x),
-                int(number_y),
-                int(number_z),
-                use_link=bool(use_link),
-            )
-            metadata = {
-                "array_type": "ortho",
-                "counts": [int(number_x), int(number_y), int(number_z)],
-                "intervals": [float(interval_x), float(interval_y), float(interval_z)],
-            }
-        else:
-            center = App.Vector(float(center_x), float(center_y), float(center_z))
-            array_obj = Draft.make_polar_array(
-                base,
-                int(polar_count),
-                float(polar_angle),
-                center,
-                use_link=bool(use_link),
-            )
-            metadata = {
-                "array_type": "polar",
-                "count": int(polar_count),
-                "angle": float(polar_angle),
-                "center": [float(center_x), float(center_y), float(center_z)],
-            }
-        array_obj.Label = label
-        if bool(fuse) and hasattr(array_obj, "Fuse"):
-            array_obj.Fuse = True
-        doc = App.ActiveDocument
-        if doc is not None:
-            doc.recompute()
-        shape = getattr(array_obj, "Shape", None)
-        metadata.update(
+    def verify(result: dict[str, Any]) -> dict[str, Any]:
+        expected = int(result.get("requested_instance_count", 0))
+        actual = result.get("actual_instance_count")
+        checks = [
             {
-                "object": array_obj.Name,
-                "label": array_obj.Label,
-                "type": getattr(array_obj, "TypeId", ""),
-                "base": base.Name,
-                "use_link": bool(use_link),
-                "fuse": bool(getattr(array_obj, "Fuse", False)),
-                "solids": len(getattr(shape, "Solids", []) or []),
-            }
-        )
-        return metadata
+                "name": "source_link",
+                "ok": result.get("native_source_link") == source_name,
+                "expected": source_name,
+                "actual": result.get("native_source_link"),
+            },
+            {
+                "name": "instance_count",
+                "ok": isinstance(actual, int) and actual == expected,
+                "expected": expected,
+                "actual": actual,
+            },
+            {
+                "name": "nonempty_shape",
+                "ok": bool((result.get("shape") or {}).get("available"))
+                and int((result.get("shape") or {}).get("edges", 0)) > 0,
+                "actual": result.get("shape"),
+            },
+        ]
+        return {"ok": all(check["ok"] for check in checks), "checks": checks}
 
     transaction = run_freecad_transaction(
-        f"Create Draft {kind} array: {object_name}",
-        _create,
+        f"Create Draft {kind} array: {clean_label}",
+        create,
+        verifier=verify,
     )
-    return {"ok": bool(transaction.get("ok")), "transaction": transaction, "draft": domain_runtime.draft_summary(service)}
+    return domain_runtime.part_feature_result(
+        transaction, operation=f"create_{kind}_array"
+    )
+
+
+def _invalid(message: str, **details: Any) -> dict[str, Any]:
+    return {"ok": False, "error": message, "retry_same_call": False, **details}
+
+
+def _layout_preflight(array: dict[str, Any]) -> dict[str, Any]:
+    kind = str(array.get("type") or "")
+    if kind == "orthogonal":
+        first = domain_runtime.parse_vector(array["interval_x"])
+        second = domain_runtime.parse_vector(array["interval_y"])
+        count_x = int(array["count_x"])
+        count_y = int(array["count_y"])
+        first_required = count_x > 1
+        second_required = count_y > 1
+        first_zero = float(first.Length) <= 1.0e-9
+        second_zero = float(second.Length) <= 1.0e-9
+        cross = first.cross(second)
+        rank = (
+            0
+            if (not first_required or first_zero) and (not second_required or second_zero)
+            else 1
+            if not first_required or not second_required or float(cross.Length) <= 1.0e-9
+            else 2
+        )
+        positions = [first * x + second * y for x in range(count_x) for y in range(count_y)]
+        collisions = _coincident_positions(positions)
+        failures = []
+        if first_required and first_zero:
+            failures.append("interval_x_is_zero_with_multiple_copies")
+        if second_required and second_zero:
+            failures.append("interval_y_is_zero_with_multiple_copies")
+        if first_required and second_required and rank < 2:
+            failures.append("grid_intervals_are_collinear")
+        if collisions:
+            failures.append("coincident_instance_positions")
+        return {
+            "ok": not failures,
+            "type": kind,
+            "interval_rank": rank,
+            "interval_x": domain_runtime.vector_values(first),
+            "interval_y": domain_runtime.vector_values(second),
+            "requested_instance_count": count_x * count_y,
+            "coincident_instances": collisions,
+            "failures": failures,
+        }
+    center = domain_runtime.parse_vector(array["center"])
+    count = int(array["count"])
+    angle = float(array["total_angle_degrees"])
+    return {
+        "ok": count >= 2 and 0.0 < angle <= 360.0,
+        "type": kind,
+        "center": domain_runtime.vector_values(center),
+        "requested_instance_count": count,
+        "total_angle_degrees": angle,
+        "coincident_instances": [],
+        "failures": [],
+    }
+
+
+def _coincident_positions(positions: list[Any]) -> list[dict[str, Any]]:
+    collisions = []
+    for first in range(len(positions)):
+        for second in range(first + 1, len(positions)):
+            distance = float((positions[second] - positions[first]).Length)
+            if distance <= 1.0e-9:
+                collisions.append(
+                    {"first_index": first, "second_index": second, "distance_mm": distance}
+                )
+    return collisions
+
+
+def _native_instance_count(obj: Any, kind: str) -> int:
+    try:
+        if kind == "orthogonal":
+            return int(obj.NumberX) * int(obj.NumberY) * int(obj.NumberZ)
+        return int(obj.NumberPolar)
+    except Exception as exc:
+        raise RuntimeError(
+            f"FreeCAD could not read the native {kind} array instance count: {exc}"
+        ) from exc
+
+
+def _child_shape_count(shape: Any) -> int:
+    if shape is None or bool(shape.isNull()):
+        return 0
+    try:
+        return len(list(shape.childShapes()))
+    except Exception as exc:
+        raise RuntimeError(
+            f"FreeCAD could not enumerate the array result's child shapes: {exc}"
+        ) from exc

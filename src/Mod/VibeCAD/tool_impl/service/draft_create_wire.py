@@ -1,12 +1,6 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 
-"""Service tool definition for ``draft.create_wire``.
-
-Creates true 3D curves (interpolated B-splines or polylines) through
-arbitrary points in space. Sketches are planar by construction; this tool
-covers the non-planar cases: sweep spines, surface boundary curves, and
-space curves that no single sketch plane can express.
-"""
+"""Create one native Draft wire (polyline) from exact global points."""
 
 from __future__ import annotations
 
@@ -17,139 +11,153 @@ from VibeCADTransactions import run_freecad_transaction
 from . import domain_runtime
 
 
-_CURVE_TYPES = ("bspline", "polyline")
-
 TOOL_SPEC = {
-    "description": (
-        "Create a true 3D curve through arbitrary points in space: "
-        "curve_type='bspline' interpolates a smooth B-spline, "
-        "curve_type='polyline' connects the points with straight segments. "
-        "Use this when geometry cannot live on a single sketch plane — "
-        "non-planar sweep spines, boundary curves for "
-        "surface.create_surface, and space curves with twist. Points are "
-        "absolute document coordinates in mm; closed=true joins the last "
-        "point back to the first."
-    ),
     "name": "draft.create_wire",
+    "description": (
+        "Create one native Draft wire (polyline) through exact global points; "
+        "consecutive points are joined by straight segments. A closed wire with "
+        "make_face=true becomes a filled planar face usable as an extrusion "
+        "profile for part.extrude."
+    ),
+    "contextual": True,
+    "safety": "SAFE_WRITE",
+    "workbench": "DraftWorkbench",
+    "edit_modes": ["none"],
     "parameters": {
+        "type": "object",
         "properties": {
             "points": {
-                "description": (
-                    "Ordered 3D points, each {x, y, z} in mm (at least 2)."
-                ),
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "x": {"type": "number"},
-                        "y": {"type": "number"},
-                        "z": {"type": "number"},
-                    },
-                },
                 "type": "array",
-            },
-            "curve_type": {
-                "description": "bspline: smooth interpolation; polyline: straight segments.",
-                "enum": list(_CURVE_TYPES),
-                "type": "string",
+                "items": domain_runtime.vector_schema(
+                    "One exact global vertex of the polyline in mm."
+                ),
+                "minItems": 2,
+                "description": (
+                    "Ordered vertices of the polyline; consecutive points are "
+                    "joined by straight segments. A closed wire needs at least "
+                    "3 non-collinear points."
+                ),
             },
             "closed": {
-                "description": "Close the curve back to the first point (default false).",
                 "type": "boolean",
+                "description": (
+                    "True to join the last point back to the first, forming a "
+                    "closed loop."
+                ),
             },
-            "label": {"type": "string"},
+            "make_face": {
+                "type": "boolean",
+                "description": (
+                    "True to fill the closed wire into a planar face usable as "
+                    "an extrusion profile; requires closed=true and coplanar "
+                    "points."
+                ),
+            },
+            "label": {
+                "type": "string",
+                "description": "Visible label for the new wire, e.g. 'BaseOutline'.",
+            },
         },
-        "required": ["points"],
-        "type": "object",
+        "required": ["points", "closed", "make_face", "label"],
+        "additionalProperties": False,
     },
-    "safety": "SAFE_WRITE",
-    # Cross-pack tool: surfaced by the Draft and Surface packs via their
-    # allowlists (like assembly.check_interference in PartDesign).
-    "workbench": None,
-    "contextual": True,
 }
 
 
-def _parse_points(raw_points: list[Any]) -> tuple[list[tuple[float, float, float]], str | None]:
-    points: list[tuple[float, float, float]] = []
-    for entry in raw_points:
-        if not isinstance(entry, dict):
-            return [], f"Each point must be an object with x/y/z, got: {entry!r}"
-        try:
-            points.append(
-                (
-                    float(entry.get("x", 0.0)),
-                    float(entry.get("y", 0.0)),
-                    float(entry.get("z", 0.0)),
-                )
-            )
-        except (TypeError, ValueError):
-            return [], f"Point coordinates must be numbers, got: {entry!r}"
-    return points, None
-
-
 def run(
-    service,
+    service: Any,
     points: list[dict[str, Any]],
-    curve_type: str = "bspline",
-    closed: bool = False,
-    label: str = "VibeCAD Wire",
+    closed: bool,
+    make_face: bool,
+    label: str,
 ) -> dict[str, Any]:
-    kind = str(curve_type or "bspline").strip().lower()
-    if kind not in _CURVE_TYPES:
-        return {
-            "ok": False,
-            "error": f"curve_type must be one of {list(_CURVE_TYPES)}.",
-        }
-    parsed, error = _parse_points(points or [])
-    if error:
-        return {"ok": False, "error": error}
-    if len(parsed) < 2:
-        return {"ok": False, "error": "At least two points are required."}
-    deduped = [
-        point for index, point in enumerate(parsed) if index == 0 or point != parsed[index - 1]
-    ]
-    if len(deduped) < 2:
-        return {"ok": False, "error": "Points are all coincident; a curve needs distinct points."}
-    if kind == "bspline" and bool(closed) and len(deduped) < 3:
-        return {"ok": False, "error": "A closed bspline needs at least three distinct points."}
+    clean_label = str(label or "").strip()
+    if not clean_label:
+        return _invalid("label is required.")
+    if not isinstance(points, list) or len(points) < 2:
+        return _invalid("points must contain at least 2 vertices.")
+    if bool(closed) and len(points) < 3:
+        return _invalid("A closed wire needs at least 3 points.")
+    if bool(make_face) and not bool(closed):
+        return _invalid("make_face=true requires closed=true.")
+    try:
+        vectors = [domain_runtime.parse_vector(point) for point in points]
+    except Exception as exc:
+        return _invalid("points contains an invalid XYZ coordinate.", native_error=str(exc))
+    point_diagnostics = domain_runtime.ordered_point_diagnostics(
+        vectors,
+        closed=bool(closed),
+    )
+    if not point_diagnostics.get("ok"):
+        return _invalid(
+            "The ordered points contain duplicates, are non-planar, or self-intersect; no wire was created.",
+            point_diagnostics=point_diagnostics,
+        )
+    if bool(make_face) and (point_diagnostics.get("plane") or {}).get("under_determined"):
+        return _invalid(
+            "A face requires at least three non-collinear points; no wire was created.",
+            point_diagnostics=point_diagnostics,
+        )
 
-    def _create() -> dict[str, Any]:
+    def create() -> dict[str, Any]:
         import Draft
         import FreeCAD as App
 
         doc = App.ActiveDocument
         if doc is None:
             raise RuntimeError("No active document.")
-        vectors = [App.Vector(x, y, z) for x, y, z in deduped]
-        if kind == "bspline":
-            wire_obj = Draft.make_bspline(vectors, closed=bool(closed), face=False)
-        else:
-            wire_obj = Draft.make_wire(vectors, closed=bool(closed), face=False)
-        if wire_obj is None:
-            raise RuntimeError("Draft could not create the curve from these points.")
-        wire_obj.Label = label or "VibeCAD Wire"
+        native_vectors = [domain_runtime.parse_vector(point) for point in points]
+        obj = Draft.make_wire(native_vectors, closed=bool(closed), face=bool(make_face))
+        if obj is None:
+            raise RuntimeError("Draft.make_wire did not create an object.")
+        obj.Label = clean_label
         doc.recompute()
-        shape = getattr(wire_obj, "Shape", None)
-        edges = list(getattr(shape, "Edges", []) or [])
-        if shape is None or shape.isNull() or not edges:
-            raise RuntimeError("Curve object recomputed without a usable shape.")
         return {
-            "object": wire_obj.Name,
-            "label": wire_obj.Label,
-            "type": getattr(wire_obj, "TypeId", ""),
-            "curve_type": kind,
-            "closed": bool(closed),
-            "point_count": len(deduped),
-            "edge_count": len(edges),
-            "length_mm": round(float(getattr(shape, "Length", 0.0) or 0.0), 3),
+            "document": doc.Name,
+            "feature": obj.Name,
+            "feature_label": obj.Label,
+            "feature_type": obj.TypeId,
+            "point_count": len(native_vectors),
+            "requested_points": point_diagnostics,
+            "actual_points": [
+                domain_runtime.vector_values(point)
+                for point in list(getattr(obj, "Points", []) or [])
+            ],
+            "closed_requested": bool(closed),
+            "closed_actual": bool(getattr(obj, "Closed", False)),
+            "make_face_requested": bool(make_face),
+            "make_face_actual": bool(getattr(obj, "MakeFace", False)),
+            "profile_diagnostics": domain_runtime.shape_profile_diagnostics(obj),
+            "shape": domain_runtime.shape_summary(obj),
+            "feature_state": domain_runtime.feature_state_summary(obj),
         }
 
+    def verify(result: dict[str, Any]) -> dict[str, Any]:
+        profile = result.get("profile_diagnostics") or {}
+        checks = [
+            {
+                "name": "closed_state",
+                "ok": bool(result.get("closed_actual")) == bool(closed),
+                "expected": bool(closed),
+                "actual": result.get("closed_actual"),
+            },
+            {
+                "name": "face_result",
+                "ok": not bool(make_face)
+                or bool(profile.get("face_buildable"))
+                and int(profile.get("existing_face_count", 0)) > 0,
+                "actual": profile,
+            },
+        ]
+        return {"ok": all(check["ok"] for check in checks), "checks": checks}
+
     transaction = run_freecad_transaction(
-        f"Create Draft 3D {kind}: {label}",
-        _create,
+        f"Create Draft wire: {clean_label}",
+        create,
+        verifier=verify,
     )
-    return {
-        "ok": bool(transaction.get("ok")),
-        "transaction": transaction,
-        "draft": domain_runtime.draft_summary(service),
-    }
+    return domain_runtime.part_feature_result(transaction, operation="create_wire")
+
+
+def _invalid(message: str, **details: Any) -> dict[str, Any]:
+    return {"ok": False, "error": message, "retry_same_call": False, **details}

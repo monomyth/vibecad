@@ -88,6 +88,15 @@ class AssemblyObject(Part):
         ...
 
     @constmethod
+    def getSolverDiagnostics(self) -> dict[str, Any]:
+        """Return structured diagnostics from the most recent native solve.
+
+        Includes assembly DoF, grounded components, conflicting/redundant/malformed
+        joint sets, and per-joint native constraint residuals.
+        """
+        ...
+
+    @constmethod
     def undoSolve(self) -> Any:
         """Undo the last solve of the assembly and return part placements to their initial position.
 

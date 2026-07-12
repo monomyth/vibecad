@@ -25,8 +25,7 @@ from VibeCADAuth import (
     validate_api_key,
     validate_configured_auth,
 )
-from VibeCADWorkbenchTools import WORKBENCH_TOOL_PACKS
-
+from VibeCADDebug import default_capture_directory, resolve_capture_directory
 
 PREFERENCE_GROUP = "User parameter:BaseApp/Preferences/Mod/VibeCAD"
 DEFAULT_MODEL = "gpt-5.5"
@@ -46,11 +45,9 @@ class VibeCADSettings:
     use_online_provider: bool = True
     model: str = DEFAULT_MODEL
     dotenv_path: str = ""
-    disabled_workbenches: tuple[str, ...] = ()
     reasoning_effort: str = DEFAULT_REASONING_EFFORT
     provider: str = DEFAULT_PROVIDER
     anthropic_model: str = DEFAULT_ANTHROPIC_MODEL
-    enable_build_script: bool = False
     openai_base_url: str = ""
     anthropic_base_url: str = ""
 
@@ -62,7 +59,7 @@ class VibeCADSettings:
 
     @property
     def active_model(self) -> str:
-        """Model for the selected provider (legacy Model key is the OpenAI slot)."""
+        """Model for the selected provider."""
         if normalize_provider(self.provider) == "anthropic":
             return self.anthropic_model.strip() or DEFAULT_ANTHROPIC_MODEL
         return self.model.strip() or DEFAULT_MODEL
@@ -85,22 +82,18 @@ class VibeCADSettings:
         return override or None
 
 
+@dataclass(frozen=True)
+class VibeCADDebugSettings:
+    context_debug_enabled: bool = False
+    capture_directory: str = ""
+
+    @property
+    def resolved_capture_directory(self) -> Path:
+        return resolve_capture_directory(self.capture_directory)
+
+
 def preferences():
     return App.ParamGet(PREFERENCE_GROUP)
-
-
-def _parse_disabled_workbenches(value: str) -> tuple[str, ...]:
-    known = set(WORKBENCH_TOOL_PACKS)
-    items = []
-    for item in value.split(","):
-        workbench = item.strip()
-        if workbench and workbench in known and workbench not in items:
-            items.append(workbench)
-    return tuple(sorted(items))
-
-
-def _format_disabled_workbenches(value: tuple[str, ...]) -> str:
-    return ",".join(sorted(set(value).intersection(WORKBENCH_TOOL_PACKS)))
 
 
 def normalize_reasoning_effort(value: str | None) -> str:
@@ -114,18 +107,22 @@ def load_settings() -> VibeCADSettings:
         use_online_provider=pref.GetBool("UseOnlineProvider", True),
         model=pref.GetString("Model", DEFAULT_MODEL) or DEFAULT_MODEL,
         dotenv_path=pref.GetString("DotenvPath", ""),
-        disabled_workbenches=_parse_disabled_workbenches(
-            pref.GetString("DisabledWorkbenches", "")
-        ),
         reasoning_effort=normalize_reasoning_effort(
             pref.GetString("ReasoningEffort", DEFAULT_REASONING_EFFORT)
         ),
         provider=normalize_provider(pref.GetString("Provider", DEFAULT_PROVIDER)),
         anthropic_model=pref.GetString("AnthropicModel", DEFAULT_ANTHROPIC_MODEL)
         or DEFAULT_ANTHROPIC_MODEL,
-        enable_build_script=pref.GetBool("EnableBuildScript", False),
         openai_base_url=pref.GetString("OpenAIBaseUrl", ""),
         anthropic_base_url=pref.GetString("AnthropicBaseUrl", ""),
+    )
+
+
+def load_debug_settings() -> VibeCADDebugSettings:
+    pref = preferences()
+    return VibeCADDebugSettings(
+        context_debug_enabled=pref.GetBool("ContextDebugEnabled", False),
+        capture_directory=pref.GetString("ContextDebugDirectory", ""),
     )
 
 
@@ -135,19 +132,20 @@ def save_settings(settings: VibeCADSettings) -> None:
     pref.SetString("Model", settings.model.strip() or DEFAULT_MODEL)
     pref.SetString("DotenvPath", settings.dotenv_path.strip())
     pref.SetString(
-        "DisabledWorkbenches",
-        _format_disabled_workbenches(settings.disabled_workbenches),
-    )
-    pref.SetString(
         "ReasoningEffort", normalize_reasoning_effort(settings.reasoning_effort)
     )
     pref.SetString("Provider", normalize_provider(settings.provider))
     pref.SetString(
         "AnthropicModel", settings.anthropic_model.strip() or DEFAULT_ANTHROPIC_MODEL
     )
-    pref.SetBool("EnableBuildScript", bool(settings.enable_build_script))
     pref.SetString("OpenAIBaseUrl", settings.openai_base_url.strip())
     pref.SetString("AnthropicBaseUrl", settings.anthropic_base_url.strip())
+
+
+def save_debug_settings(settings: VibeCADDebugSettings) -> None:
+    pref = preferences()
+    pref.SetBool("ContextDebugEnabled", bool(settings.context_debug_enabled))
+    pref.SetString("ContextDebugDirectory", settings.capture_directory.strip())
 
 
 def reset_settings() -> None:
@@ -155,13 +153,13 @@ def reset_settings() -> None:
     pref.RemBool("UseOnlineProvider")
     pref.RemString("Model")
     pref.RemString("DotenvPath")
-    pref.RemString("DisabledWorkbenches")
     pref.RemString("ReasoningEffort")
     pref.RemString("Provider")
     pref.RemString("AnthropicModel")
-    pref.RemBool("EnableBuildScript")
     pref.RemString("OpenAIBaseUrl")
     pref.RemString("AnthropicBaseUrl")
+    pref.RemBool("ContextDebugEnabled")
+    pref.RemString("ContextDebugDirectory")
 
 
 def configured_dotenv_path() -> Path | None:
@@ -234,7 +232,7 @@ class VibeCADPreferencesPage:
         self.openai_base_url.setToolTip(
             "Override the OpenAI API endpoint (include the /v1 segment). "
             "Leave blank to use the official endpoint. Use this to point at "
-            "a local or OpenAI-compatible server."
+            "a local server that implements the OpenAI API."
         )
         layout.addRow("OpenAI base URL", self.openai_base_url)
 
@@ -256,15 +254,6 @@ class VibeCADPreferencesPage:
         self.reasoning_effort.setObjectName("VibeCADPrefReasoningEffort")
         self.reasoning_effort.addItems(REASONING_EFFORTS)
         layout.addRow("Reasoning effort", self.reasoning_effort)
-
-        self.enable_build_script = QtWidgets.QCheckBox(self.form)
-        self.enable_build_script.setObjectName("VibeCADPrefEnableBuildScript")
-        self.enable_build_script.setToolTip(
-            "When enabled, the assistant writes FreeCAD Python scripts through "
-            "model.build_from_script and all structured write tools are disabled. "
-            "Read and view tools stay available in both modes."
-        )
-        layout.addRow("Script mode (advanced)", self.enable_build_script)
 
         dotenv_row = QtWidgets.QHBoxLayout()
         self.dotenv_path = QtWidgets.QLineEdit(self.form)
@@ -300,16 +289,6 @@ class VibeCADPreferencesPage:
         self.status.setObjectName("VibeCADPrefAuthStatus")
         self.status.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
         layout.addRow("Auth status", self.status)
-
-        self.tool_packs = QtWidgets.QListWidget(self.form)
-        self.tool_packs.setObjectName("VibeCADPrefToolPacks")
-        self.tool_packs.setFixedHeight(150)
-        for workbench in sorted(WORKBENCH_TOOL_PACKS):
-            item = QtWidgets.QListWidgetItem(workbench)
-            item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable)
-            item.setCheckState(QtCore.Qt.Checked)
-            self.tool_packs.addItem(item)
-        layout.addRow("Enabled tool packs", self.tool_packs)
 
         refresh = QtWidgets.QPushButton("Refresh", self.form)
         refresh.setObjectName("VibeCADPrefRefreshAuth")
@@ -404,25 +383,16 @@ class VibeCADPreferencesPage:
         self.status.setText(f"{auth.status.value}{source}{key}{message}")
 
     def _current_settings(self) -> VibeCADSettings:
-        from PySide import QtCore
-
-        disabled = []
-        for index in range(self.tool_packs.count()):
-            item = self.tool_packs.item(index)
-            if item.checkState() != QtCore.Qt.Checked:
-                disabled.append(item.text())
         return VibeCADSettings(
             use_online_provider=self.use_online.isChecked(),
             model=self.model.currentText().strip() or DEFAULT_MODEL,
             dotenv_path=self.dotenv_path.text().strip(),
-            disabled_workbenches=tuple(disabled),
             reasoning_effort=normalize_reasoning_effort(
                 self.reasoning_effort.currentText()
             ),
             provider=self._selected_provider(),
             anthropic_model=self.anthropic_model.currentText().strip()
             or DEFAULT_ANTHROPIC_MODEL,
-            enable_build_script=self.enable_build_script.isChecked(),
             openai_base_url=self.openai_base_url.text().strip(),
             anthropic_base_url=self.anthropic_base_url.text().strip(),
         )
@@ -441,8 +411,6 @@ class VibeCADPreferencesPage:
         save_settings(self._current_settings())
 
     def loadSettings(self) -> None:
-        from PySide import QtCore
-
         settings = load_settings()
         self.use_online.setChecked(settings.use_online_provider)
         provider_index = self.provider.findData(normalize_provider(settings.provider))
@@ -452,15 +420,120 @@ class VibeCADPreferencesPage:
         index = self.reasoning_effort.findText(settings.reasoning_effort)
         self.reasoning_effort.setCurrentIndex(index if index >= 0 else 0)
         self.dotenv_path.setText(settings.dotenv_path)
-        self.enable_build_script.setChecked(settings.enable_build_script)
         self.openai_base_url.setText(settings.openai_base_url)
         self.anthropic_base_url.setText(settings.anthropic_base_url)
-        disabled = set(settings.disabled_workbenches)
-        for index in range(self.tool_packs.count()):
-            item = self.tool_packs.item(index)
-            state = (
-                QtCore.Qt.Unchecked if item.text() in disabled else QtCore.Qt.Checked
-            )
-            item.setCheckState(state)
         self.api_key.clear()
         self._refresh_status()
+
+
+class VibeCADDebugPreferencesPage:
+    """Preferences for the opt-in exact provider-request debugger."""
+
+    def __init__(self, parent=None):
+        from PySide import QtCore, QtWidgets
+
+        self.form = QtWidgets.QWidget(parent)
+        self.form.setObjectName("VibeCADDebugPreferencesPage")
+        self.form.setWindowTitle("Debug")
+        layout = QtWidgets.QFormLayout(self.form)
+
+        self.enabled = QtWidgets.QCheckBox(self.form)
+        self.enabled.setObjectName("VibeCADPrefContextDebugEnabled")
+        self.enabled.setToolTip(
+            "Capture every exact provider SDK request. Captures contain prompts, "
+            "conversation history, tools, CAD context, and encoded images."
+        )
+        self.enabled.toggled.connect(self._enabled_changed)
+        layout.addRow("Context debugger", self.enabled)
+
+        directory_row = QtWidgets.QHBoxLayout()
+        self.directory = QtWidgets.QLineEdit(self.form)
+        self.directory.setObjectName("VibeCADPrefContextDebugDirectory")
+        self.directory.setPlaceholderText(str(default_capture_directory()))
+        self.directory.setToolTip(
+            "Directory for timestamped JSON request captures. Leave blank to use "
+            "the VibeCAD debug directory."
+        )
+        browse = QtWidgets.QPushButton("Browse", self.form)
+        browse.setObjectName("VibeCADPrefBrowseContextDebugDirectory")
+        browse.clicked.connect(self._browse_directory)
+        directory_row.addWidget(self.directory, 1)
+        directory_row.addWidget(browse)
+        layout.addRow("Capture directory", directory_row)
+
+        actions = QtWidgets.QHBoxLayout()
+        self.open_viewer = QtWidgets.QPushButton("Open Viewer", self.form)
+        self.open_viewer.setObjectName("VibeCADPrefOpenContextDebugViewer")
+        self.open_viewer.clicked.connect(self._open_viewer)
+        open_folder = QtWidgets.QPushButton("Open Folder", self.form)
+        open_folder.setObjectName("VibeCADPrefOpenContextDebugFolder")
+        open_folder.clicked.connect(self._open_folder)
+        actions.addWidget(self.open_viewer)
+        actions.addWidget(open_folder)
+        actions.addStretch(1)
+        layout.addRow("", actions)
+
+        self.status = QtWidgets.QLabel(self.form)
+        self.status.setObjectName("VibeCADPrefContextDebugStatus")
+        self.status.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        self.status.setWordWrap(True)
+        layout.addRow("Capture status", self.status)
+
+    def _settings(self) -> VibeCADDebugSettings:
+        return VibeCADDebugSettings(
+            context_debug_enabled=self.enabled.isChecked(),
+            capture_directory=self.directory.text().strip(),
+        )
+
+    def _enabled_changed(self, enabled: bool) -> None:
+        self.open_viewer.setEnabled(bool(enabled))
+        self._refresh_status()
+
+    def _refresh_status(self) -> None:
+        settings = self._settings()
+        state = "enabled" if settings.context_debug_enabled else "disabled"
+        self.status.setText(f"{state} | {settings.resolved_capture_directory}")
+
+    def _browse_directory(self) -> None:
+        from PySide import QtWidgets
+
+        selected = QtWidgets.QFileDialog.getExistingDirectory(
+            self.form,
+            "Select provider request capture directory",
+            str(self._settings().resolved_capture_directory),
+        )
+        if selected:
+            self.directory.setText(selected)
+            self._refresh_status()
+
+    def _open_folder(self) -> None:
+        from PySide import QtCore, QtGui
+
+        directory = self._settings().resolved_capture_directory
+        directory.mkdir(parents=True, exist_ok=True)
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(directory)))
+
+    def _open_viewer(self) -> None:
+        if not self.enabled.isChecked():
+            return
+        save_debug_settings(self._settings())
+        import VibeCADGui
+
+        VibeCADGui.show_context_debugger()
+
+    def saveSettings(self) -> None:
+        save_debug_settings(self._settings())
+        try:
+            import VibeCADGui
+
+            VibeCADGui.apply_context_debug_preferences()
+        except Exception as exc:
+            App.Console.PrintWarning(
+                f"VibeCAD context debugger preference update failed: {exc}\n"
+            )
+
+    def loadSettings(self) -> None:
+        settings = load_debug_settings()
+        self.enabled.setChecked(settings.context_debug_enabled)
+        self.directory.setText(settings.capture_directory)
+        self._enabled_changed(settings.context_debug_enabled)

@@ -42,6 +42,7 @@
 #include <CXX/Objects.hxx>
 
 #include <App/DocumentObject.h>
+#include <App/Document.h>
 #include <App/DocumentObserver.h>
 #include <App/StringHasher.h>
 #include <App/ExportInfo.h>
@@ -103,28 +104,91 @@ struct DocumentP
     mutable HasherMap hashers;
     std::multimap<const App::DocumentObject*, std::unique_ptr<App::DocumentObjectExecReturn>>
         _RecomputeLog;
+    std::uint64_t recomputeDiagnosticGeneration {0};
+    std::vector<RecomputeDiagnostic> recomputeDiagnostics;
     ExportInfo exportInfo;
 
     StringHasherRef Hasher {new StringHasher};
 
     DocumentP();
 
-    void addRecomputeLog(const char* why, App::DocumentObject* obj)
+    void beginRecomputeDiagnostics()
     {
-        addRecomputeLog(new DocumentObjectExecReturn(why, obj));
+        ++recomputeDiagnosticGeneration;
+        recomputeDiagnostics.clear();
     }
 
-    void addRecomputeLog(const std::string& why, App::DocumentObject* obj)
+    void addRecomputeDiagnostic(const std::string& why,
+                                App::DocumentObject* obj,
+                                std::string_view code,
+                                std::string_view algorithm = {},
+                                std::string_view property = {},
+                                std::string_view subelement = {})
     {
-        addRecomputeLog(new DocumentObjectExecReturn(why, obj));
+        RecomputeDiagnostic diagnostic;
+        diagnostic.generation = recomputeDiagnosticGeneration;
+        diagnostic.severity = "error";
+        diagnostic.code = std::string(code);
+        diagnostic.object = obj && obj->getNameInDocument() ? obj->getNameInDocument() : "";
+        diagnostic.algorithm = algorithm.empty() && obj
+            ? std::string(obj->getTypeId().getName())
+            : std::string(algorithm);
+        diagnostic.property = std::string(property);
+        diagnostic.subelement = std::string(subelement);
+        diagnostic.message = why;
+        recomputeDiagnostics.push_back(std::move(diagnostic));
     }
 
-    void addRecomputeLog(DocumentObjectExecReturn* returnCode)
+    void addRecomputeLog(const char* why,
+                         App::DocumentObject* obj,
+                         std::string_view code = "FEATURE_EXECUTION_FAILED",
+                         std::string_view algorithm = {},
+                         std::string_view property = {},
+                         std::string_view subelement = {})
+    {
+        addRecomputeLog(
+            new DocumentObjectExecReturn(why, obj),
+            code,
+            algorithm,
+            property,
+            subelement
+        );
+    }
+
+    void addRecomputeLog(const std::string& why,
+                         App::DocumentObject* obj,
+                         std::string_view code = "FEATURE_EXECUTION_FAILED",
+                         std::string_view algorithm = {},
+                         std::string_view property = {},
+                         std::string_view subelement = {})
+    {
+        addRecomputeLog(
+            new DocumentObjectExecReturn(why, obj),
+            code,
+            algorithm,
+            property,
+            subelement
+        );
+    }
+
+    void addRecomputeLog(DocumentObjectExecReturn* returnCode,
+                         std::string_view code = "FEATURE_EXECUTION_FAILED",
+                         std::string_view algorithm = {},
+                         std::string_view property = {},
+                         std::string_view subelement = {})
     {
         if (!returnCode->Which) {
             delete returnCode;
             return;
         }
+        addRecomputeDiagnostic(
+            returnCode->Why,
+            returnCode->Which,
+            code,
+            algorithm,
+            property,
+            subelement
+        );
         _RecomputeLog.emplace(returnCode->Which,
                               std::unique_ptr<DocumentObjectExecReturn>(returnCode));
         returnCode->Which->setStatus(ObjectStatus::Error, true);

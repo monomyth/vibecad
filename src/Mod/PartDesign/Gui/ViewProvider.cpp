@@ -120,6 +120,10 @@ bool ViewProvider::setEdit(int ModNum)
 
         // this is feature so we need to forward the transform to the body
         forwardedViewProvider = getBodyViewProvider();
+        if (!forwardedViewProvider) {
+            // feature is not inside a body (erroneous document), edit the transform directly
+            return PartGui::ViewProviderPart::setEdit(ModNum);
+        }
         return forwardedViewProvider->startEditing(ModNum);
     }
     else if (ModNum == ViewProvider::Default) {

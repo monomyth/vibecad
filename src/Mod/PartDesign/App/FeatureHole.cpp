@@ -463,6 +463,86 @@ std::vector<std::string> getThreadDesignations(const int threadType)
     return designations;
 }
 
+std::vector<Hole::ThreadCatalogEntry> Hole::getThreadCatalog()
+{
+    auto strings = [](const char* const* values) {
+        std::vector<std::string> result;
+        if (!values) {
+            return result;
+        }
+        for (std::size_t index = 0; values[index] != nullptr; ++index) {
+            result.emplace_back(values[index]);
+        }
+        return result;
+    };
+    auto vectorStrings = [](const std::vector<std::string>& values) {
+        return values;
+    };
+
+    std::vector<ThreadCatalogEntry> catalog;
+    for (int typeIndex = 0; ThreadTypeEnums[typeIndex] != nullptr; ++typeIndex) {
+        ThreadCatalogEntry entry;
+        entry.standard = ThreadTypeEnums[typeIndex];
+        entry.sizes = threadDescription[typeIndex];
+        if (entry.standard == "None") {
+            entry.classes = strings(ThreadClass_None_Enums);
+            entry.fits = strings(ClearanceNoneEnums);
+            entry.holeCuts = strings(HoleCutType_None_Enums);
+        }
+        else if (entry.standard == "ISOMetricProfile") {
+            entry.classes = strings(ThreadClass_ISOmetric_Enums);
+            entry.fits = strings(ClearanceMetricEnums);
+            entry.holeCuts = vectorStrings(HoleCutType_ISOmetric_Enums);
+        }
+        else if (entry.standard == "ISOMetricFineProfile") {
+            entry.classes = strings(ThreadClass_ISOmetricfine_Enums);
+            entry.fits = strings(ClearanceMetricEnums);
+            entry.holeCuts = vectorStrings(HoleCutType_ISOmetricfine_Enums);
+        }
+        else if (entry.standard == "UNC") {
+            entry.classes = strings(ThreadClass_UNC_Enums);
+            entry.fits = strings(ClearanceUTSEnums);
+            entry.holeCuts = strings(HoleCutType_UNC_Enums);
+        }
+        else if (entry.standard == "UNF") {
+            entry.classes = strings(ThreadClass_UNF_Enums);
+            entry.fits = strings(ClearanceUTSEnums);
+            entry.holeCuts = strings(HoleCutType_UNF_Enums);
+        }
+        else if (entry.standard == "UNEF") {
+            entry.classes = strings(ThreadClass_UNEF_Enums);
+            entry.fits = strings(ClearanceUTSEnums);
+            entry.holeCuts = strings(HoleCutType_UNEF_Enums);
+        }
+        else if (entry.standard == "NPT") {
+            entry.classes = strings(ThreadClass_None_Enums);
+            entry.fits = strings(ClearanceUTSEnums);
+            entry.holeCuts = strings(HoleCutType_NPT_Enums);
+        }
+        else if (entry.standard == "BSP") {
+            entry.classes = strings(ThreadClass_None_Enums);
+            entry.fits = strings(ClearanceMetricEnums);
+            entry.holeCuts = strings(HoleCutType_BSP_Enums);
+        }
+        else if (entry.standard == "BSW") {
+            entry.classes = strings(ThreadClass_BSW_Enums);
+            entry.fits = strings(ClearanceOtherEnums);
+            entry.holeCuts = strings(HoleCutType_BSW_Enums);
+        }
+        else if (entry.standard == "BSF") {
+            entry.classes = strings(ThreadClass_BSF_Enums);
+            entry.fits = strings(ClearanceOtherEnums);
+            entry.holeCuts = strings(HoleCutType_BSF_Enums);
+        }
+        else if (entry.standard == "ISOTyre") {
+            entry.classes = strings(ThreadClass_None_Enums);
+            entry.holeCuts = strings(HoleCutType_None_Enums);
+        }
+        catalog.push_back(std::move(entry));
+    }
+    return catalog;
+}
+
 /* ISO coarse metric enums */
 std::vector<std::string> Hole::HoleCutType_ISOmetric_Enums
     = {"None", "Counterbore", "Countersink", "Counterdrill"};

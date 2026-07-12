@@ -117,6 +117,54 @@ PyObject* PathSimPy::GetResultMesh(PyObject* args)
     return tuple;
 }
 
+PyObject* PathSimPy::GetSimulationStats(PyObject* args)
+{
+    if (!PyArg_ParseTuple(args, "")) {
+        return nullptr;
+    }
+    PathSim* sim = getPathSimPtr();
+    try {
+        const cStock::Statistics stats = sim->GetSimulationStats();
+        PyObject* result = PyDict_New();
+        const auto setOwned = [result](const char* name, PyObject* value) {
+            PyDict_SetItemString(result, name, value);
+            Py_DECREF(value);
+        };
+        setOwned("resolution_mm", PyFloat_FromDouble(stats.resolution));
+        PyObject* grid = Py_BuildValue("[ii]", stats.gridX, stats.gridY);
+        PyDict_SetItemString(result, "grid", grid);
+        Py_DECREF(grid);
+        setOwned("initial_volume_mm3", PyFloat_FromDouble(stats.initialVolume));
+        setOwned("removed_volume_mm3", PyFloat_FromDouble(stats.removedVolume));
+        setOwned("remaining_volume_mm3", PyFloat_FromDouble(stats.remainingVolume));
+        setOwned("modified_cells", PyLong_FromLong(stats.modifiedCells));
+        setOwned("cut_commands", PyLong_FromLong(sim->m_cutCommands));
+        setOwned("rapid_commands", PyLong_FromLong(sim->m_rapidCommands));
+        setOwned("unsupported_commands", PyLong_FromLong(sim->m_unsupportedCommands));
+        if (stats.hasRemovedBounds) {
+            PyObject* minimum
+                = Py_BuildValue("[ddd]", stats.removedMin.x, stats.removedMin.y, stats.removedMin.z);
+            PyObject* maximum
+                = Py_BuildValue("[ddd]", stats.removedMax.x, stats.removedMax.y, stats.removedMax.z);
+            PyObject* bounds = PyDict_New();
+            PyDict_SetItemString(bounds, "min", minimum);
+            PyDict_SetItemString(bounds, "max", maximum);
+            Py_DECREF(minimum);
+            Py_DECREF(maximum);
+            PyDict_SetItemString(result, "removed_bounds", bounds);
+            Py_DECREF(bounds);
+        }
+        else {
+            PyDict_SetItemString(result, "removed_bounds", Py_None);
+        }
+        return result;
+    }
+    catch (const Base::Exception& exc) {
+        PyErr_SetString(PyExc_RuntimeError, exc.what());
+        return nullptr;
+    }
+}
+
 
 PyObject* PathSimPy::ApplyCommand(PyObject* args, PyObject* kwds)
 {

@@ -22,6 +22,7 @@
  ***************************************************************************/
 
 #include <boost/core/ignore_unused.hpp>
+#include <algorithm>
 #include <cmath>
 #include <vector>
 #include <unordered_map>
@@ -147,6 +148,8 @@ void AssemblyObject::onChanged(const App::Property* prop)
 
 int AssemblyObject::solve(bool enableRedo)
 {
+    lastSolverMessage.clear();
+    lastJointDiagnostics.clear();
     ensureIdentityPlacements();
 
     syncGroundedJoints();
@@ -158,6 +161,8 @@ int AssemblyObject::solve(bool enableRedo)
     auto groundedObjs = fixGroundedParts();
     if (groundedObjs.empty()) {
         // If no part fixed we can't solve.
+        lastSolverStatus = -6;
+        lastSolverMessage = "No grounded component is visible to the native solver.";
         return -6;
     }
 
@@ -178,12 +183,14 @@ int AssemblyObject::solve(bool enableRedo)
     catch (const std::exception& e) {
         FC_ERR("Solve failed: " << e.what());
         lastSolverStatus = -1;
+        lastSolverMessage = e.what();
         updateSolveStatus();
         return -1;
     }
     catch (...) {
         FC_ERR("Solve failed: unhandled exception");
         lastSolverStatus = -1;
+        lastSolverMessage = "Unhandled native solver exception.";
         updateSolveStatus();
         return -1;
     }
@@ -200,7 +207,14 @@ int AssemblyObject::solve(bool enableRedo)
 void AssemblyObject::updateSolveStatus()
 {
     lastRedundantJoints.clear();
+    lastConflictingJoints.clear();
+    lastPartialRedundantJoints.clear();
+    lastMalformedJoints.clear();
+    lastJointDiagnostics.clear();
+    lastHasConflict = false;
     lastHasRedundancies = false;
+    lastHasPartialRedundancies = false;
+    lastHasMalformedConstraints = false;
     //+1 because there's a grounded joint to origin
     lastDoF = (1 + numberOfComponents()) * 6;
 
@@ -224,6 +238,15 @@ void AssemblyObject::updateSolveStatus()
     };
 
 
+    for (auto* joint : getJoints()) {
+        if (!joint || isMbDJointValid(joint)) {
+            continue;
+        }
+        const std::string name = joint->getNameInDocument();
+        lastMalformedJoints.push_back(name);
+    }
+    lastHasMalformedConstraints = !lastMalformedJoints.empty();
+
     // Iterate through all joints and motions in the MBD system
     mbdAssembly->mbdSystem->jointsMotionsDo([&](std::shared_ptr<MbD::Joint> jm) {
         if (!jm) {
@@ -231,6 +254,7 @@ void AssemblyObject::updateSolveStatus()
         }
         // Base::Console().warning("jm->name %s\n", jm->name);
         bool isJointRedundant = false;
+        SolverJointDiagnostic diagnostic;
 
         jm->constraintsDo([&](std::shared_ptr<MbD::Constraint> con) {
             if (!con) {
@@ -242,8 +266,21 @@ void AssemblyObject::updateSolveStatus()
             if (spec.rfind("Redundant", 0) == 0) {
                 isJointRedundant = true;
             }
-            // Base::Console().warning("    - %s\n", spec);
-            --lastDoF;
+            const bool redundant = spec.rfind("Redundant", 0) == 0 || con->isRedundant();
+            const double residual = con->aG;
+            diagnostic.constraints.push_back({spec, residual, redundant});
+            ++diagnostic.constraintCount;
+            diagnostic.maximumAbsoluteResidual = std::max(
+                diagnostic.maximumAbsoluteResidual,
+                std::abs(residual)
+            );
+            if (redundant) {
+                ++diagnostic.redundantConstraintCount;
+            }
+            else {
+                ++diagnostic.removedDegreesOfFreedom;
+                --lastDoF;
+            }
         });
 
         const std::string fullName = cleanJointName(jm->name);
@@ -255,9 +292,23 @@ void AssemblyObject::updateSolveStatus()
             return;
         }
 
+        diagnostic.jointName = docObj->getNameInDocument();
+        lastJointDiagnostics.push_back(diagnostic);
+
+        if (diagnostic.maximumAbsoluteResidual > 1.0e-6) {
+            lastHasConflict = true;
+            lastConflictingJoints.push_back(diagnostic.jointName);
+        }
+
+        if (diagnostic.redundantConstraintCount > 0
+            && diagnostic.redundantConstraintCount < diagnostic.constraintCount) {
+            lastHasPartialRedundancies = true;
+            lastPartialRedundantJoints.push_back(diagnostic.jointName);
+        }
+
         if (isJointRedundant) {
             // Check if this joint is already in the list to avoid duplicates
-            std::string objName = docObj->getNameInDocument();
+            std::string objName = diagnostic.jointName;
             if (std::find(lastRedundantJoints.begin(), lastRedundantJoints.end(), objName)
                 == lastRedundantJoints.end()) {
                 lastRedundantJoints.push_back(objName);

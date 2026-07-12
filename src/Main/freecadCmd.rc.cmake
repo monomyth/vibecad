@@ -9,23 +9,34 @@
 //
 // Icon with lowest ID value placed first to ensure application icon
 // remains consistent on all systems.
-IDI_ICON1               ICON    DISCARDABLE     "icon.ico"
+IDI_ICON1               ICON    DISCARDABLE     "vibecad.ico"
 
 // File info for the FreeCADCmd.exe
 //
 1 VERSIONINFO
 FILEVERSION ${PACKAGE_VERSION_MAJOR},${PACKAGE_VERSION_MINOR},${PACKAGE_VERSION_PATCH},${PACKAGE_BUILD_VERSION}
+PRODUCTVERSION ${PACKAGE_VERSION_MAJOR},${PACKAGE_VERSION_MINOR},${PACKAGE_VERSION_PATCH},${PACKAGE_BUILD_VERSION}
+FILEFLAGSMASK 0x3fL
+#ifdef _DEBUG
+FILEFLAGS 0x1L
+#else
+FILEFLAGS 0x0L
+#endif
+FILEOS 0x40004L
+FILETYPE 0x1L
+FILESUBTYPE 0x0L
 BEGIN
     BLOCK "StringFileInfo"
     BEGIN
         BLOCK "040904b0" // 409 stands for US English
         BEGIN
-            VALUE "CompanyName", "${PROJECT_NAME} Team"
-            VALUE "FileDescription", "${PROJECT_NAME} command line executable"
+            VALUE "CompanyName", "VibeCAD Project"
+            VALUE "FileDescription", "VibeCAD command line executable"
+            VALUE "FileVersion", "${PACKAGE_VERSION}${PACKAGE_VERSION_SUFFIX}"
             VALUE "InternalName", "FreeCADCmd.exe"
-            VALUE "LegalCopyright", "Copyright (C) 2022"
+            VALUE "LegalCopyright", "Copyright (C) FreeCAD and VibeCAD contributors"
             VALUE "OriginalFilename", "FreeCADCmd.exe"
-            VALUE "ProductName", "${PROJECT_NAME}"
+            VALUE "ProductName", "VibeCAD"
             VALUE "ProductVersion", "${PACKAGE_VERSION}${PACKAGE_VERSION_SUFFIX}"
         END
     END

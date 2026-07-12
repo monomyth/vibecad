@@ -24,8 +24,18 @@
 
 #include <memory>
 #include <sstream>
+#include <string>
+#include <vector>
+
+#include <boost/uuid/uuid_io.hpp>
 
 #include <Geom_TrimmedCurve.hxx>
+#include <BRepCheck_Analyzer.hxx>
+#include <BRepCheck_ListIteratorOfListOfStatus.hxx>
+#include <BRepCheck_Result.hxx>
+#include <BRep_Tool.hxx>
+#include <TopExp.hxx>
+#include <TopoDS.hxx>
 
 #include <App/Document.h>
 #include <Base/AxisPy.h>
@@ -49,6 +59,111 @@
 
 
 using namespace Sketcher;
+
+namespace
+{
+struct SketchMutationSnapshot
+{
+    std::vector<std::string> geometryTags;
+    std::vector<std::string> constraintTags;
+};
+
+SketchMutationSnapshot mutationSnapshot(const SketchObject* sketch)
+{
+    SketchMutationSnapshot snapshot;
+    const int geometryCount = sketch->Geometry.getSize();
+    snapshot.geometryTags.reserve(static_cast<std::size_t>(geometryCount));
+    for (int index = 0; index < geometryCount; ++index) {
+        const auto facade = sketch->getGeometryFacade(index);
+        snapshot.geometryTags.push_back(
+            facade ? boost::uuids::to_string(facade->getTag()) : std::string());
+    }
+    const auto& constraints = sketch->Constraints.getValues();
+    snapshot.constraintTags.reserve(constraints.size());
+    for (const auto* constraint : constraints) {
+        snapshot.constraintTags.push_back(
+            constraint ? boost::uuids::to_string(constraint->getTag()) : std::string());
+    }
+    return snapshot;
+}
+
+PyObject* mutationCollectionMap(const std::vector<std::string>& before,
+                                const std::vector<std::string>& after)
+{
+    PyObject* result = PyDict_New();
+    PyObject* oldToNew = PyDict_New();
+    PyObject* deleted = PyList_New(0);
+    PyObject* created = PyList_New(0);
+    std::vector<bool> matched(after.size(), false);
+
+    for (std::size_t oldIndex = 0; oldIndex < before.size(); ++oldIndex) {
+        std::size_t newIndex = after.size();
+        for (std::size_t candidate = 0; candidate < after.size(); ++candidate) {
+            if (!matched[candidate] && before[oldIndex] == after[candidate]) {
+                newIndex = candidate;
+                matched[candidate] = true;
+                break;
+            }
+        }
+        if (newIndex < after.size()) {
+            PyObject* key = PyUnicode_FromFormat("%zu", oldIndex);
+            PyObject* value = PyLong_FromSize_t(newIndex);
+            PyDict_SetItem(oldToNew, key, value);
+            Py_DECREF(key);
+            Py_DECREF(value);
+        }
+        else {
+            PyObject* item = PyDict_New();
+            PyObject* index = PyLong_FromSize_t(oldIndex);
+            PyObject* tag = PyUnicode_FromString(before[oldIndex].c_str());
+            PyDict_SetItemString(item, "index", index);
+            PyDict_SetItemString(item, "tag", tag);
+            Py_DECREF(index);
+            Py_DECREF(tag);
+            PyList_Append(deleted, item);
+            Py_DECREF(item);
+        }
+    }
+    for (std::size_t newIndex = 0; newIndex < after.size(); ++newIndex) {
+        if (matched[newIndex]) {
+            continue;
+        }
+        PyObject* item = PyDict_New();
+        PyObject* index = PyLong_FromSize_t(newIndex);
+        PyObject* tag = PyUnicode_FromString(after[newIndex].c_str());
+        PyDict_SetItemString(item, "index", index);
+        PyDict_SetItemString(item, "tag", tag);
+        Py_DECREF(index);
+        Py_DECREF(tag);
+        PyList_Append(created, item);
+        Py_DECREF(item);
+    }
+
+    PyObject* identity = PyUnicode_FromString("native_tag");
+    PyDict_SetItemString(result, "identity", identity);
+    Py_DECREF(identity);
+    PyDict_SetItemString(result, "old_to_new", oldToNew);
+    PyDict_SetItemString(result, "deleted", deleted);
+    PyDict_SetItemString(result, "created", created);
+    Py_DECREF(oldToNew);
+    Py_DECREF(deleted);
+    Py_DECREF(created);
+    return result;
+}
+
+PyObject* mutationResult(const SketchMutationSnapshot& before, const SketchObject* sketch)
+{
+    const auto after = mutationSnapshot(sketch);
+    PyObject* result = PyDict_New();
+    PyObject* geometry = mutationCollectionMap(before.geometryTags, after.geometryTags);
+    PyObject* constraints = mutationCollectionMap(before.constraintTags, after.constraintTags);
+    PyDict_SetItemString(result, "geometry", geometry);
+    PyDict_SetItemString(result, "constraints", constraints);
+    Py_DECREF(geometry);
+    Py_DECREF(constraints);
+    return result;
+}
+}  // namespace
 
 // returns a string which represents the object e.g. when printed in python
 std::string SketchObjectPy::representation() const
@@ -203,7 +318,9 @@ PyObject* SketchObjectPy::delGeometry(PyObject* args)
         return nullptr;
     }
 
-    if (this->getSketchObjectPtr()->delGeometry(
+    auto* sketch = this->getSketchObjectPtr();
+    const auto before = mutationSnapshot(sketch);
+    if (sketch->delGeometry(
             Index,
             Base::asBoolean(noSolve) ? DeleteOption::NoSolve : DeleteOption::UpdateGeometry
         )) {
@@ -213,7 +330,7 @@ PyObject* SketchObjectPy::delGeometry(PyObject* args)
         return nullptr;
     }
 
-    Py_Return;
+    return mutationResult(before, sketch);
 }
 
 PyObject* SketchObjectPy::delGeometries(PyObject* args)
@@ -234,7 +351,9 @@ PyObject* SketchObjectPy::delGeometries(PyObject* args)
             }
         }
 
-        if (this->getSketchObjectPtr()->delGeometries(
+        auto* sketch = this->getSketchObjectPtr();
+        const auto before = mutationSnapshot(sketch);
+        if (sketch->delGeometries(
                 geoIdList,
                 Base::asBoolean(noSolve) ? DeleteOption::NoSolve : DeleteOption::UpdateGeometry
             )) {
@@ -244,7 +363,7 @@ PyObject* SketchObjectPy::delGeometries(PyObject* args)
             return nullptr;
         }
 
-        Py_Return;
+        return mutationResult(before, sketch);
     }
 
     std::string error = std::string("type must be list of GeoIds, not ");
@@ -259,7 +378,9 @@ PyObject* SketchObjectPy::deleteAllGeometry(PyObject* args)
         return nullptr;
     }
 
-    if (this->getSketchObjectPtr()->deleteAllGeometry(
+    auto* sketch = this->getSketchObjectPtr();
+    const auto before = mutationSnapshot(sketch);
+    if (sketch->deleteAllGeometry(
             Base::asBoolean(noSolve) ? DeleteOption::NoSolve : DeleteOption::UpdateGeometry
         )) {
         std::stringstream str;
@@ -268,7 +389,7 @@ PyObject* SketchObjectPy::deleteAllGeometry(PyObject* args)
         return nullptr;
     }
 
-    Py_Return;
+    return mutationResult(before, sketch);
 }
 
 PyObject* SketchObjectPy::detectDegeneratedGeometries(PyObject* args)
@@ -442,6 +563,103 @@ PyObject* SketchObjectPy::addConstraint(PyObject* args)
     throw Py::TypeError(error);
 }
 
+PyObject* SketchObjectPy::diagnoseAdditionalConstraints(PyObject* args)
+{
+    PyObject* pcObj;
+    if (!PyArg_ParseTuple(args, "O", &pcObj)) {
+        return nullptr;
+    }
+
+    std::vector<Constraint*> values;
+    if (PyObject_TypeCheck(pcObj, &(Sketcher::ConstraintPy::Type))) {
+        values.push_back(
+            static_cast<Sketcher::ConstraintPy*>(pcObj)->getConstraintPtr());
+    }
+    else if (PyList_Check(pcObj) || PyTuple_Check(pcObj)) {
+        Py::Sequence sequence(pcObj);
+        for (Py::Sequence::iterator it = sequence.begin(); it != sequence.end(); ++it) {
+            if (!PyObject_TypeCheck((*it).ptr(), &(ConstraintPy::Type))) {
+                PyErr_SetString(PyExc_TypeError,
+                                "Every item must be a Sketcher.Constraint.");
+                return nullptr;
+            }
+            values.push_back(
+                static_cast<ConstraintPy*>((*it).ptr())->getConstraintPtr());
+        }
+    }
+    else {
+        PyErr_SetString(PyExc_TypeError,
+                        "constraints must be a Sketcher.Constraint or sequence.");
+        return nullptr;
+    }
+    if (values.empty()) {
+        PyErr_SetString(PyExc_ValueError, "constraints must not be empty.");
+        return nullptr;
+    }
+
+    auto* sketch = getSketchObjectPtr();
+    for (auto* constraint : values) {
+        if (!sketch->evaluateConstraint(constraint)) {
+            PyErr_SetString(PyExc_IndexError,
+                            "A proposed constraint has invalid index information.");
+            return nullptr;
+        }
+    }
+
+    const int firstProposedIndex = sketch->Constraints.getSize();
+    const int degreesOfFreedom = sketch->diagnoseAdditionalConstraints(values);
+    const int solverStatus = sketch->getLastSolverStatus();
+    const auto conflicting = sketch->getLastConflicting();
+    const auto redundant = sketch->getLastRedundant();
+    const auto partiallyRedundant = sketch->getLastPartiallyRedundant();
+    const auto malformed = sketch->getLastMalformedConstraints();
+    const bool accepted = degreesOfFreedom >= 0 && conflicting.empty() && redundant.empty()
+        && partiallyRedundant.empty() && malformed.empty();
+
+    // Restore the live solver diagnostics after collecting the hypothetical result.
+    sketch->setUpSketch();
+
+    auto makeIndexList = [](const std::vector<int>& indices) {
+        PyObject* result = PyList_New(static_cast<Py_ssize_t>(indices.size()));
+        for (std::size_t index = 0; index < indices.size(); ++index) {
+            PyList_SET_ITEM(result,
+                            static_cast<Py_ssize_t>(index),
+                            PyLong_FromLong(indices[index]));
+        }
+        return result;
+    };
+
+    PyObject* result = PyDict_New();
+    PyObject* acceptedValue = PyBool_FromLong(accepted);
+    PyObject* dofValue = PyLong_FromLong(degreesOfFreedom);
+    PyObject* statusValue = PyLong_FromLong(solverStatus);
+    PyObject* firstIndexValue = PyLong_FromLong(firstProposedIndex);
+    PyObject* proposedCountValue = PyLong_FromSize_t(values.size());
+    PyObject* conflictingValue = makeIndexList(conflicting);
+    PyObject* redundantValue = makeIndexList(redundant);
+    PyObject* partialValue = makeIndexList(partiallyRedundant);
+    PyObject* malformedValue = makeIndexList(malformed);
+    PyDict_SetItemString(result, "accepted", acceptedValue);
+    PyDict_SetItemString(result, "degrees_of_freedom", dofValue);
+    PyDict_SetItemString(result, "solver_status", statusValue);
+    PyDict_SetItemString(result, "first_proposed_constraint_index", firstIndexValue);
+    PyDict_SetItemString(result, "proposed_constraint_count", proposedCountValue);
+    PyDict_SetItemString(result, "conflicting_constraint_indices", conflictingValue);
+    PyDict_SetItemString(result, "redundant_constraint_indices", redundantValue);
+    PyDict_SetItemString(result, "partially_redundant_constraint_indices", partialValue);
+    PyDict_SetItemString(result, "malformed_constraint_indices", malformedValue);
+    Py_DECREF(acceptedValue);
+    Py_DECREF(dofValue);
+    Py_DECREF(statusValue);
+    Py_DECREF(firstIndexValue);
+    Py_DECREF(proposedCountValue);
+    Py_DECREF(conflictingValue);
+    Py_DECREF(redundantValue);
+    Py_DECREF(partialValue);
+    Py_DECREF(malformedValue);
+    return result;
+}
+
 PyObject* SketchObjectPy::delConstraint(PyObject* args)
 {
     int Index;
@@ -451,7 +669,9 @@ PyObject* SketchObjectPy::delConstraint(PyObject* args)
         return nullptr;
     }
 
-    if (this->getSketchObjectPtr()->delConstraint(
+    auto* sketch = this->getSketchObjectPtr();
+    const auto before = mutationSnapshot(sketch);
+    if (sketch->delConstraint(
             Index,
             Base::asBoolean(noSolve) ? DeleteOption::NoSolve : DeleteOption::UpdateGeometry
         )) {
@@ -461,7 +681,7 @@ PyObject* SketchObjectPy::delConstraint(PyObject* args)
         return nullptr;
     }
 
-    Py_Return;
+    return mutationResult(before, sketch);
 }
 PyObject* SketchObjectPy::delConstraints(PyObject* args)
 {
@@ -485,7 +705,9 @@ PyObject* SketchObjectPy::delConstraints(PyObject* args)
             }
         }
 
-        if (this->getSketchObjectPtr()->delConstraints(
+        auto* sketch = this->getSketchObjectPtr();
+        const auto before = mutationSnapshot(sketch);
+        if (sketch->delConstraints(
                 constraintIdList,
                 (Base::asBoolean(updateGeometry) ? DeleteOption::UpdateGeometry : DeleteOption::NoFlag)
                     | (Base::asBoolean(noSolve) ? DeleteOption::NoSolve : DeleteOption::NoFlag)
@@ -497,7 +719,7 @@ PyObject* SketchObjectPy::delConstraints(PyObject* args)
             return nullptr;
         }
 
-        Py_Return;
+        return mutationResult(before, sketch);
     }
 
     std::string error = std::string("type must be list of constraint indices (int), not ");
@@ -1487,6 +1709,144 @@ PyObject* SketchObjectPy::getAxis(PyObject* args) const
     return new Base::AxisPy(new Base::Axis(this->getSketchObjectPtr()->getAxis(AxId)));
 }
 
+PyObject* SketchObjectPy::getProfileDiagnostics(PyObject* args) const
+{
+    if (!PyArg_ParseTuple(args, "")) {
+        return nullptr;
+    }
+
+    const auto* sketch = getSketchObjectPtr();
+    const auto& sketchShape = sketch->Shape.getShape();
+    const auto& internalShape = sketch->InternalShape.getShape();
+    const auto wires = sketchShape.getSubTopoShapes(TopAbs_WIRE);
+    const auto faces = internalShape.getSubTopoShapes(TopAbs_FACE);
+
+    PyObject* result = PyDict_New();
+    PyObject* wireItems = PyList_New(static_cast<Py_ssize_t>(wires.size()));
+    int closedWireCount = 0;
+    int faceBuildableWireCount = 0;
+    for (std::size_t index = 0; index < wires.size(); ++index) {
+        const auto& wire = wires[index];
+        const bool closed = wire.isClosed();
+        if (closed) {
+            ++closedWireCount;
+        }
+        const TopoDS_Shape& rawWire = wire.getShape();
+        BRepCheck_Analyzer analyzer(rawWire);
+        const bool valid = analyzer.IsValid();
+        PyObject* item = PyDict_New();
+        PyObject* wireIndex = PyLong_FromSize_t(index);
+        PyObject* closedValue = PyBool_FromLong(closed);
+        PyObject* validValue = PyBool_FromLong(valid);
+        PyObject* edgeCount = PyLong_FromUnsignedLong(wire.countSubShapes(TopAbs_EDGE));
+        PyDict_SetItemString(item, "wire_index", wireIndex);
+        PyDict_SetItemString(item, "closed", closedValue);
+        PyDict_SetItemString(item, "brep_valid", validValue);
+        PyDict_SetItemString(item, "edge_count", edgeCount);
+        Py_DECREF(wireIndex);
+        Py_DECREF(closedValue);
+        Py_DECREF(validValue);
+        Py_DECREF(edgeCount);
+
+        PyObject* statuses = PyList_New(0);
+        const Handle(BRepCheck_Result)& checkResult = analyzer.Result(rawWire);
+        if (!checkResult.IsNull()) {
+            BRepCheck_ListIteratorOfListOfStatus statusIt;
+            statusIt.Initialize(checkResult->Status());
+            for (; statusIt.More(); statusIt.Next()) {
+                const auto status = statusIt.Value();
+                if (status == BRepCheck_NoError) {
+                    continue;
+                }
+                PyObject* statusValue = PyLong_FromLong(static_cast<long>(status));
+                PyList_Append(statuses, statusValue);
+                Py_DECREF(statusValue);
+            }
+        }
+        PyDict_SetItemString(item, "brep_status_codes", statuses);
+        Py_DECREF(statuses);
+
+        if (!closed) {
+            TopoDS_Vertex first;
+            TopoDS_Vertex last;
+            TopExp::Vertices(TopoDS::Wire(rawWire), first, last);
+            if (!first.IsNull() && !last.IsNull()) {
+                const gp_Pnt firstPoint = BRep_Tool::Pnt(first);
+                const gp_Pnt lastPoint = BRep_Tool::Pnt(last);
+                PyObject* start = Py_BuildValue(
+                    "[ddd]", firstPoint.X(), firstPoint.Y(), firstPoint.Z());
+                PyObject* end = Py_BuildValue(
+                    "[ddd]", lastPoint.X(), lastPoint.Y(), lastPoint.Z());
+                PyObject* gap = PyFloat_FromDouble(firstPoint.Distance(lastPoint));
+                PyDict_SetItemString(item, "open_start", start);
+                PyDict_SetItemString(item, "open_end", end);
+                PyDict_SetItemString(item, "closure_gap", gap);
+                Py_DECREF(start);
+                Py_DECREF(end);
+                Py_DECREF(gap);
+            }
+        }
+        if (closed && valid) {
+            ++faceBuildableWireCount;
+        }
+        PyList_SET_ITEM(wireItems, static_cast<Py_ssize_t>(index), item);
+    }
+
+    PyObject* faceItems = PyList_New(static_cast<Py_ssize_t>(faces.size()));
+    for (std::size_t index = 0; index < faces.size(); ++index) {
+        const auto& face = faces[index];
+        PyObject* item = PyDict_New();
+        PyObject* faceIndex = PyLong_FromSize_t(index);
+        PyObject* valid = PyBool_FromLong(face.isValid());
+        PyObject* wireCount = PyLong_FromUnsignedLong(face.countSubShapes(TopAbs_WIRE));
+        PyObject* orientation = PyLong_FromLong(
+            static_cast<long>(face.getShape().Orientation()));
+        PyDict_SetItemString(item, "face_index", faceIndex);
+        PyDict_SetItemString(item, "brep_valid", valid);
+        PyDict_SetItemString(item, "wire_count", wireCount);
+        PyDict_SetItemString(item, "orientation", orientation);
+        Py_DECREF(faceIndex);
+        Py_DECREF(valid);
+        Py_DECREF(wireCount);
+        Py_DECREF(orientation);
+        PyList_SET_ITEM(faceItems, static_cast<Py_ssize_t>(index), item);
+    }
+
+    const bool faceMakerSucceeded = !faces.empty();
+    const char* faceMakerStatus = faceMakerSucceeded
+        ? "succeeded"
+        : (closedWireCount > 0 ? "failed" : "not_applicable");
+    PyObject* geometryCount = PyLong_FromLong(sketch->Geometry.getSize());
+    PyObject* wireCount = PyLong_FromSize_t(wires.size());
+    PyObject* closedCount = PyLong_FromLong(closedWireCount);
+    PyObject* faceCount = PyLong_FromSize_t(faces.size());
+    PyObject* faceBuildableCount = PyLong_FromLong(faceBuildableWireCount);
+    PyObject* makerStatus = PyUnicode_FromString(faceMakerStatus);
+    PyObject* makerSucceeded = PyBool_FromLong(faceMakerSucceeded);
+    PyObject* supportPlane = PyUnicode_FromString("sketch_xy");
+    PyDict_SetItemString(result, "geometry_count", geometryCount);
+    PyDict_SetItemString(result, "wire_count", wireCount);
+    PyDict_SetItemString(result, "closed_wire_count", closedCount);
+    PyDict_SetItemString(result, "face_count", faceCount);
+    PyDict_SetItemString(result, "face_buildable_wire_count", faceBuildableCount);
+    PyDict_SetItemString(result, "wires", wireItems);
+    PyDict_SetItemString(result, "faces", faceItems);
+    PyDict_SetItemString(result, "face_maker_status", makerStatus);
+    PyDict_SetItemString(result, "face_maker_succeeded", makerSucceeded);
+    PyDict_SetItemString(result, "support_plane", supportPlane);
+    Py_DECREF(geometryCount);
+    Py_DECREF(wireCount);
+    Py_DECREF(closedCount);
+    Py_DECREF(faceCount);
+    Py_DECREF(faceBuildableCount);
+    Py_DECREF(wireItems);
+    Py_DECREF(faceItems);
+    Py_DECREF(makerStatus);
+    Py_DECREF(makerSucceeded);
+    Py_DECREF(supportPlane);
+    return result;
+}
+
 PyObject* SketchObjectPy::fillet(PyObject* args)
 {
     PyObject *pcObj1, *pcObj2;
@@ -1519,7 +1879,9 @@ PyObject* SketchObjectPy::fillet(PyObject* args)
         Base::Vector3d v1 = static_cast<Base::VectorPy*>(pcObj1)->value();
         Base::Vector3d v2 = static_cast<Base::VectorPy*>(pcObj2)->value();
 
-        if (this->getSketchObjectPtr()->fillet(
+        auto* sketch = this->getSketchObjectPtr();
+        const auto before = mutationSnapshot(sketch);
+        if (sketch->fillet(
                 geoId1,
                 geoId2,
                 v1,
@@ -1536,7 +1898,7 @@ PyObject* SketchObjectPy::fillet(PyObject* args)
             THROWM(Base::ValueError, str.str().c_str())
             return nullptr;
         }
-        Py_Return;
+        return mutationResult(before, sketch);
     }
 
     PyErr_Clear();
@@ -1553,7 +1915,9 @@ PyObject* SketchObjectPy::fillet(PyObject* args)
             &PyBool_Type,
             &chamfer
         )) {
-        if (this->getSketchObjectPtr()->fillet(
+        auto* sketch = this->getSketchObjectPtr();
+        const auto before = mutationSnapshot(sketch);
+        if (sketch->fillet(
                 geoId1,
                 static_cast<Sketcher::PointPos>(posId1),
                 radius,
@@ -1567,7 +1931,7 @@ PyObject* SketchObjectPy::fillet(PyObject* args)
             PyErr_SetString(PyExc_ValueError, str.str().c_str());
             return nullptr;
         }
-        Py_Return;
+        return mutationResult(before, sketch);
     }
 
     PyErr_SetString(
@@ -1590,14 +1954,16 @@ PyObject* SketchObjectPy::trim(PyObject* args)
 
     Base::Vector3d v1 = static_cast<Base::VectorPy*>(pcObj)->value();
 
-    if (this->getSketchObjectPtr()->trim(GeoId, v1)) {
+    auto* sketch = this->getSketchObjectPtr();
+    const auto before = mutationSnapshot(sketch);
+    if (sketch->trim(GeoId, v1)) {
         std::stringstream str;
         str << "Not able to trim curve with the given index: " << GeoId;
         PyErr_SetString(PyExc_ValueError, str.str().c_str());
         return nullptr;
     }
 
-    Py_Return;
+    return mutationResult(before, sketch);
 }
 
 PyObject* SketchObjectPy::extend(PyObject* args)
@@ -1607,15 +1973,16 @@ PyObject* SketchObjectPy::extend(PyObject* args)
     int GeoId;
 
     if (PyArg_ParseTuple(args, "idi", &GeoId, &increment, &endPoint)) {
-        if (this->getSketchObjectPtr()
-                ->extend(GeoId, increment, static_cast<Sketcher::PointPos>(endPoint))) {
+        auto* sketch = this->getSketchObjectPtr();
+        const auto before = mutationSnapshot(sketch);
+        if (sketch->extend(GeoId, increment, static_cast<Sketcher::PointPos>(endPoint))) {
             std::stringstream str;
             str << "Not able to extend geometry with id : (" << GeoId << ") for increment ("
                 << increment << ") and point position (" << endPoint << ")";
             PyErr_SetString(PyExc_ValueError, str.str().c_str());
             return nullptr;
         }
-        Py_Return;
+        return mutationResult(before, sketch);
     }
 
     PyErr_SetString(
@@ -1636,8 +2003,10 @@ PyObject* SketchObjectPy::split(PyObject* args)
     }
 
     Base::Vector3d v1 = static_cast<Base::VectorPy*>(pcObj)->value();
+    auto* sketch = this->getSketchObjectPtr();
+    const auto before = mutationSnapshot(sketch);
     try {
-        if (this->getSketchObjectPtr()->split(GeoId, v1)) {
+        if (sketch->split(GeoId, v1)) {
             std::stringstream str;
             str << "Not able to split curve with the given index: " << GeoId;
             PyErr_SetString(PyExc_ValueError, str.str().c_str());
@@ -1648,7 +2017,7 @@ PyObject* SketchObjectPy::split(PyObject* args)
         throw Py::ValueError(e.getMessage());
     }
 
-    Py_Return;
+    return mutationResult(before, sketch);
 }
 
 PyObject* SketchObjectPy::join(PyObject* args)
@@ -2003,14 +2372,54 @@ PyObject* SketchObjectPy::exposeInternalGeometry(PyObject* args)
         return nullptr;
     }
 
-    if (this->getSketchObjectPtr()->exposeInternalGeometry(GeoId) == -1) {
+    auto* sketch = this->getSketchObjectPtr();
+    const int beforeCount = sketch->Geometry.getSize();
+    const int added = sketch->exposeInternalGeometry(GeoId);
+    if (added == -1) {
         std::stringstream str;
         str << "Object does not support internal geometry: " << GeoId;
         PyErr_SetString(PyExc_ValueError, str.str().c_str());
         return nullptr;
     }
 
-    Py_Return;
+    const int afterCount = sketch->Geometry.getSize();
+    PyObject* result = PyDict_New();
+    PyObject* source = PyLong_FromLong(GeoId);
+    PyObject* before = PyLong_FromLong(beforeCount);
+    PyObject* after = PyLong_FromLong(afterCount);
+    PyObject* addedCount = PyLong_FromLong(added);
+    PyDict_SetItemString(result, "source_geometry_index", source);
+    PyDict_SetItemString(result, "geometry_count_before", before);
+    PyDict_SetItemString(result, "geometry_count_after", after);
+    PyDict_SetItemString(result, "created_count", addedCount);
+    Py_DECREF(source);
+    Py_DECREF(before);
+    Py_DECREF(after);
+    Py_DECREF(addedCount);
+
+    PyObject* created = PyList_New(afterCount - beforeCount);
+    for (int index = beforeCount; index < afterCount; ++index) {
+        auto facade = sketch->getGeometryFacade(index);
+        PyObject* item = PyDict_New();
+        PyObject* geometryIndex = PyLong_FromLong(index);
+        PyObject* geometryId = PyLong_FromLong(facade ? facade->getId() : -1);
+        const auto internalType = facade ? facade->getInternalType() : InternalType::None;
+        const char* role = internalType >= InternalType::None
+                && internalType < InternalType::NumInternalGeometryType
+            ? SketchGeometryExtension::internaltype2str[internalType]
+            : "Unknown";
+        PyObject* internalRole = PyUnicode_FromString(role);
+        PyDict_SetItemString(item, "geometry_index", geometryIndex);
+        PyDict_SetItemString(item, "geometry_id", geometryId);
+        PyDict_SetItemString(item, "role", internalRole);
+        Py_DECREF(geometryIndex);
+        Py_DECREF(geometryId);
+        Py_DECREF(internalRole);
+        PyList_SET_ITEM(created, index - beforeCount, item);
+    }
+    PyDict_SetItemString(result, "created", created);
+    Py_DECREF(created);
+    return result;
 }
 
 PyObject* SketchObjectPy::deleteUnusedInternalGeometry(PyObject* args)

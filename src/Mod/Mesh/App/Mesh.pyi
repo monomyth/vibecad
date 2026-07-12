@@ -317,6 +317,26 @@ class Mesh(ComplexGeoData):
         ...
 
     @constmethod
+    def countDuplicatedPoints(self) -> Any:
+        """Return the number of point indices participating in duplicate-point sets."""
+        ...
+
+    @constmethod
+    def countDuplicatedFacets(self) -> Any:
+        """Return the number of facet indices participating in duplicate-facet sets."""
+        ...
+
+    @constmethod
+    def countDegeneratedFacets(self) -> Any:
+        """Return the number of strictly degenerated facets."""
+        ...
+
+    @constmethod
+    def countOpenEdges(self) -> Any:
+        """Return the number of topological boundary edges."""
+        ...
+
+    @constmethod
     def countComponents(self) -> Any:
         """Get the number of topologic independent areas"""
         ...

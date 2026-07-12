@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 
-"""Service tool definition for ``assembly.solve``."""
+"""Run the native assembly solver and report the exact outcome."""
 
 from __future__ import annotations
 
@@ -12,179 +12,173 @@ from . import domain_runtime
 
 
 TOOL_SPEC = {
-    "description": (
-        "Run the assembly kinematic solver to reposition components "
-        "according to the existing joints. Use this after editing a part "
-        "or a joint to bring the assembly back into a mated state. Returns "
-        "the solver return code (0 means solved) and the resulting "
-        "component placements. Requires at least one joint; ground one "
-        "component and create joints first."
-    ),
     "name": "assembly.solve",
-    "parameters": {
-        "properties": {
-            "assembly_name": {
-                "description": (
-                    "Assembly name or label. Defaults to the first assembly "
-                    "in the document."
-                ),
-                "type": "string",
-            },
-        },
-        "type": "object",
-    },
+    "description": (
+        "Run the native solver on one exact assembly, moving every unfixed "
+        "component to satisfy the current joints, and report the solver "
+        "verdict (solved, over-constrained, conflicting, no grounded "
+        "component) plus the resulting component placements. Run this after "
+        "editing joints or component placements outside the joint tools."
+    ),
+    "contextual": True,
     "safety": "SAFE_WRITE",
     "workbench": "AssemblyWorkbench",
+    "edit_modes": ["none"],
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "assembly_name": {
+                "type": "string",
+                "description": (
+                    "Exact internal name of the assembly from assembly.list_structure."
+                ),
+            },
+        },
+        "required": ["assembly_name"],
+        "additionalProperties": False,
+    },
 }
 
 
-def _joint_group(assembly: Any) -> Any | None:
-    for child in list(getattr(assembly, "Group", []) or []):
-        if getattr(child, "TypeId", "") == "Assembly::JointGroup":
-            return child
+def run(service: Any, assembly_name: str) -> dict[str, Any]:
+    assembly = _find_assembly(service, assembly_name)
+    if assembly is None:
+        return _invalid(
+            f"Assembly not found by exact internal name: {assembly_name}. "
+            "Call assembly.list_structure for exact names."
+        )
+    joint_group = domain_runtime.assembly_joint_group(assembly)
+    if joint_group is None:
+        return _invalid(
+            "The assembly has no native Assembly::JointGroup and cannot be solved coherently.",
+            assembly=assembly.Name,
+            children=[
+                {"name": child.Name, "label": child.Label, "type": child.TypeId}
+                for child in list(getattr(assembly, "Group", []) or [])
+            ],
+        )
+    components = _components(assembly)
+    placements_before = {
+        child.Name: {
+            "assembly_local": domain_runtime.placement_summary(child),
+            "global": domain_runtime.global_placement_summary(child),
+        }
+        for child in components
+    }
+
+    def solve() -> dict[str, Any]:
+        import FreeCAD as App
+
+        active = App.ActiveDocument
+        if active is None:
+            raise RuntimeError("No active document.")
+        target_assembly = active.getObject(assembly.Name)
+        if target_assembly is None:
+            raise RuntimeError("The assembly no longer exists.")
+        solver_code = int(target_assembly.solve(False))
+        active.recompute()
+        native_components = _components(target_assembly)
+        placements = {
+            child.Name: {
+                "assembly_local": domain_runtime.placement_summary(child),
+                "global": domain_runtime.global_placement_summary(child),
+            }
+            for child in native_components
+        }
+        diagnostics = domain_runtime.assembly_solver_diagnostics(target_assembly)
+        return {
+            "document": active.Name,
+            "assembly": target_assembly.Name,
+            "solver_code": solver_code,
+            "solver_verdict": domain_runtime.assembly_solver_verdict(solver_code),
+            "solver_diagnostics": diagnostics,
+            "component_placements_before": placements_before,
+            "component_placements_after": placements,
+            "component_placement_deltas": _placement_deltas(placements_before, placements),
+        }
+
+    def verify(result: dict[str, Any]) -> dict[str, Any]:
+        diagnostics = result.get("solver_diagnostics") or {}
+        checks = [
+            {
+                "name": "native_solver_diagnostics",
+                "ok": diagnostics.get("available") is True,
+                "actual": diagnostics,
+            },
+            {
+                "name": "solver_result",
+                "ok": int(result.get("solver_code", -1)) == 0
+                and not diagnostics.get("has_conflicts")
+                and not diagnostics.get("has_redundancies")
+                and not diagnostics.get("has_partial_redundancies")
+                and not diagnostics.get("has_malformed_constraints"),
+                "solver_code": result.get("solver_code"),
+                "diagnostics": diagnostics,
+            },
+        ]
+        return {"ok": all(check["ok"] for check in checks), "checks": checks}
+
+    transaction = run_freecad_transaction(
+        f"Solve assembly: {assembly.Name}",
+        solve,
+        verifier=verify,
+    )
+    mutation = transaction.get("result") if isinstance(transaction.get("result"), dict) else {}
+    envelope = domain_runtime.build_mutation_result(
+        transaction,
+        extra={"operation": "solve", "mutation": mutation},
+        next_action=(
+            "Verify component placements with part.measure or a screenshot; "
+            "if the verdict is not 'solved', fix the reported joint problem "
+            "before adding more joints."
+        ),
+    )
+    return envelope
+
+
+def _find_assembly(service: Any, assembly_name: str) -> Any:
+    clean = str(assembly_name or "").strip()
+    if not clean:
+        return None
+    for assembly in service._assembly_objects():
+        if assembly.Name == clean:
+            return assembly
     return None
 
 
-def _classify_joints(joint_group: Any | None) -> tuple[list[Any], list[Any]]:
-    """Split joint group children into (grounded joints, connecting joints)."""
-    grounded: list[Any] = []
-    connecting: list[Any] = []
-    for child in list(getattr(joint_group, "Group", []) or []):
-        if getattr(child, "ObjectToGround", None) is not None:
-            grounded.append(child)
-        elif hasattr(child, "JointType"):
-            connecting.append(child)
-    return grounded, connecting
+def _invalid(message: str, **details: Any) -> dict[str, Any]:
+    return {"ok": False, "error": message, "retry_same_call": False, **details}
 
 
-def _placement_dict(obj: Any) -> dict[str, Any]:
-    placement = obj.Placement
-    euler = placement.Rotation.toEuler()
-    return {
-        "x": float(placement.Base.x),
-        "y": float(placement.Base.y),
-        "z": float(placement.Base.z),
-        "yaw": float(euler[0]),
-        "pitch": float(euler[1]),
-        "roll": float(euler[2]),
-    }
+def _components(assembly: Any) -> list[Any]:
+    return [
+        child
+        for child in list(getattr(assembly, "Group", []) or [])
+        if str(getattr(child, "TypeId", "")) in {"App::Link", "Assembly::AssemblyLink"}
+    ]
 
 
-def _component_placements(assembly: Any) -> dict[str, dict[str, Any]]:
-    placements: dict[str, dict[str, Any]] = {}
-    for child in list(getattr(assembly, "Group", []) or []):
-        if getattr(child, "TypeId", "") == "Assembly::JointGroup":
-            continue
-        if not hasattr(child, "Placement"):
-            continue
-        placements[child.Name] = _placement_dict(child)
-    return placements
-
-
-def run(
-    service,
-    assembly_name: str | None = None,
+def _placement_deltas(
+    before: dict[str, dict[str, Any]],
+    after: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
-    assembly = service._get_assembly(assembly_name)
-    if assembly is None:
-        return {
-            "ok": False,
-            "error": "Assembly not found.",
-            "requested": assembly_name,
-            "recoverable": True,
-            "next_actions": [
-                {
-                    "tool": "assembly.create_assembly",
-                    "why": "Create an Assembly container before solving.",
-                },
-                {
-                    "tool": "assembly.get_assemblies",
-                    "why": "Inspect existing Assembly objects and their names.",
-                },
-            ],
+    deltas = {}
+    for name in sorted(set(before).intersection(after)):
+        first = ((before[name].get("global") or {}).get("placement") or {})
+        second = ((after[name].get("global") or {}).get("placement") or {})
+        first_position = first.get("position") or {}
+        second_position = second.get("position") or {}
+        if not first_position or not second_position:
+            deltas[name] = {"available": False}
+            continue
+        dx = float(second_position["x"]) - float(first_position["x"])
+        dy = float(second_position["y"]) - float(first_position["y"])
+        dz = float(second_position["z"]) - float(first_position["z"])
+        deltas[name] = {
+            "available": True,
+            "translation": {"x": dx, "y": dy, "z": dz},
+            "translation_magnitude_mm": (dx * dx + dy * dy + dz * dz) ** 0.5,
+            "rotation_angle_delta_degrees": float(second.get("rotation_angle_degrees", 0.0))
+            - float(first.get("rotation_angle_degrees", 0.0)),
         }
-    joint_group = _joint_group(assembly)
-    grounded, connecting = _classify_joints(joint_group)
-    if not connecting:
-        response: dict[str, Any] = {
-            "ok": False,
-            "error": (
-                f"Assembly {assembly.Name} has no joints to solve. Ground "
-                "one component and create joints between components first; "
-                "the solver only repositions components connected by joints."
-            ),
-            "assembly": assembly.Name,
-            "grounded_count": len(grounded),
-            "joint_count": 0,
-            "recoverable": True,
-            "next_actions": [],
-        }
-        if not grounded:
-            response["next_actions"].append(
-                {
-                    "tool": "assembly.ground_component",
-                    "why": "Anchor one component so the solver has a fixed reference.",
-                }
-            )
-        response["next_actions"].append(
-            {
-                "tool": "assembly.create_joint",
-                "why": "Mate components by referencing their geometry.",
-            }
-        )
-        return response
-
-    def _solve() -> dict[str, Any]:
-        import FreeCAD as App
-
-        doc = App.ActiveDocument
-        if doc is None:
-            raise RuntimeError("No active document.")
-        return_code = assembly.solve()
-        doc.recompute()
-        return {
-            "document": doc.Name,
-            "assembly": assembly.Name,
-            "solver_return_code": int(return_code),
-            "component_placements": _component_placements(assembly),
-        }
-
-    transaction = run_freecad_transaction(
-        f"Solve assembly {assembly.Name}",
-        _solve,
-    )
-    summary = domain_runtime.assembly_summary(service)
-    result = transaction.get("result") if isinstance(transaction.get("result"), dict) else {}
-    solver_return_code = result.get("solver_return_code")
-    solved = bool(transaction.get("ok")) and solver_return_code == 0
-    response = {
-        "ok": solved,
-        "transaction": transaction,
-        "assembly": result.get("assembly", getattr(assembly, "Name", None)),
-        "solver_return_code": solver_return_code,
-        "grounded_count": len(grounded),
-        "joint_count": len(connecting),
-        "component_placements": result.get("component_placements"),
-        "assembly_summary": summary,
-    }
-    if not response["ok"]:
-        if transaction.get("ok") and solver_return_code not in (0, None):
-            response["error"] = (
-                f"Assembly solver failed with return code {solver_return_code}. "
-                "The joints may be over-constrained, conflicting, or reference "
-                "geometry that no longer exists after a part edit."
-            )
-        else:
-            response["error"] = transaction.get("error") or "Assembly solve failed."
-        response["recoverable"] = True
-        response["next_actions"] = [
-            {
-                "tool": "assembly.get_assemblies",
-                "why": "Inspect assemblies, components, and existing joints.",
-            },
-            {
-                "tool": "partdesign.find_subelements",
-                "why": "Re-resolve joint reference geometry after part edits.",
-            },
-        ]
-    return response
+    return deltas

@@ -1,5 +1,5 @@
 ﻿/*
-FreeCAD Installer Language File
+VibeCAD Installer Language File
 Language: Czech
 */
 
@@ -7,25 +7,25 @@ Language: Czech
 
 ${LangFileString} TEXT_INSTALL_CURRENTUSER "(Installed for Current User)"
 
-${LangFileString} TEXT_WELCOME "Tento pomocník vás provede instalací FreeCADu.$\r$\n\
+${LangFileString} TEXT_WELCOME "Tento pomocník vás provede instalací VibeCADu.$\r$\n\
 				$\r$\n\
 				$_CLICK"
 
 #${LangFileString} TEXT_CONFIGURE_PYTHON "Compiling Python scripts..."
 
 ${LangFileString} TEXT_FINISH_DESKTOP "Create desktop shortcut"
-${LangFileString} TEXT_FINISH_WEBSITE "Visit freecad.org for the latest news, support and tips"
+${LangFileString} TEXT_FINISH_WEBSITE "Visit github.com/10-X-eng/vibecad for the latest news, support and tips"
 
-#${LangFileString} FileTypeTitle "FreeCAD-dokumentů"
+#${LangFileString} FileTypeTitle "VibeCAD-dokumentů"
 
 #${LangFileString} SecAllUsersTitle "Instalovat pro všechny uživatele?"
 ${LangFileString} SecFileAssocTitle "Asociovat soubory"
 ${LangFileString} SecDesktopTitle "Ikonu na plochu"
 
-${LangFileString} SecCoreDescription "Soubory FreeCADu."
-#${LangFileString} SecAllUsersDescription "Instalovat FreeCAD pro všechny uživatele nebo pouze pro současného uživatele."
-${LangFileString} SecFileAssocDescription "Soubory s příponou .FCStd se automaticky otevřou v FreeCADu."
-${LangFileString} SecDesktopDescription "Ikonu FreeCADu na plochu."
+${LangFileString} SecCoreDescription "Soubory VibeCADu."
+#${LangFileString} SecAllUsersDescription "Instalovat VibeCAD pro všechny uživatele nebo pouze pro současného uživatele."
+${LangFileString} SecFileAssocDescription "Soubory s příponou .FCStd se automaticky otevřou v VibeCADu."
+${LangFileString} SecDesktopDescription "Ikonu VibeCADu na plochu."
 #${LangFileString} SecDictionaries "Slovníky"
 #${LangFileString} SecDictionariesDescription "Spell-checker dictionaries that can be downloaded and installed."
 
@@ -34,37 +34,37 @@ ${LangFileString} SecDesktopDescription "Ikonu FreeCADu na plochu."
 
 #${LangFileString} DictionariesFailed 'Download of dictionary for language $\"$R3$\" failed.'
 
-#${LangFileString} ConfigInfo "The following configuration of FreeCAD could take a while."
+#${LangFileString} ConfigInfo "The following configuration of VibeCAD could take a while."
 
 #${LangFileString} RunConfigureFailed "Nelze spustit konfigurační skript"
 ${LangFileString} InstallRunning "Instalátor je již spuštěn!"
-${LangFileString} AlreadyInstalled "FreeCAD ${APP_SERIES_KEY2} je již nainstalován!$\r$\n\
+${LangFileString} AlreadyInstalled "VibeCAD ${APP_SERIES_KEY2} je již nainstalován!$\r$\n\
 				Installing over existing installations is not recommended if the installed version$\r$\n\
-				is a test release or if you have problems with your existing FreeCAD installation.$\r$\n\
-				In these cases better reinstall FreeCAD.$\r$\n\
-				Dou you nevertheles want to install FreeCAD over the existing version?"
-${LangFileString} NewerInstalled "You are trying to install an older version of FreeCAD than what you have installed.$\r$\n\
-				  If you really want this, you must uninstall the existing FreeCAD $OldVersionNumber before."
+				is a test release or if you have problems with your existing VibeCAD installation.$\r$\n\
+				In these cases better reinstall VibeCAD.$\r$\n\
+				Dou you nevertheles want to install VibeCAD over the existing version?"
+${LangFileString} NewerInstalled "You are trying to install an older version of VibeCAD than what you have installed.$\r$\n\
+				  If you really want this, you must uninstall the existing VibeCAD $OldVersionNumber before."
 
-#${LangFileString} FinishPageMessage "Blahopřejeme! FreeCAD byl úspěšně nainstalován.$\r$\n\
+#${LangFileString} FinishPageMessage "Blahopřejeme! VibeCAD byl úspěšně nainstalován.$\r$\n\
 #					$\r$\n\
-#					(První spuštění FreeCADu může trvat delší dobu.)"
-${LangFileString} FinishPageRun "Spustit FreeCAD"
+#					(První spuštění VibeCADu může trvat delší dobu.)"
+${LangFileString} FinishPageRun "Spustit VibeCAD"
 
-${LangFileString} UnNotInRegistryLabel "Nelze nalézt FreeCAD v registrech.$\r$\n\
+${LangFileString} UnNotInRegistryLabel "Nelze nalézt VibeCAD v registrech.$\r$\n\
 					Zástupce na ploše a ve Start menu nebude smazán."
-${LangFileString} UnInstallRunning "Nejprve musíte zavřít FreeCAD!"
-${LangFileString} UnNotAdminLabel "Musíte mít administrátorská práva pro odinstalování FreeCADu!"
-${LangFileString} UnReallyRemoveLabel "Chcete opravdu smazat FreeCAD a všechny jeho komponenty?"
-${LangFileString} UnFreeCADPreferencesTitle 'Uživatelská nastavení FreeCADu'
+${LangFileString} UnInstallRunning "Nejprve musíte zavřít VibeCAD!"
+${LangFileString} UnNotAdminLabel "Musíte mít administrátorská práva pro odinstalování VibeCADu!"
+${LangFileString} UnReallyRemoveLabel "Chcete opravdu smazat VibeCAD a všechny jeho komponenty?"
+${LangFileString} UnFreeCADPreferencesTitle 'Uživatelská nastavení VibeCADu'
 
 #${LangFileString} SecUnProgDescription "Odinstalovat xxx."
-${LangFileString} SecUnPreferencesDescription 'Smazat konfigurační adresář FreeCADu$\r$\n\
+${LangFileString} SecUnPreferencesDescription 'Smazat konfigurační adresář VibeCADu$\r$\n\
 						$\"$AppPre\username\$\r$\n\
 						$AppSuff\$\r$\n\
 						${APP_DIR_USERDATA}$\")$\r$\n\
 						pro všechny uživatele.'
-${LangFileString} DialogUnPreferences 'You chose to delete the FreeCADs user configuration.$\r$\n\
-						This will also delete all installed FreeCAD addons.$\r$\n\
+${LangFileString} DialogUnPreferences 'You chose to delete the VibeCADs user configuration.$\r$\n\
+						This will also delete all installed VibeCAD addons.$\r$\n\
 						Do you agree with this?'
-${LangFileString} SecUnProgramFilesDescription "Odinstalovat FreeCAD a všechny jeho komponenty."
+${LangFileString} SecUnProgramFilesDescription "Odinstalovat VibeCAD a všechny jeho komponenty."

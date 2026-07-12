@@ -12,7 +12,7 @@ generator="${VIBECAD_CMAKE_GENERATOR:-Ninja}"
 jobs="${VIBECAD_BUILD_JOBS:-$(nproc)}"
 vibecad_requirements="${repo_root}/src/Mod/VibeCAD/requirements.txt"
 
-clean=1
+clean=0
 run_tests=0
 install_prefix=""
 
@@ -21,8 +21,8 @@ usage() {
 Usage: tools/build_vibecad.sh [options]
 
 Options:
-  --clean                 Remove the build directory before configuring. This is the default.
-  --incremental           Reuse the existing build directory when possible.
+  --clean                 Explicitly remove the build directory before configuring.
+  --incremental           Reuse the existing build directory. This is the default.
   --test                  Run ctest after the build completes.
   --install PREFIX        Run cmake --install into PREFIX after building.
   -h, --help              Show this help.
@@ -81,8 +81,9 @@ elif [[ -f "${build_dir}/CMakeCache.txt" ]]; then
         sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' "${build_dir}/CMakeCache.txt" | head -n 1
     )"
     if [[ -n "${cached_source}" && "$(cd -- "${cached_source}" 2>/dev/null && pwd || true)" != "${repo_root}" ]]; then
-        echo "Removing stale CMake cache from moved checkout: ${build_dir}" >&2
-        rm -rf -- "${build_dir}"
+        echo "error: ${build_dir} belongs to another source checkout: ${cached_source}" >&2
+        echo "Run again with --clean only if you explicitly intend to replace it." >&2
+        exit 1
     fi
 fi
 
@@ -107,11 +108,12 @@ if [[ -f "${vibecad_requirements}" ]]; then
         --upgrade \
         --target "${build_dir}/Ext" \
         --requirement "${vibecad_requirements}"
+    rm -rf -- "${build_dir}/Ext/agents" "${build_dir}"/Ext/openai_agents-*.dist-info
 fi
 
 "${build_dir}/bin/FreeCADCmd" --version
 
-"${build_dir}/bin/FreeCADCmd" -c "import agents, openai; print('VibeCAD provider dependencies import OK')"
+"${build_dir}/bin/FreeCADCmd" -c "import importlib.util, openai, anthropic, keyring, jsonschema; assert importlib.util.find_spec('agents') is None; print('VibeCAD provider dependencies import OK')"
 
 if ((run_tests)); then
     ctest --test-dir "${build_dir}" --output-on-failure

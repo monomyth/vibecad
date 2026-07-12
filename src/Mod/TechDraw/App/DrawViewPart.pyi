@@ -35,6 +35,14 @@ class DrawViewPart(DrawView):
         """
         ...
 
+    def getProjectedElementDescriptors(self) -> Any:
+        """
+        Return structured descriptors for every projected EdgeN and VertexN in
+        the view, including geometry type, visibility, 2D bounds, and exact or
+        ambiguous mappings back to source-object subelements.
+        """
+        ...
+
     def getHiddenEdges(self) -> Any:
         """
         getHiddenEdges([conventionalCoords]) - get the hidden edges in the View as Part::TopoShapeEdges.  Edges are returned

@@ -16,9 +16,9 @@ The goal is not fully autonomous CAD. The goal is a practical design surface whe
 
 ## Highlights
 
-- AI assistant panel with conversation, thinking, tool progress, and steering in one workflow.
-- Workspace modes for design, assembly, manufacturing, and analysis so the model sees the right tools for the phase.
-- Native parametric part creation and editing with sketches, bodies, features, patterns, fillets, chamfers, screenshots, and document inspection.
+- AI assistant panel with persisted conversation, live reasoning/tool activity, and steering in one resizable surface.
+- Tool availability follows the human-selected FreeCAD workbench and the real active edit object; there is no separate phase state machine.
+- Focused PartDesign and Sketcher surfaces for native editable bodies, references, constrained profiles, features, transforms, dress-ups, screenshots, and in-place repair.
 - Local and cloud model support through configurable providers, including OpenAI-compatible local servers.
 - VibeLight and VibeDark themes with modern chrome, panel styling, and assistant integration.
 - Release packaging for Linux and Windows so the full application can be tested outside a development checkout.
@@ -60,6 +60,8 @@ Some local models reject thinking/reasoning parameters. Set reasoning effort to 
 ## Development Notes
 
 VibeCAD is built around a real CAD document, not a disposable generated object. When a user asks to fix, improve, optimize, or continue an existing model, the current design is the authority. The assistant should inspect the active document, identify the target object, and modify that object unless the user explicitly asks for a replacement.
+
+The human creates, opens, saves, and selects the document and workbench. VibeCAD receives the current CAD state automatically and exposes only operations that are valid for that workbench and edit mode. Unsupported workbenches do not receive partial legacy tool packs.
 
 The assistant UI should keep the human oriented:
 

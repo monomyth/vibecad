@@ -170,10 +170,14 @@ App::DocumentObjectExecReturn* Loft::execute()
 
     // if the Base property has a valid shape, fuse the pipe into it
     TopoShape base;
-    try {
-        base = getBaseTopoShape();
-    }
-    catch (const Base::Exception&) {
+    if (BaseFeature.getValue()) {
+        try {
+            base = getBaseTopoShape();
+        }
+        catch (const Base::Exception& e) {
+            return new App::DocumentObjectExecReturn(
+                std::string("Failed to resolve loft BaseFeature: ") + e.what());
+        }
     }
 
     auto hasher = getDocument()->getStringHasher();

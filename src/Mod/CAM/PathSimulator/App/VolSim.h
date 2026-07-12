@@ -214,6 +214,11 @@ public:
         return data + i * height;
     }
 
+    const T* operator[](int i) const
+    {
+        return data + i * height;
+    }
+
 private:
     T* data;
     int height;
@@ -222,12 +227,27 @@ private:
 class cStock
 {
 public:
+    struct Statistics
+    {
+        double initialVolume {0.0};
+        double removedVolume {0.0};
+        double remainingVolume {0.0};
+        int modifiedCells {0};
+        bool hasRemovedBounds {false};
+        Point3D removedMin;
+        Point3D removedMax;
+        int gridX {0};
+        int gridY {0};
+        float resolution {0.0F};
+    };
+
     cStock(float px, float py, float pz, float lx, float ly, float lz, float res);
     ~cStock();
     void Tessellate(Mesh::MeshObject& meshOuter, Mesh::MeshObject& meshInner);
     void CreatePocket(float x, float y, float rad, float height);
     void ApplyLinearTool(Point3D& p1, Point3D& p2, cSimTool& tool);
     void ApplyCircularTool(Point3D& p1, Point3D& p2, Point3D& cent, cSimTool& tool, bool isCCW);
+    Statistics GetStatistics() const;
     inline Point3D ToInner(Point3D& p)
     {
         return Point3D((p.x - m_px) / m_res, (p.y - m_py) / m_res, p.z);

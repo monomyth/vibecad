@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 
-"""Service tool definition for ``assembly.ground_component``."""
+"""Ground one assembly component so the solver treats it as fixed."""
 
 from __future__ import annotations
 
@@ -11,147 +11,166 @@ from VibeCADTransactions import run_freecad_transaction
 from . import domain_runtime
 
 
-TOOL_SPEC = {'description': 'Anchor one assembly component with a grounded joint so the '
-                'kinematic solver has a fixed reference. Every assembly with joints needs '
-                'exactly one grounded component; all other components are positioned '
-                'relative to it by joints.',
- 'name': 'assembly.ground_component',
- 'parameters': {'properties': {'assembly_name': {'description': 'Assembly name or label. Defaults to the first assembly in the document.',
-                                                 'type': 'string'},
-                               'component_name': {'description': 'Name or label of the assembly component to ground.',
-                                                  'type': 'string'}},
-                'required': ['component_name'],
-                'type': 'object'},
- 'safety': 'SAFE_WRITE',
- 'workbench': 'AssemblyWorkbench'}
+TOOL_SPEC = {
+    "name": "assembly.ground_component",
+    "description": (
+        "Ground one exact component of an assembly, permanently fixing its "
+        "current position so the solver positions everything else relative to "
+        "it. Every assembly needs at least one grounded component before "
+        "assembly.solve can succeed; ground the chassis/base part first."
+    ),
+    "contextual": True,
+    "safety": "SAFE_WRITE",
+    "workbench": "AssemblyWorkbench",
+    "edit_modes": ["none"],
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "assembly_name": {
+                "type": "string",
+                "description": (
+                    "Exact internal name of the assembly from assembly.list_structure."
+                ),
+            },
+            "component_name": {
+                "type": "string",
+                "description": (
+                    "Exact internal name of the component (inside the assembly) "
+                    "to fix in place."
+                ),
+            },
+        },
+        "required": ["assembly_name", "component_name"],
+        "additionalProperties": False,
+    },
+}
 
 
-def _joint_group(assembly: Any) -> Any | None:
-    for child in list(getattr(assembly, "Group", []) or []):
-        if getattr(child, "TypeId", "") == "Assembly::JointGroup":
-            return child
-    return None
-
-
-def _grounded_components(joint_group: Any) -> list[str]:
-    grounded = []
-    for child in list(getattr(joint_group, "Group", []) or []):
-        target = getattr(child, "ObjectToGround", None)
-        if target is not None:
-            grounded.append(getattr(target, "Name", str(target)))
-    return grounded
-
-
-def run(
-    service,
-    assembly_name: str | None = None,
-    component_name: str = "",
-) -> dict[str, Any]:
-    assembly = service._get_assembly(assembly_name)
+def run(service: Any, assembly_name: str, component_name: str) -> dict[str, Any]:
+    doc = service._active_document()
+    if doc is None:
+        return _invalid("No active document.")
+    assembly = _find_assembly(service, assembly_name)
     if assembly is None:
-        return {
-            "ok": False,
-            "error": "Assembly not found.",
-            "requested": assembly_name,
-            "recoverable": True,
-            "next_actions": [
-                {
-                    "tool": "assembly.create_assembly",
-                    "why": "Create an Assembly container before grounding components.",
-                },
-                {
-                    "tool": "assembly.get_assemblies",
-                    "why": "Inspect existing Assembly objects and their names.",
-                },
-            ],
-        }
-    component = service._get_document_object(component_name)
+        return _invalid(
+            f"Assembly not found by exact internal name: {assembly_name}. "
+            "Call assembly.list_structure for exact names."
+        )
+    clean_component = str(component_name or "").strip()
+    component = doc.getObject(clean_component) if clean_component else None
     if component is None:
-        return {
-            "ok": False,
-            "error": f"Component not found: {component_name}",
-            "recoverable": True,
-            "next_actions": [
-                {
-                    "tool": "core.get_active_document",
-                    "why": "Inspect document object names and labels before retrying.",
-                },
+        return _invalid(f"Component not found by exact internal name: {component_name}")
+    group_names = {
+        getattr(child, "Name", None)
+        for child in list(getattr(assembly, "Group", []) or [])
+    }
+    if clean_component not in group_names:
+        return _invalid(
+            f"Object {clean_component} is not a child of assembly "
+            f"{assembly.Name}. Insert it first with assembly.insert_component."
+        )
+    joint_group = domain_runtime.assembly_joint_group(assembly)
+    if joint_group is None:
+        return _invalid(
+            "The assembly has no native Assembly::JointGroup; grounding cannot proceed without repairing the assembly structure.",
+            assembly=assembly.Name,
+            group=[
+                {"name": child.Name, "label": child.Label, "type": child.TypeId}
+                for child in list(getattr(assembly, "Group", []) or [])
             ],
-        }
-    children = list(getattr(assembly, "Group", []) or [])
-    if component not in children:
-        return {
-            "ok": False,
-            "error": (
-                f"Component {component.Name} is not a child of assembly "
-                f"{assembly.Name}. Add it first."
-            ),
-            "recoverable": True,
-            "next_actions": [
-                {
-                    "tool": "assembly.add_component",
-                    "why": "Add the component to the assembly before grounding it.",
-                },
+            out_list=[
+                {"name": child.Name, "label": child.Label, "type": child.TypeId}
+                for child in list(getattr(assembly, "OutList", []) or [])
             ],
-        }
+        )
+    for joint in service._assembly_joint_objects(assembly):
+        grounded = getattr(joint, "ObjectToGround", None)
+        if grounded is not None and getattr(grounded, "Name", None) == clean_component:
+            return _invalid(
+                f"Component {clean_component} is already grounded by joint "
+                f"{joint.Name}.",
+                grounded_joint=joint.Name,
+            )
 
-    def _ground_component() -> dict[str, Any]:
+    def create() -> dict[str, Any]:
         import FreeCAD as App
         import JointObject
 
-        doc = App.ActiveDocument
-        if doc is None:
+        active = App.ActiveDocument
+        if active is None:
             raise RuntimeError("No active document.")
-        joint_group = _joint_group(assembly)
-        if joint_group is None:
-            joint_group = assembly.newObject("Assembly::JointGroup", "Joints")
-        already_grounded = _grounded_components(joint_group)
-        if component.Name in already_grounded:
-            return {
-                "document": doc.Name,
-                "assembly": assembly.Name,
-                "component": component.Name,
-                "grounded_joint": None,
-                "already_grounded": True,
-                "grounded_components": already_grounded,
-            }
-        ground = joint_group.newObject("App::FeaturePython", "GroundedJoint")
-        JointObject.GroundedJoint(ground, component)
-        if App.GuiUp:
-            JointObject.ViewProviderGroundedJoint(ground.ViewObject)
-        doc.recompute()
+        target_assembly = active.getObject(assembly.Name)
+        target = active.getObject(clean_component)
+        if target_assembly is None or target is None:
+            raise RuntimeError("The assembly or component no longer exists.")
+        native_joint_group = domain_runtime.assembly_joint_group(target_assembly)
+        if native_joint_group is None:
+            raise RuntimeError("The assembly's native JointGroup disappeared before grounding.")
+        ground = native_joint_group.newObject("App::FeaturePython", "GroundedJoint")
+        JointObject.GroundedJoint(ground, target)
+        active.recompute()
+        solver_visible = bool(target_assembly.isPartGrounded(target))
         return {
-            "document": doc.Name,
-            "assembly": assembly.Name,
-            "component": component.Name,
+            "document": active.Name,
+            "assembly": target_assembly.Name,
             "grounded_joint": ground.Name,
-            "already_grounded": False,
-            "grounded_components": _grounded_components(joint_group),
+            "grounded_component": target.Name,
+            "component_placement": domain_runtime.placement_summary(target),
+            "joint_group": native_joint_group.Name,
+            "joint_group_members": [
+                child.Name for child in list(getattr(native_joint_group, "Group", []) or [])
+            ],
+            "object_to_ground": getattr(getattr(ground, "ObjectToGround", None), "Name", None),
+            "solver_visible_grounded": solver_visible,
+            "solver_diagnostics": domain_runtime.assembly_solver_diagnostics(target_assembly),
         }
 
-    transaction = run_freecad_transaction(
-        f"Ground component {component.Name} in Assembly {assembly.Name}",
-        _ground_component,
-    )
-    summary = domain_runtime.assembly_summary(service)
-    result = transaction.get("result") if isinstance(transaction.get("result"), dict) else {}
-    response = {
-        "ok": bool(transaction.get("ok")),
-        "transaction": transaction,
-        "assembly": result.get("assembly", getattr(assembly, "Name", None)),
-        "component": result.get("component", getattr(component, "Name", None)),
-        "grounded_joint": result.get("grounded_joint"),
-        "already_grounded": bool(result.get("already_grounded", False)),
-        "grounded_components": result.get("grounded_components", []),
-        "assembly_summary": summary,
-    }
-    if not response["ok"]:
-        response["error"] = transaction.get("error") or "Grounding assembly component failed."
-        response["recoverable"] = True
-        response["next_actions"] = [
+    def verify(result: dict[str, Any]) -> dict[str, Any]:
+        checks = [
             {
-                "tool": "assembly.get_assemblies",
-                "why": "Inspect assemblies, components, and existing joints before retrying.",
+                "name": "object_to_ground",
+                "ok": result.get("object_to_ground") == clean_component,
+                "expected": clean_component,
+                "actual": result.get("object_to_ground"),
+            },
+            {
+                "name": "joint_group_membership",
+                "ok": result.get("grounded_joint") in list(result.get("joint_group_members") or []),
+                "actual": result.get("joint_group_members"),
+            },
+            {
+                "name": "solver_visible_grounded",
+                "ok": result.get("solver_visible_grounded") is True,
+                "actual": result.get("solver_visible_grounded"),
             },
         ]
-    return response
+        return {"ok": all(check["ok"] for check in checks), "checks": checks}
+
+    transaction = run_freecad_transaction(
+        f"Ground assembly component: {clean_component}",
+        create,
+        verifier=verify,
+    )
+    mutation = transaction.get("result") if isinstance(transaction.get("result"), dict) else {}
+    return domain_runtime.build_mutation_result(
+        transaction,
+        extra={"operation": "ground_component", "mutation": mutation},
+        next_action=(
+            "Relate the remaining components to this grounded one with "
+            "assembly.create_joint, then run assembly.solve."
+        ),
+    )
+
+
+def _find_assembly(service: Any, assembly_name: str) -> Any:
+    clean = str(assembly_name or "").strip()
+    if not clean:
+        return None
+    for assembly in service._assembly_objects():
+        if assembly.Name == clean:
+            return assembly
+    return None
+
+
+def _invalid(message: str, **details: Any) -> dict[str, Any]:
+    return {"ok": False, "error": message, "retry_same_call": False, **details}

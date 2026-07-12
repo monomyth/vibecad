@@ -46,6 +46,14 @@ public:
     App::PropertyBool Refine;
     App::PropertyFloatConstraint FuzzyTolerance;
 
+    /** Return the feature result before optional same-domain refinement.
+     *
+     * Refinement is a presentation/topology cleanup step. Downstream geometry
+     * algorithms that need the exact operation result can use this shape without
+     * temporarily changing the Refine property and recomputing the document.
+     */
+    TopoShape getUnrefinedShape() const;
+
 protected:
     // store the shape before refinement
     TopoShape rawShape;

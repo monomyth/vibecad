@@ -19,6 +19,7 @@ TOOL_SPEC = {
         "that component's sketches and features."
     ),
     "name": "partdesign.create_body",
+    "edit_modes": ["none"],
     "parameters": {
         "type": "object",
         "properties": {
@@ -27,45 +28,46 @@ TOOL_SPEC = {
                 "description": "Component name for the Body, e.g. 'Housing'.",
             },
         },
+        "required": ["label"],
+        "additionalProperties": False,
     },
     "safety": "SAFE_WRITE",
     "workbench": "PartDesignWorkbench",
 }
 
 
-def run(service, label: str = "Body") -> dict[str, Any]:
+def run(service, label: str) -> dict[str, Any]:
+    clean_label = str(label or "").strip()
+    if not clean_label:
+        return {"ok": False, "error": "label is required.", "retry_same_call": False}
+
     def _create_body() -> dict[str, Any]:
         import FreeCAD as App
 
-        doc = App.ActiveDocument or App.newDocument("VibeCAD")
+        doc = App.ActiveDocument
+        if doc is None:
+            raise RuntimeError("No active document. Create or open a document in FreeCAD first.")
         body = doc.addObject("PartDesign::Body", "Body")
-        body.Label = label or "Body"
-        try:
-            doc.setActiveObject("pdbody", body)
-        except Exception:
-            pass
+        body.Label = clean_label
         doc.recompute()
         return {
             "document": doc.Name,
             "body": body.Name,
             "body_label": getattr(body, "Label", body.Name),
-            "partdesign": domain_runtime.partdesign_summary(service, body.Name),
+            "body_state": service._partdesign_body_summary(body),
         }
 
     transaction = run_freecad_transaction(
-        f"Create PartDesign body: {label or 'Body'}",
+        f"Create PartDesign body: {clean_label}",
         _create_body,
     )
     result = transaction.get("result") if isinstance(transaction.get("result"), dict) else {}
     response = {
         "ok": bool(transaction.get("ok")),
-        "transaction": transaction,
-        "active_body": result.get("body"),
-        "active_body_label": result.get("body_label"),
-        "partdesign": domain_runtime.partdesign_summary(service, result.get("body")),
-        "next_action": "Create a sketch in this Body, then add constrained geometry and native PartDesign features.",
+        "mutation": result,
+        "document_delta": transaction.get("document_delta") or {},
+        "native_diagnostics": domain_runtime.recompute_diagnostics(transaction),
     }
     if not response["ok"]:
         response["error"] = transaction.get("error") or "PartDesign Body creation failed."
-        response["recoverable"] = True
     return response

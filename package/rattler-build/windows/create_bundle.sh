@@ -6,6 +6,21 @@ set -x
 conda_env="$(pwd)/../.pixi/envs/default/"
 
 copy_dir="VibeCAD_Windows"
+if [[ -z "${BUILD_TAG:-}" || ! "${BUILD_TAG}" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]]; then
+  echo "BUILD_TAG must contain only letters, numbers, '.', '_', '+', and '-'." >&2
+  exit 1
+fi
+version_name="VibeCAD_${BUILD_TAG}-Windows-$(uname -m)"
+
+# Make local rebuilds behave like the runner's fresh workspace. BUILD_TAG is
+# validated above so cleanup cannot escape the Windows bundle directories.
+rm -rf -- "${copy_dir}" "${version_name}" ".nsis_tmp"
+rm -f -- \
+  "${version_name}.7z" \
+  "${version_name}.7z-SHA256.txt" \
+  "${version_name}-installer.exe" \
+  "${version_name}-installer.exe-SHA256.txt" \
+  "../../WindowsInstaller/${version_name}-installer.exe"
 mkdir -p ${copy_dir}/bin
 
 copy_tree() {
@@ -129,6 +144,13 @@ copy_matching_files "${conda_env}/Library/bin" "*.dll" "${copy_dir}/bin"
 # Copy FreeCAD build
 copy_matching_files "${conda_env}/Library/bin" "freecad*" "${copy_dir}/bin"
 copy_matching_files "${conda_env}/Library/bin" "FreeCAD*" "${copy_dir}/bin"
+# Keep upstream compatibility executables while providing a first-class
+# VibeCAD process name for shortcuts, file associations, and Task Manager.
+cp -a "${copy_dir}/bin/freecad.exe" "${copy_dir}/bin/VibeCAD.exe"
+if [[ ! -x "${copy_dir}/bin/VibeCAD.exe" ]]; then
+    echo "Branded VibeCAD executable was not created." >&2
+    exit 1
+fi
 copy_tree "${conda_env}/Library/data" "${copy_dir}/data"
 copy_tree "${conda_env}/Library/Ext" "${copy_dir}/Ext"
 copy_tree "${conda_env}/Library/lib" "${copy_dir}/lib"
@@ -151,15 +173,14 @@ set +x
 echo '[Paths]' >> ${copy_dir}/bin/qt6.conf
 echo 'Prefix = ../lib/qt6' >> ${copy_dir}/bin/qt6.conf
 
-# convenient shortcuts to run the binaries
-if [ -x /c/ProgramData/chocolatey/tools/shimgen.exe ]; then
-    pushd ${copy_dir}
-    /c/ProgramData/chocolatey/tools/shimgen.exe -p bin/freecadcmd.exe -i "$(pwd)/../../../WindowsInstaller/icons/FreeCAD.ico" -o "$(pwd)/FreeCADCmd.exe"
-    /c/ProgramData/chocolatey/tools/shimgen.exe --gui -p bin/freecad.exe -i "$(pwd)/../../../WindowsInstaller/icons/FreeCAD.ico" -o "$(pwd)/FreeCAD.exe"
-    popd
+# Deterministic root launchers built by the same CMake/MSVC recipe as VibeCAD.
+# Do not depend on Chocolatey's runner-global, proprietary shim generator.
+cp -a "${conda_env}/Library/bin/VibeCADPortableLauncher.exe" "${copy_dir}/VibeCAD.exe"
+cp -a "${conda_env}/Library/bin/VibeCADCmdPortableLauncher.exe" "${copy_dir}/FreeCADCmd.exe"
+if [[ ! -x "${copy_dir}/VibeCAD.exe" || ! -x "${copy_dir}/FreeCADCmd.exe" ]]; then
+    echo "Portable VibeCAD launchers were not created." >&2
+    exit 1
 fi
-
-version_name="VibeCAD_${BUILD_TAG}-Windows-$(uname -m)"
 
 echo -e "################"
 echo -e "version_name:  ${version_name}"
@@ -233,7 +254,11 @@ if ! "$SIGN_DIR/bin/freecadcmd.exe" --safe-mode --version; then
   echo "VibeCAD command-line smoke test failed; the Windows bundle cannot start."
   exit 1
 fi
-if ! "$SIGN_DIR/bin/freecadcmd.exe" --safe-mode -c "import agents, anthropic, keyring; print('VibeCAD provider SDK and keyring imports ok')"; then
+if ! "$SIGN_DIR/FreeCADCmd.exe" --safe-mode --version; then
+  echo "VibeCAD portable command-line launcher smoke test failed."
+  exit 1
+fi
+if ! "$SIGN_DIR/bin/freecadcmd.exe" --safe-mode -c "import importlib.util, openai, anthropic, keyring, jsonschema; import keyring.backends.Windows; assert importlib.util.find_spec('agents') is None; print('VibeCAD provider SDK, OS keyring backend, and schema validator imports ok')"; then
   echo "VibeCAD provider SDK/keyring smoke test failed; the Windows bundle is missing AI provider dependencies."
   exit 1
 fi

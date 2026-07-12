@@ -158,9 +158,7 @@ App::DocumentObjectExecReturn* Fillet::execute()
     catch (...) {
         return new App::DocumentObjectExecReturn(QT_TRANSLATE_NOOP(
             "Exception",
-            "Fillet operation failed. The selected edges may contain geometry that cannot be "
-            "filleted together. "
-            "Try filleting edges individually or with a smaller radius."
+            "Fillet operation failed with an unknown OpenCascade exception"
         ));
     }
 }

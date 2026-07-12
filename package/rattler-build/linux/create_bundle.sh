@@ -12,6 +12,42 @@ version_name="VibeCAD_${BUILD_TAG}-Linux-$(uname -m)"
 # again, so the two packagers can run in parallel.
 build_appdir() {
     mkdir -p ${conda_env}
+    cat > AppDir/AppRun <<'EOF'
+#!/bin/bash
+HERE="$(dirname "$(readlink -f "${0}")")"
+export PREFIX=${HERE}/usr
+# export LD_LIBRARY_PATH=${HERE}/usr/lib${LD_LIBRARY_PATH:+':'}$LD_LIBRARY_PATH
+export PYTHONHOME=${HERE}/usr
+export PATH_TO_FREECAD_LIBDIR=${HERE}/usr/lib
+# export QT_QPA_PLATFORM_PLUGIN_PATH=${HERE}/usr/plugins
+# export QT_XKB_CONFIG_ROOT=${HERE}/usr/lib
+export FONTCONFIG_FILE=/etc/fonts/fonts.conf
+export FONTCONFIG_PATH=/etc/fonts
+
+# Fix: Use X to run on Wayland
+export QT_QPA_PLATFORM=xcb
+
+# Show packages info if DEBUG env variable is set
+if [ "$DEBUG" = 1 ]; then
+    cat ${HERE}/packages.txt
+fi
+
+# SSL
+# https://forum.freecad.org/viewtopic.php?f=4&t=34873&start=20#p327416
+export SSL_CERT_FILE=$PREFIX/ssl/cacert.pem
+# https://github.com/FreeCAD/FreeCAD-AppImage/pull/20
+export GIT_SSL_CAINFO=$HERE/usr/ssl/cacert.pem
+
+# Support for launching other applications (from /usr/bin)
+# https://github.com/FreeCAD/FreeCAD-AppImage/issues/30
+if [ ! -z "$1" ] && [ -e "$HERE/usr/bin/$1" ] ; then
+    MAIN="$HERE/usr/bin/$1" ; shift
+else
+    MAIN="$HERE/usr/bin/freecad"
+fi
+
+exec "${MAIN}" "$@"
+EOF
 
     ../scripts/install_vibecad_provider_deps.sh ../.pixi/envs/default
     cp -a ../.pixi/envs/default/* ${conda_env}
@@ -65,7 +101,7 @@ build_appdir() {
         echo "VibeCAD command-line smoke test failed; the Linux bundle cannot start."
         exit 1
     fi
-    if ! "${conda_env}/bin/freecadcmd" --safe-mode -c "import agents, anthropic, keyring; print('VibeCAD provider SDK and keyring imports ok')"; then
+    if ! "${conda_env}/bin/freecadcmd" --safe-mode -c "import importlib.util, openai, anthropic, keyring, jsonschema, secretstorage; import keyring.backends.SecretService; assert importlib.util.find_spec('agents') is None; print('VibeCAD provider SDK, OS keyring backend, and schema validator imports ok')"; then
         echo "VibeCAD provider SDK/keyring smoke test failed; the Linux bundle is missing AI provider dependencies."
         exit 1
     fi

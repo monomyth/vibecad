@@ -28,6 +28,7 @@
 #include <iostream>
 #include <utility>
 #include <set>
+#include <array>
 #include <memory>
 #include <new>
 #include <string>
@@ -80,6 +81,7 @@
 #include "License.h"
 #include "Link.h"
 #include "MergeDocuments.h"
+#include "PropertyLinks.h"
 #include "StringHasher.h"
 #include "Transactions.h"
 
@@ -2889,7 +2891,8 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
         return 0;
     }
 
-    // delete recompute log
+    // Start a fresh, queryable diagnostic generation for this recompute.
+    d->beginRecomputeDiagnostics();
     d->clearRecomputeLog();
 
     Base::TimeTracker tracker("Document::recompute");
@@ -3255,7 +3258,102 @@ const char* Document::getErrorDescription(const DocumentObject* Obj) const
     return d->findRecomputeLog(Obj);
 }
 
+std::uint64_t Document::getRecomputeDiagnosticGeneration() const
+{
+    return d->recomputeDiagnosticGeneration;
+}
+
+const std::vector<RecomputeDiagnostic>& Document::getRecomputeDiagnostics() const
+{
+    return d->recomputeDiagnostics;
+}
+
 // call the recompute of the Feature and handle the exceptions and errors.
+namespace
+{
+std::string_view recomputeFailureCode(const App::DocumentObject* feature)
+{
+    static const std::unordered_map<std::string_view, std::string_view> codes = {
+        {"PartDesign::Fillet", "BREP_FILLET_FAILED"},
+        {"PartDesign::Chamfer", "BREP_CHAMFER_FAILED"},
+        {"PartDesign::Draft", "BREP_DRAFT_FAILED"},
+        {"PartDesign::Thickness", "BREP_OFFSET_FAILED"},
+        {"PartDesign::Boolean", "BREP_BOOLEAN_FAILED"},
+        {"PartDesign::AdditiveLoft", "BREP_LOFT_FAILED"},
+        {"PartDesign::SubtractiveLoft", "BREP_LOFT_FAILED"},
+        {"PartDesign::AdditivePipe", "BREP_SWEEP_FAILED"},
+        {"PartDesign::SubtractivePipe", "BREP_SWEEP_FAILED"},
+        {"PartDesign::AdditiveHelix", "BREP_HELIX_FAILED"},
+        {"PartDesign::SubtractiveHelix", "BREP_HELIX_FAILED"},
+        {"PartDesign::Hole", "PARTDESIGN_HOLE_FAILED"},
+        {"Part::Fillet", "BREP_FILLET_FAILED"},
+        {"Part::Chamfer", "BREP_CHAMFER_FAILED"},
+        {"Part::Cut", "BREP_BOOLEAN_FAILED"},
+        {"Part::Fuse", "BREP_BOOLEAN_FAILED"},
+        {"Part::Common", "BREP_BOOLEAN_FAILED"},
+        {"Part::Offset", "BREP_OFFSET_FAILED"},
+        {"Part::Extrusion", "BREP_EXTRUSION_FAILED"},
+        {"Part::Revolution", "BREP_REVOLUTION_FAILED"},
+        {"Part::MultiFuse", "BREP_BOOLEAN_FAILED"},
+        {"Part::MultiCommon", "BREP_BOOLEAN_FAILED"},
+        {"Surface::Filling", "SURFACE_FILL_FAILED"},
+        {"Surface::Sections", "SURFACE_SECTIONS_FAILED"},
+        {"Surface::GeomFillSurface", "SURFACE_BLEND_FAILED"},
+        {"Surface::Extend", "SURFACE_EXTEND_FAILED"},
+    };
+    const std::string_view type = feature ? feature->getTypeId().getName() : std::string_view();
+    const auto found = codes.find(type);
+    return found == codes.end() ? std::string_view("FEATURE_EXECUTION_FAILED") : found->second;
+}
+
+std::pair<std::string, std::string> recomputeFailureReference(
+    const App::DocumentObject* feature)
+{
+    if (!feature) {
+        return {};
+    }
+    static const std::array<std::string_view, 12> names = {
+        "Base",
+        "Profile",
+        "Spine",
+        "Sections",
+        "Tool",
+        "Group",
+        "Source",
+        "BoundaryEdges",
+        "BoundaryList",
+        "NSections",
+        "Face",
+        "Shapes",
+    };
+    for (const auto name : names) {
+        const auto* property = feature->getPropertyByName(name.data());
+        if (!property) {
+            continue;
+        }
+        std::vector<std::string> subelements;
+        if (const auto* link = dynamic_cast<const App::PropertyLinkSub*>(property)) {
+            subelements = link->getSubValues();
+        }
+        else if (const auto* links = dynamic_cast<const App::PropertyLinkSubList*>(property)) {
+            subelements = links->getSubValues();
+        }
+        std::string joined;
+        for (const auto& subelement : subelements) {
+            if (subelement.empty()) {
+                continue;
+            }
+            if (!joined.empty()) {
+                joined += ',';
+            }
+            joined += subelement;
+        }
+        return {std::string(name), joined};
+    }
+    return {};
+}
+}  // namespace
+
 int Document::_recomputeFeature(DocumentObject* Feat) // NOLINT
 {
     FC_LOG("Recomputing " << Feat->getFullName());
@@ -3274,29 +3372,50 @@ int Document::_recomputeFeature(DocumentObject* Feat) // NOLINT
     catch (Base::AbortException& e) {
         e.reportException();
         FC_LOG("Failed to recompute " << Feat->getFullName() << ": " << e.what());
-        d->addRecomputeLog("User abort", Feat);
+        d->addRecomputeLog("User abort", Feat, "RECOMPUTE_ABORTED", "Document::_recomputeFeature");
         return -1;
     }
     catch (const Base::MemoryException& e) {
         FC_ERR("Memory exception in " << Feat->getFullName() << " thrown: " << e.what());
-        d->addRecomputeLog("Out of memory exception", Feat);
+        d->addRecomputeLog("Out of memory exception",
+                           Feat,
+                           "OUT_OF_MEMORY",
+                           "Document::_recomputeFeature");
         return 1;
     }
     catch (Base::Exception& e) {
         e.reportException();
         FC_LOG("Failed to recompute " << Feat->getFullName() << ": " << e.what());
-        d->addRecomputeLog(e.what(), Feat);
+        const auto [property, subelement] = recomputeFailureReference(Feat);
+        d->addRecomputeLog(e.what(),
+                           Feat,
+                           recomputeFailureCode(Feat),
+                           Feat->getTypeId().getName(),
+                           property,
+                           subelement);
         return 1;
     }
     catch (std::exception& e) {
         FC_ERR("Exception in " << Feat->getFullName() << " thrown: " << e.what());
-        d->addRecomputeLog(e.what(), Feat);
+        const auto [property, subelement] = recomputeFailureReference(Feat);
+        d->addRecomputeLog(e.what(),
+                           Feat,
+                           recomputeFailureCode(Feat),
+                           Feat->getTypeId().getName(),
+                           property,
+                           subelement);
         return 1;
     }
 #ifndef FC_DEBUG
     catch (...) {
         FC_ERR("Unknown exception in " << Feat->getFullName() << " thrown");
-        d->addRecomputeLog("Unknown exception!", Feat);
+        const auto [property, subelement] = recomputeFailureReference(Feat);
+        d->addRecomputeLog("Unknown exception!",
+                           Feat,
+                           recomputeFailureCode(Feat),
+                           Feat->getTypeId().getName(),
+                           property,
+                           subelement);
         return 1;
     }
 #endif
@@ -3306,7 +3425,12 @@ int Document::_recomputeFeature(DocumentObject* Feat) // NOLINT
     }
     else {
         returnCode->Which = Feat;
-        d->addRecomputeLog(returnCode);
+        const auto [property, subelement] = recomputeFailureReference(Feat);
+        d->addRecomputeLog(returnCode,
+                           recomputeFailureCode(Feat),
+                           Feat->getTypeId().getName(),
+                           property,
+                           subelement);
         FC_LOG("Failed to recompute " << Feat->getFullName() << ": " << returnCode->Why);
         return 1;
     }
@@ -3315,7 +3439,7 @@ int Document::_recomputeFeature(DocumentObject* Feat) // NOLINT
 
 bool Document::recomputeFeature(DocumentObject* feature, bool recursive)
 {
-    // delete recompute log
+    d->beginRecomputeDiagnostics();
     d->clearRecomputeLog(feature);
 
     // verify that the feature is (active) part of the document

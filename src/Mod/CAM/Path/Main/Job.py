@@ -108,7 +108,14 @@ Notification = NotificationClass()
 
 
 class ObjectJob:
-    def __init__(self, obj, models, templateFile=None):
+    def __init__(
+        self,
+        obj,
+        models,
+        templateFile=None,
+        createDefaultToolController=True,
+        createDefaultStock=True,
+    ):
         self.obj = obj
         self.tooltip = None
         self.tooltipArgs = None
@@ -257,8 +264,13 @@ class ObjectJob:
         self.setupSetupSheet(obj)
         self.setupBaseModel(obj, models)
         self.setupToolTable(obj)
-        self.setFromTemplateFile(obj, templateFile)
-        self.setupStock(obj)
+        self.setFromTemplateFile(
+            obj,
+            templateFile,
+            createDefaultToolController=createDefaultToolController,
+        )
+        if createDefaultStock:
+            self.setupStock(obj)
 
     @classmethod
     def propertyEnumerations(self, dataType="data"):
@@ -627,7 +639,7 @@ class ObjectJob:
                 return b
         return None
 
-    def setFromTemplateFile(self, obj, template):
+    def setFromTemplateFile(self, obj, template, createDefaultToolController=True):
         """setFromTemplateFile(obj, template) ... extract the properties from the given template file and assign to receiver.
         This will also create any TCs stored in the template."""
         tcs = []
@@ -695,7 +707,7 @@ class ObjectJob:
                     "Unsupported PathJob template version {}".format(attrs.get(JobTemplate.Version))
                 )
 
-        if not tcs:
+        if not tcs and createDefaultToolController:
             self.addToolController(PathToolController.Create())
 
     def templateAttrs(self, obj):
@@ -936,7 +948,13 @@ def Instances():
     return []
 
 
-def Create(name, base, templateFile=None):
+def Create(
+    name,
+    base,
+    templateFile=None,
+    createDefaultToolController=True,
+    createDefaultStock=True,
+):
     """Create(name, base, templateFile=None) ... creates a new job and all it's resources.
     If a template file is specified the new job is initialized with the values from the template."""
     if isinstance(base[0], str):
@@ -947,5 +965,11 @@ def Create(name, base, templateFile=None):
         models = base
     obj = FreeCAD.ActiveDocument.addObject("Path::FeaturePython", name)
     obj.addExtension("App::GroupExtensionPython")
-    obj.Proxy = ObjectJob(obj, models, templateFile)
+    obj.Proxy = ObjectJob(
+        obj,
+        models,
+        templateFile,
+        createDefaultToolController=createDefaultToolController,
+        createDefaultStock=createDefaultStock,
+    )
     return obj

@@ -212,6 +212,23 @@ public:
     bool isEmpty() const;
     int numberOfComponents() const;
 
+    struct SolverConstraintDiagnostic
+    {
+        std::string specification;
+        double residual {0.0};
+        bool redundant {false};
+    };
+
+    struct SolverJointDiagnostic
+    {
+        std::string jointName;
+        int constraintCount {0};
+        int removedDegreesOfFreedom {0};
+        int redundantConstraintCount {0};
+        double maximumAbsoluteResidual {0.0};
+        std::vector<SolverConstraintDiagnostic> constraints;
+    };
+
     void updateSolveStatus();
     inline int getLastDoF() const
     {
@@ -253,6 +270,14 @@ public:
     {
         return lastMalformedJoints;
     }
+    inline const std::vector<SolverJointDiagnostic>& getLastJointDiagnostics() const
+    {
+        return lastJointDiagnostics;
+    }
+    inline const std::string& getLastSolverMessage() const
+    {
+        return lastSolverMessage;
+    }
     fastsignals::signal<void()> signalSolverUpdate;
 
 private:
@@ -278,6 +303,8 @@ private:
     std::vector<std::string> lastConflictingJoints;
     std::vector<std::string> lastPartialRedundantJoints;
     std::vector<std::string> lastMalformedJoints;
+    std::vector<SolverJointDiagnostic> lastJointDiagnostics;
+    std::string lastSolverMessage;
 };
 
 }  // namespace Assembly

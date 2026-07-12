@@ -49,6 +49,9 @@ void PathSim::BeginSimulation(Part::TopoShape* stock, float resolution)
         bbox.LengthZ(),
         resolution
     );
+    m_cutCommands = 0;
+    m_rapidCommands = 0;
+    m_unsupportedCommands = 0;
 }
 
 void PathSim::SetToolShape(const TopoDS_Shape& toolShape, float resolution)
@@ -62,18 +65,27 @@ Base::Placement* PathSim::ApplyCommand(Base::Placement* pos, Command* cmd)
     Point3D toPos(*pos);
     toPos.UpdateCmd(*cmd);
     if (m_tool) {
-        if (cmd->Name == "G0" || cmd->Name == "G1") {
-            m_stock->ApplyLinearTool(fromPos, toPos, *m_tool);
+        if (cmd->Name == "G0" || cmd->Name == "G00") {
+            ++m_rapidCommands;
         }
-        else if (cmd->Name == "G2") {
+        else if (cmd->Name == "G1" || cmd->Name == "G01") {
+            m_stock->ApplyLinearTool(fromPos, toPos, *m_tool);
+            ++m_cutCommands;
+        }
+        else if (cmd->Name == "G2" || cmd->Name == "G02") {
             Vector3d vcent = cmd->getCenter();
             Point3D cent(vcent);
             m_stock->ApplyCircularTool(fromPos, toPos, cent, *m_tool, false);
+            ++m_cutCommands;
         }
-        else if (cmd->Name == "G3") {
+        else if (cmd->Name == "G3" || cmd->Name == "G03") {
             Vector3d vcent = cmd->getCenter();
             Point3D cent(vcent);
             m_stock->ApplyCircularTool(fromPos, toPos, cent, *m_tool, true);
+            ++m_cutCommands;
+        }
+        else {
+            ++m_unsupportedCommands;
         }
     }
 
@@ -81,4 +93,12 @@ Base::Placement* PathSim::ApplyCommand(Base::Placement* pos, Command* cmd)
     Vector3d vec(toPos.x, toPos.y, toPos.z);
     plc->setPosition(vec);
     return plc;
+}
+
+cStock::Statistics PathSim::GetSimulationStats() const
+{
+    if (!m_stock) {
+        throw Base::RuntimeError("Simulation has no stock object");
+    }
+    return m_stock->GetStatistics();
 }

@@ -38,6 +38,9 @@ class PartDesignExport MultiTransform: public PartDesign::Transformed
 public:
     MultiTransform();
 
+    App::PropertyInteger LastFailingChildIndex;
+    App::PropertyString LastFailingChild;
+
     App::PropertyLinkList Transformations;
 
     /** @name methods override feature */

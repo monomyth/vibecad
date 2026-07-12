@@ -48,6 +48,10 @@ class PathSim(BaseClass):
         """
         ...
 
+    def GetSimulationStats(self) -> dict[str, Any]:
+        """Return voxel resolution, command counters, and removed-stock statistics."""
+        ...
+
     def ApplyCommand(self, placement: Placement, command: Command) -> Placement:
         """
         Apply a single path command on the stock starting from placement.

@@ -42,6 +42,7 @@
 #include <vector>
 #include <utility>
 #include <list>
+#include <cstdint>
 #include <string>
 #include <string_view>
 
@@ -88,6 +89,18 @@ class Application;
 class Transaction;
 class StringHasher;
 using StringHasherRef = Base::Reference<StringHasher>;
+
+struct AppExport RecomputeDiagnostic
+{
+    std::uint64_t generation {0};
+    std::string severity;
+    std::string code;
+    std::string object;
+    std::string property;
+    std::string subelement;
+    std::string algorithm;
+    std::string message;
+};
 
 /**
  * @brief A class that represents a FreeCAD document.
@@ -828,6 +841,10 @@ public:
      * @return The error text, or `nullptr` if there is no error.
      */
     const char* getErrorDescription(const DocumentObject* Obj) const;
+
+    /// Generation and structured errors produced by the latest recompute.
+    std::uint64_t getRecomputeDiagnosticGeneration() const;
+    const std::vector<RecomputeDiagnostic>& getRecomputeDiagnostics() const;
 
     /**
      * @brief Get the status of this document for a given status bit.

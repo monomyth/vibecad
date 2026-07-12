@@ -466,8 +466,13 @@ void TaskDressUpParameters::setSelectionMode(selectionModes mode)
         DressUpView->highlightReferences(true);
 
         // selection must come from the previous feature, we also need to remember the currently
-        // shown so we can restore it later
-        previouslyShownViewProvider = DressUpView->getBodyViewProvider()->getShownViewProvider();
+        // shown so we can restore it later.
+        // The body view provider may be null for erroneous documents where the feature is
+        // placed outside a body container (see ViewProvider::setEdit), so guard against it.
+        previouslyShownViewProvider = nullptr;
+        if (ViewProviderBody* bodyViewProvider = DressUpView->getBodyViewProvider()) {
+            previouslyShownViewProvider = bodyViewProvider->getShownViewProvider();
+        }
         DressUpView->showPreviousFeature(true);
     }
     setSelectionGate();
