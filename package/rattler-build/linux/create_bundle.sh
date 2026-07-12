@@ -116,8 +116,11 @@ EOF
 
 # Compress the finalized AppDir into an AppImage. Reads AppDir only.
 make_appimage() {
-    curl -LO https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-$(uname -m).AppImage
-    chmod a+x appimagetool-$(uname -m).AppImage
+    local appimagetool_path="./appimagetool-$(uname -m)"
+    curl -fL \
+      -o "${appimagetool_path}" \
+      "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-$(uname -m).AppImage"
+    chmod a+x "${appimagetool_path}"
 
     if [ "${UPLOAD_RELEASE}" == "true" ]; then
         case "${BUILD_TAG}" in
@@ -137,13 +140,15 @@ make_appimage() {
     # export GPG_TTY=$(tty)
     # zstd compression level 19 (max "normal" level): the "ultra" level 22 roughly
     # doubles the mksquashfs time for a marginal size gain on a 4-core runner.
-    ./appimagetool-$(uname -m).AppImage \
+    "${appimagetool_path}" \
       --comp zstd \
       --mksquashfs-opt -Xcompression-level \
       --mksquashfs-opt 19 \
       -u "gh-releases-zsync|10-X-eng|vibecad|${GH_UPDATE_TAG}|VibeCAD*$(uname -m)*.AppImage.zsync" \
       AppDir ${version_name}.AppImage
       # -s --sign-key ${GPG_KEY_ID} \
+
+    rm -f "${appimagetool_path}"
 
     echo -e "\nCreate hash"
     sha256sum ${version_name}.AppImage > ${version_name}.AppImage-SHA256.txt
