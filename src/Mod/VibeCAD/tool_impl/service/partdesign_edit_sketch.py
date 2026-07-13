@@ -10,9 +10,13 @@ TOOL_SPEC = {
     "name": "partdesign.edit_sketch",
     "description": (
         "Open one exact existing native Sketcher sketch for geometry and constraint editing. "
-        "Requires that nothing else is already in edit mode. Never creates or closes a sketch "
-        "and never activates a workbench; success is verified from FreeCAD's native active "
-        "edit object."
+        "The sketch must already exist: create it first with partdesign.create_sketch when "
+        "authoring a new profile, then pass the returned internal sketch name to this tool. "
+        "After this succeeds, the live tool surface refreshes within the same provider run and "
+        "exposes the Sketcher geometry, constraint, measurement, and editing tools needed to "
+        "author or modify the profile. Requires that nothing else is already in edit mode. "
+        "Never creates or closes a sketch and never activates a workbench; success is verified "
+        "from FreeCAD's native active edit object."
     ),
     "contextual": True,
     "safety": "SAFE_WRITE",

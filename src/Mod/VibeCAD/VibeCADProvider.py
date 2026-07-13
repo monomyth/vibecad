@@ -77,10 +77,12 @@ VIBECAD_SYSTEM_INSTRUCTIONS = (
     "move relative to one another or are manufactured separately.\n\n"
     "The current document, Body history, selection, active sketch, solver state, "
     "report errors, references, and conversation are supplied as authoritative "
-    "context. When a sketch is open, complete and verify its geometry and "
-    "constraints, then report that it is ready and wait for the user to close "
-    "edit mode. You cannot close a sketch. Never treat a closed, face-buildable, "
-    "or fully constrained sketch as permission to proceed to solid features. "
+    "context. When a sketch is open, complete and verify its intended geometry "
+    "and constraints. When that editing step is actually complete, call "
+    "sketcher.close_sketch to leave edit mode and continue in the same run. "
+    "Closing a sketch is a state transition, not proof that it is valid or "
+    "permission to skip verification. Never treat a closed, face-buildable, or "
+    "fully constrained sketch as permission to proceed to solid features. "
     "Compare its actual curve types, profile, dimensions, open endpoints, and "
     "remaining DoF with the written design. Zero DoF is not evidence of a good "
     "parametric sketch by itself. Prefer meaningful dimensions and geometric "
@@ -1027,6 +1029,30 @@ def _capture_outbound_request(
     )
 
 
+def _responses_output_as_input(response: Any) -> list[dict[str, Any]]:
+    """Serialize every Responses output item for client-managed continuation."""
+    output = getattr(response, "output", None)
+    if output is None:
+        raise RuntimeError("Responses API result has no output item list.")
+    items: list[dict[str, Any]] = []
+    for index, item in enumerate(list(output)):
+        model_dump = getattr(item, "model_dump", None)
+        if not callable(model_dump):
+            raise TypeError(
+                f"Responses output item {index} does not support model_dump()."
+            )
+        payload = model_dump(mode="json", exclude_none=True)
+        if not isinstance(payload, dict):
+            raise TypeError(
+                f"Responses output item {index} did not serialize to an object."
+            )
+        item_type = str(payload.get("type") or "").strip()
+        if not item_type:
+            raise ValueError(f"Responses output item {index} has no type.")
+        items.append(_json_safe(payload))
+    return items
+
+
 def _openai_child_main(
     conn,
     prompt: str,
@@ -1110,8 +1136,7 @@ def _openai_child_main(
     client = OpenAI(**client_kwargs)
     live_context = dict(context)
     tools, function_to_tool = tool_surface(live_context)
-    pending_input = user_input(prompt, live_context)
-    previous_response_id: str | None = None
+    input_history = user_input(prompt, live_context)
     turn_texts: list[str] = []
     try:
         turn = 1
@@ -1119,19 +1144,18 @@ def _openai_child_main(
             request: dict[str, Any] = {
                 "model": model,
                 "instructions": _provider_instructions(live_context),
-                "input": pending_input,
+                "input": list(input_history),
                 "parallel_tool_calls": False,
                 "stream": True,
             }
             if tools:
                 request["tools"] = tools
                 request["tool_choice"] = "auto"
-            if previous_response_id:
-                request["previous_response_id"] = previous_response_id
             if reasoning_effort:
                 reasoning: dict[str, Any] = {"effort": reasoning_effort}
                 if str(reasoning_effort).strip().lower() != "none":
                     reasoning["summary"] = "auto"
+                    request["include"] = ["reasoning.encrypted_content"]
                 request["reasoning"] = reasoning
             _capture_outbound_request(
                 live_context,
@@ -1144,7 +1168,6 @@ def _openai_child_main(
             stream = client.responses.create(**request)
             text_parts: list[str] = []
             completed_response = None
-            calls: list[Any] = []
             try:
                 for event in stream:
                     event_type = str(getattr(event, "type", "") or "")
@@ -1177,10 +1200,6 @@ def _openai_child_main(
                                     "text": delta,
                                 },
                             )
-                    elif event_type == "response.output_item.done":
-                        item = getattr(event, "item", None)
-                        if getattr(item, "type", None) == "function_call":
-                            calls.append(item)
                     elif event_type == "response.completed":
                         completed_response = getattr(event, "response", None)
                     elif event_type in {"response.failed", "response.incomplete"}:
@@ -1202,12 +1221,11 @@ def _openai_child_main(
             )
             if assistant_text.strip():
                 turn_texts.append(assistant_text.strip())
-            if not calls:
-                calls = [
-                    item
-                    for item in list(getattr(completed_response, "output", []) or [])
-                    if getattr(item, "type", None) == "function_call"
-                ]
+            calls = [
+                item
+                for item in list(getattr(completed_response, "output", []) or [])
+                if getattr(item, "type", None) == "function_call"
+            ]
             if not calls:
                 conn.send(
                     {
@@ -1219,7 +1237,8 @@ def _openai_child_main(
                 return
 
             response_function_map = dict(function_to_tool)
-            pending_input = []
+            input_history.extend(_responses_output_as_input(completed_response))
+            tool_outputs: list[dict[str, Any]] = []
             repin_context: dict[str, Any] | None = None
             for item in calls:
                 function_name = str(getattr(item, "name", "") or "")
@@ -1268,7 +1287,7 @@ def _openai_child_main(
                     live_context,
                     result,
                 )
-                pending_input.append(
+                tool_outputs.append(
                     {
                         "type": "function_call_output",
                         "call_id": call_id,
@@ -1277,6 +1296,7 @@ def _openai_child_main(
                         ),
                     }
                 )
+            input_history.extend(tool_outputs)
             if repin_context is not None:
                 references = repin_context.get("reference_images")
                 has_references = bool(
@@ -1289,10 +1309,7 @@ def _openai_child_main(
                     else "Inspect the current viewport against the accepted design intent. "
                     "Name visible geometric or functional shortcomings before deciding whether work is complete."
                 )
-                pending_input.extend(user_input(visual_instruction, repin_context))
-            previous_response_id = str(getattr(completed_response, "id", "") or "")
-            if not previous_response_id:
-                raise RuntimeError("OpenAI completed response has no response id.")
+                input_history.extend(user_input(visual_instruction, repin_context))
             turn += 1
         conn.send({"type": "error", "error": "OpenAI provider turn limit reached."})
     except Exception as exc:

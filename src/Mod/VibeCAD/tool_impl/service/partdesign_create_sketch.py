@@ -30,7 +30,12 @@ TOOL_SPEC = {
         "Create one native Sketcher sketch inside an explicitly named PartDesign "
         "Body. Attach it to a Body origin plane, a datum plane in that Body, or one exact "
         "planar face. A face query is accepted only when it resolves uniquely; ambiguous "
-        "queries return candidates and create nothing."
+        "queries return candidates and create nothing. This creates the sketch object but "
+        "does not enter sketch edit mode. When ready to author its geometry, pass the exact "
+        "internal sketch name returned by this tool to partdesign.edit_sketch. Do not infer "
+        "that geometry-authoring tools are unavailable merely because they are absent before "
+        "edit mode; opening the sketch refreshes the live tool surface with Sketcher geometry "
+        "and constraint tools."
     ),
     "contextual": True,
     "safety": "SAFE_WRITE",

@@ -299,7 +299,8 @@ def _edit_mode_block(
     if edit_mode == "sketch":
         explanation = (
             f"Sketch {_active_sketch_name(state)} is open for editing. Finish or "
-            f"close it before running {tool.name}."
+            f"verify that sketch, then call sketcher.close_sketch before running "
+            f"{tool.name}."
         )
     else:
         explanation = (
@@ -315,8 +316,8 @@ def _edit_mode_block(
             "active_edit_mode": edit_mode,
             "active_edit_object": _active_sketch_name(state) or None,
             "allowed_edit_modes": sorted(tool.spec.edit_modes),
-            "human_action": (
-                "Finish or close the active sketch."
+            "recovery": (
+                "Finish and verify the active sketch, then call sketcher.close_sketch."
                 if edit_mode == "sketch"
                 else "Open the exact target sketch for editing."
             ),
@@ -325,7 +326,7 @@ def _edit_mode_block(
         required_changes=[
             {
                 "action": (
-                    "close_active_sketch"
+                    "call_sketcher.close_sketch"
                     if edit_mode == "sketch"
                     else "open_target_sketch"
                 )

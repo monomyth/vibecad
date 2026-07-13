@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 
 
 SKETCHER_PACK_TOOL_NAMES: tuple[str, ...] = (
+    "sketcher.close_sketch",
     "sketcher.draw_rectangle",
     "sketcher.add_polyline",
     "sketcher.add_arc",
@@ -73,7 +74,7 @@ PARTDESIGN_PACK_TOOL_NAMES: tuple[str, ...] = (
 )
 
 # PartDesign owns its sketches, so it requires the Sketcher editing tools while
-# a human-opened Body sketch is active.
+# a Body sketch is active.
 PARTDESIGN_REQUIRED_ADJACENT_TOOL_NAMES: tuple[str, ...] = SKETCHER_PACK_TOOL_NAMES
 
 PART_PACK_TOOL_NAMES: tuple[str, ...] = (

@@ -4,6 +4,10 @@
 
 from __future__ import annotations
 
+import json
+import sys
+from types import ModuleType, SimpleNamespace
+
 import VibeCADProvider as provider
 
 
@@ -95,3 +99,172 @@ def test_clean_exit_drains_delayed_final_pipe_message(monkeypatch) -> None:
     assert context.child_conn.closed
     assert context.parent_conn.closed
     assert 0.2 in context.parent_conn.poll_timeouts
+
+
+class _ResponsesItem:
+    def __init__(self, payload: dict[str, object]) -> None:
+        self.payload = dict(payload)
+        for key, value in payload.items():
+            setattr(self, key, value)
+
+    def model_dump(self, *, mode: str, exclude_none: bool) -> dict[str, object]:
+        assert mode == "json"
+        assert exclude_none
+        return dict(self.payload)
+
+
+class _ResponsesStream:
+    def __init__(self, events: list[SimpleNamespace]) -> None:
+        self.events = events
+        self.closed = False
+
+    def __iter__(self):
+        return iter(self.events)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _FakeResponses:
+    def __init__(self) -> None:
+        self.requests: list[dict[str, object]] = []
+
+    def create(self, **request):
+        self.requests.append(request)
+        if len(self.requests) == 1:
+            reasoning = _ResponsesItem(
+                {
+                    "type": "reasoning",
+                    "id": "reasoning_1",
+                    "summary": [],
+                    "encrypted_content": "opaque-reasoning-state",
+                }
+            )
+            function_call = _ResponsesItem(
+                {
+                    "type": "function_call",
+                    "id": "function_1",
+                    "call_id": "call_1",
+                    "name": "test_echo",
+                    "arguments": json.dumps({"value": "hello"}),
+                    "status": "completed",
+                }
+            )
+            completed = SimpleNamespace(
+                id="response_1",
+                output=[reasoning, function_call],
+                output_text="",
+            )
+            return _ResponsesStream(
+                [
+                    SimpleNamespace(
+                        type="response.output_item.done",
+                        item=function_call,
+                    ),
+                    SimpleNamespace(type="response.completed", response=completed),
+                ]
+            )
+        completed = SimpleNamespace(
+            id="response_2",
+            output=[
+                _ResponsesItem(
+                    {
+                        "type": "message",
+                        "id": "message_1",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [
+                            {"type": "output_text", "text": "finished", "annotations": []}
+                        ],
+                    }
+                )
+            ],
+            output_text="finished",
+        )
+        return _ResponsesStream(
+            [SimpleNamespace(type="response.completed", response=completed)]
+        )
+
+
+class _FakeOpenAI:
+    instance = None
+
+    def __init__(self, **_kwargs) -> None:
+        self.responses = _FakeResponses()
+        _FakeOpenAI.instance = self
+
+
+class _OpenAIChildConnection:
+    def __init__(self, context: dict[str, object]) -> None:
+        self.context = context
+        self.sent: list[dict[str, object]] = []
+        self.closed = False
+
+    def send(self, message: dict[str, object]) -> None:
+        self.sent.append(message)
+
+    def recv(self) -> dict[str, object]:
+        return {
+            "type": "tool_result",
+            "result": {"ok": True, "echo": "hello"},
+            "context": self.context,
+        }
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_openai_tool_loop_manages_response_history_without_response_ids(
+    monkeypatch,
+) -> None:
+    openai_module = ModuleType("openai")
+    openai_module.OpenAI = _FakeOpenAI
+    monkeypatch.setitem(sys.modules, "openai", openai_module)
+    context = {
+        "provider_tool_schemas": [
+            {
+                "name": "test.echo",
+                "description": "Return the supplied value.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"value": {"type": "string"}},
+                    "required": ["value"],
+                    "additionalProperties": False,
+                },
+            }
+        ]
+    }
+    connection = _OpenAIChildConnection(context)
+
+    provider._openai_child_main(
+        connection,
+        prompt="Use the tool.",
+        context=context,
+        model="test-model",
+        api_key="test-key",
+        reasoning_effort="high",
+        timeout_seconds=None,
+        max_turns=3,
+        clear_inherited_modules=False,
+    )
+
+    requests = _FakeOpenAI.instance.responses.requests
+    assert len(requests) == 2
+    assert all("previous_response_id" not in request for request in requests)
+    assert all(request["instructions"] for request in requests)
+    assert all(
+        request["include"] == ["reasoning.encrypted_content"]
+        for request in requests
+    )
+    second_input = requests[1]["input"]
+    assert [item["type"] for item in second_input[1:]] == [
+        "reasoning",
+        "function_call",
+        "function_call_output",
+    ]
+    assert second_input[1]["encrypted_content"] == "opaque-reasoning-state"
+    tool_output = json.loads(second_input[-1]["output"])
+    assert tool_output["ok"] is True
+    assert tool_output["echo"] == "hello"
+    assert any(message.get("type") == "done" for message in connection.sent)
+    assert connection.closed

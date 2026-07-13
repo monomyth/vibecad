@@ -39,6 +39,8 @@ TOOL_IMPL_DIR = Path(__file__).resolve().parent.parent / "tool_impl"
 TRANSACTION_EXEMPT = {
     # Enters native sketch edit mode; changes UI state, not document data.
     "partdesign.edit_sketch",
+    # Accepts native sketch edit mode; resetEdit owns the Sketcher transaction commit.
+    "sketcher.close_sketch",
     # Writes the project design document (a project file), not a FreeCAD doc.
     "project.update_design_document",
 }

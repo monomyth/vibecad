@@ -163,11 +163,7 @@ def reset_settings() -> None:
 
 
 def configured_dotenv_path() -> Path | None:
-    settings = load_settings()
-    if settings.resolved_dotenv_path is not None:
-        return settings.resolved_dotenv_path
-    cwd_dotenv = Path.cwd() / ".env"
-    return cwd_dotenv if cwd_dotenv.exists() else None
+    return load_settings().resolved_dotenv_path
 
 
 def fetch_models_for_provider(

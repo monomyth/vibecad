@@ -8,6 +8,7 @@ from importlib import import_module
 from typing import Any
 
 TOOL_MODULE_NAMES = (
+    "close_sketch",
     "draw_rectangle",
     "add_polyline",
     "add_arc",
