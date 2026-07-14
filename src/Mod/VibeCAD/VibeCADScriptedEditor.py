@@ -25,6 +25,7 @@ DEBOUNCE_MS = 500
 _controller: Any | None = None
 _preview_containers: dict[tuple[str, str], str] = {}
 _hidden_accepted: dict[tuple[str, str], list[str]] = {}
+_save_preview_restore: dict[str, tuple[str, str, str]] = {}
 _refresh_retry_pending = False
 
 
@@ -199,6 +200,8 @@ def _show_preview(
     engine: str,
     prepared: dict[str, Any],
     imported: list[dict[str, Any]],
+    *,
+    frame: bool = True,
 ) -> None:
     doc = App.ActiveDocument
     if doc is None or doc.Name != prepared["document_name"]:
@@ -235,10 +238,11 @@ def _show_preview(
             _warn(f"Could not style preview object {feature.Name}: {exc}")
     doc.recompute()
     _preview_containers[(_document_key(doc), model_id)] = container.Name
-    try:
-        Gui.activeDocument().activeView().fitAll()
-    except Exception as exc:
-        _warn(f"Could not frame scripted preview: {exc}")
+    if frame:
+        try:
+            Gui.activeDocument().activeView().fitAll()
+        except Exception as exc:
+            _warn(f"Could not frame scripted preview: {exc}")
 
 
 def _read_scad_project(entry: Path) -> dict[str, str]:
@@ -1294,6 +1298,52 @@ def active_preview_snapshot() -> dict[str, Any] | None:
     }
 
 
-def restore_preview_after_save() -> None:
-    if _controller is not None and _controller.model_id:
-        _controller.timer.start(0)
+def suspend_preview_for_save(doc: Any) -> list[dict[str, str]]:
+    document_key = _document_key(doc)
+    _save_preview_restore.pop(document_key, None)
+    if (
+        _controller is not None
+        and _controller.active_prepared is not None
+        and _controller.active_imported is not None
+        and _controller.active_engine
+        and _controller.preview_revision
+    ):
+        prepared = _controller.active_prepared
+        model_id = str(prepared.get("model_id") or "")
+        preview_name = _preview_containers.get((document_key, model_id), "")
+        if (
+            str(prepared.get("document_name") or "") == str(doc.Name)
+            and preview_name
+            and doc.getObject(preview_name) is not None
+        ):
+            _save_preview_restore[document_key] = (
+                _controller.active_engine,
+                model_id,
+                _controller.preview_revision,
+            )
+    return remove_all_previews(doc)
+
+
+def restore_preview_after_save(doc: Any) -> bool:
+    pending = _save_preview_restore.pop(_document_key(doc), None)
+    if pending is None or _controller is None:
+        return False
+    engine, model_id, revision = pending
+    prepared = _controller.active_prepared
+    if (
+        prepared is None
+        or _controller.active_imported is None
+        or _controller.active_engine != engine
+        or _controller.preview_revision != revision
+        or str(prepared.get("model_id") or "") != model_id
+        or str(prepared.get("document_name") or "") != str(doc.Name)
+        or str(prepared.get("revision") or "") != revision
+    ):
+        return False
+    _show_preview(
+        engine,
+        prepared,
+        _controller.active_imported,
+        frame=False,
+    )
+    return True

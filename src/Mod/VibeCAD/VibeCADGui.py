@@ -2492,9 +2492,9 @@ class _VibeCADDocumentObserver:
     def slotStartSaveDocument(self, doc, filepath) -> None:
         _snapshot_active_document_conversation(doc)
         try:
-            from VibeCADScriptedEditor import remove_all_previews
+            from VibeCADScriptedEditor import suspend_preview_for_save
 
-            remove_all_previews(doc)
+            suspend_preview_for_save(doc)
         except Exception as exc:
             _warn(f"VibeCAD preview cleanup before save failed: {exc}")
 
@@ -2503,7 +2503,7 @@ class _VibeCADDocumentObserver:
         try:
             from VibeCADScriptedEditor import restore_preview_after_save
 
-            restore_preview_after_save()
+            restore_preview_after_save(doc)
         except Exception as exc:
             _warn(f"VibeCAD preview restore after save failed: {exc}")
         _schedule_assistant_document_refresh()

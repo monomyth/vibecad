@@ -18,6 +18,7 @@ set(VibeCAD_Scripts
     VibeCADProject.py
     VibeCADSession.py
     VibeCADScriptedEditor.py
+    VibeCADScriptedOwnership.py
     VibeCADTools.py
     VibeCADTransactions.py
     VibeCADWorkbenchTools.py

@@ -2477,6 +2477,53 @@ bool StdCmdAxisCross::isActive()
 }
 
 //===========================================================================
+// VibeCAD_ToggleGrid
+//===========================================================================
+DEF_STD_CMD_AC(VibeCADCmdToggleGrid)
+
+VibeCADCmdToggleGrid::VibeCADCmdToggleGrid()
+    : Command("VibeCAD_ToggleGrid")
+{
+    sGroup = "Standard-View";
+    sMenuText = QT_TR_NOOP("Toggle &Grid");
+    sToolTipText = QT_TR_NOOP("Toggles the reference grid in 3D views");
+    sStatusTip = sToolTipText;
+    sWhatsThis = "VibeCAD_ToggleGrid";
+}
+
+void VibeCADCmdToggleGrid::activated(int iMsg)
+{
+    Q_UNUSED(iMsg);
+    doCommand(Command::Gui, "import VibeCADGrid; VibeCADGrid.toggle_grid()");
+
+    auto hGrp = App::GetApplication().GetParameterGroupByPath(
+        "User parameter:BaseApp/Preferences/Mod/Draft"
+    );
+    if (_pcAction) {
+        _pcAction->setBlockedChecked(hGrp->GetBool("alwaysShowGrid", false));
+    }
+}
+
+bool VibeCADCmdToggleGrid::isActive()
+{
+    auto hGrp = App::GetApplication().GetParameterGroupByPath(
+        "User parameter:BaseApp/Preferences/Mod/Draft"
+    );
+    const bool checked = hGrp->GetBool("alwaysShowGrid", false);
+    if (_pcAction && _pcAction->isChecked() != checked) {
+        _pcAction->setBlockedChecked(checked);
+    }
+    return true;
+}
+
+Action* VibeCADCmdToggleGrid::createAction()
+{
+    Action* pcAction = Command::createAction();
+    pcAction->setCheckable(true);
+    return pcAction;
+}
+
+//===========================================================================
 // Std_ViewExample1
 //===========================================================================
 DEF_STD_CMD_A(StdCmdViewExample1)
@@ -4315,6 +4362,7 @@ void CreateViewStdCommands()
     rcCmdMgr.addCommand(new StdCmdDemoMode());
     rcCmdMgr.addCommand(new StdCmdToggleNavigation());
     rcCmdMgr.addCommand(new StdCmdAxisCross());
+    rcCmdMgr.addCommand(new VibeCADCmdToggleGrid());
     rcCmdMgr.addCommand(new StdCmdSelBoundingBox());
     rcCmdMgr.addCommand(new StdCmdTreeViewActions());
     rcCmdMgr.addCommand(new StdCmdDockOverlay());

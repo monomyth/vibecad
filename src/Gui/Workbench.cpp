@@ -759,6 +759,7 @@ MenuItem* StdWorkbench::setupMenuBar() const
           << "Separator" << zoom << "Std_ViewDockUndockFullscreen"
           << "Std_ViewIvIssueCamPos"
           << "Std_AxisCross"
+          << "VibeCAD_ToggleGrid"
           << "Std_ToggleClipPlane"
           << "Std_TextureMapping"
 #ifdef BUILD_VR

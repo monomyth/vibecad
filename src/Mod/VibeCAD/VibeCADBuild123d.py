@@ -19,6 +19,12 @@ import time
 import uuid
 from typing import Any, Callable
 
+from VibeCADScriptedOwnership import (
+    delete_contained_objects,
+    delete_owned_model_objects,
+    owned_model_objects,
+)
+
 
 BUILD123D_VERSION = "0.11.1"
 RUNTIME_SCHEMA = "vibecad-build123d-runtime-v1"
@@ -661,14 +667,26 @@ def delete_model(
         )
     deleted_objects: list[str] = []
     if container is not None:
-        outputs = _output_objects(container)
-        deleted_objects.append(container.Name)
-        for body, feature in outputs.values():
-            deleted_objects.extend([body.Name, feature.Name])
-        for body, _feature in outputs.values():
-            doc.removeObject(body.Name)
-        doc.removeObject(container.Name)
+        deleted_objects = delete_owned_model_objects(doc, PROP_MODEL_ID, model_id)
         doc.recompute()
+        remaining = sorted(
+            {
+                name
+                for name in deleted_objects
+                if doc.getObject(name) is not None
+            }
+            | {
+                str(obj.Name)
+                for obj in owned_model_objects(doc, PROP_MODEL_ID, model_id)
+            }
+        )
+        if remaining:
+            return _failure(
+                "DELETE_FAILED",
+                "commit",
+                "FreeCAD retained model-owned objects after deletion.",
+                observed={"remaining_objects": remaining},
+            )
     shutil.rmtree(artifact_directory)
     return {
         "ok": True,
@@ -2137,11 +2155,11 @@ def commit_outputs(
 
     retained = set(prepared["expected_outputs"])
     removed: list[str] = []
-    for key, (body, _feature) in existing.items():
+    for key, (body, feature) in existing.items():
         if key in retained:
             continue
         removed.append(body.Name)
-        doc.removeObject(body.Name)
+        delete_contained_objects(doc, [body, feature])
 
     container.Label = prepared["model_name"]
     setattr(container, PROP_MODEL_ID, prepared["model_id"])

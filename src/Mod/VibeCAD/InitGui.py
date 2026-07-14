@@ -38,8 +38,7 @@ try:
         try:
             import VibeCADGrid
 
-            if VibeCADGrid.is_enabled():
-                VibeCADGrid.setup()
+            VibeCADGrid.setup()
         except Exception as exc:
             try:
                 import FreeCAD as _App

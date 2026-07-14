@@ -14,8 +14,13 @@ Behavior:
 - A lightweight observer on the MDI area initializes the grid for each 3D
   view at most once. Manually toggling the grid off in a view (e.g. via
   Draft's Toggle Grid) is respected: already-initialized views are skipped.
-- The whole feature sits behind the ``Mod/VibeCAD`` ``AlwaysShowGrid``
-  boolean preference (default: enabled) as a master kill-switch.
+- The native ``VibeCAD_ToggleGrid`` command owns the View-menu action. This
+  module only updates the global preference and existing per-view trackers;
+  when no GUI document is open it updates the preference without creating the
+  Draft Snapper or attempting to render a grid.
+- The automatic always-on-at-startup behavior sits behind the ``Mod/VibeCAD``
+  ``AlwaysShowGrid`` boolean preference (default: enabled) as a master
+  kill-switch.
 
 The module imports safely outside FreeCAD (guarded imports) so tooling such
 as linters and test collectors can load it.
@@ -87,13 +92,91 @@ def _get_snapper() -> Any:
     return snapper
 
 
+def _grid_should_always_show() -> bool:
+    """Return the current value of the Draft ``alwaysShowGrid`` preference."""
+    if App is None:
+        return False
+    return App.ParamGet(_DRAFT_PARAM_PATH).GetBool("alwaysShowGrid", False)
+
+
+def is_grid_visible() -> bool:
+    """Return True when the grid is visible in at least one 3D view.
+
+    Reads the actual tracker state so the answer stays correct even when the
+    grid was toggled through Draft's own command. Falls back to the
+    ``alwaysShowGrid`` preference before any tracker exists (e.g. at startup).
+    """
+    if App is None or not App.GuiUp:
+        return False
+    try:
+        import FreeCADGui as Gui
+
+        snapper = getattr(Gui, "Snapper", None)
+        if snapper is not None and snapper.trackers[1]:
+            return any(
+                bool(getattr(grid, "Visible", False)) for grid in snapper.trackers[1]
+            )
+    except Exception as exc:
+        _warn(f"grid visibility query failed: {exc}")
+    return _grid_should_always_show()
+
+
+def toggle_grid(show: bool | None = None) -> None:
+    """Show or hide the grid in every 3D view, current and future.
+
+    Writes the Draft ``alwaysShowGrid`` preference (so views opened later
+    follow suit) and flips all existing grid trackers. With ``show=None`` the
+    current visibility is inverted.
+    """
+    if App is None or not App.GuiUp:
+        return
+    try:
+        if show is None:
+            show = not is_grid_visible()
+        show = bool(show)
+        App.ParamGet(_DRAFT_PARAM_PATH).SetBool("alwaysShowGrid", show)
+
+        import FreeCADGui as Gui
+
+        # A native View-menu command remains available before a document is
+        # opened. In that state the preference is all that should change:
+        # creating Draft's Snapper would attempt to initialize view trackers
+        # without a 3D view.
+        if Gui.activeDocument() is None:
+            return
+
+        snapper = _get_snapper()
+        if show:
+            for grid in snapper.trackers[1]:
+                grid.show_always = True
+            # Turn on every grid tracker, then make sure the active view has
+            # one at all (creates it if needed) and align it to the working
+            # plane.
+            snapper.show()
+            snapper.setTrackers()
+        else:
+            for grid in snapper.trackers[1]:
+                grid.show_always = False
+                grid.off()
+    except Exception as exc:
+        _warn(f"grid toggle failed: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Per-view grid initialization
+# ---------------------------------------------------------------------------
+
+
 def _show_grid_in_active_view() -> None:
     """Initialize and show the grid for the active 3D view, at most once.
 
-    Views whose grid tracker already exists are skipped so a manual grid
-    toggle by the user is never fought.
+    Only acts while the Draft ``alwaysShowGrid`` preference is set (i.e. the
+    grid is toggled on). Views whose grid tracker already exists are skipped
+    so a manual grid toggle by the user is never fought.
     """
     if App is None or not App.GuiUp:
+        return
+    if not _grid_should_always_show():
         return
     try:
         from draftutils import gui_utils
@@ -110,8 +193,8 @@ def _show_grid_in_active_view() -> None:
             # previous wrapper of the same view); respect its current state.
             _seen_views.add(key)
             return
-        # Creates the per-view trackers; because alwaysShowGrid was seeded,
-        # the new grid gets show_always=True and is displayed immediately.
+        # Creates the per-view trackers; because alwaysShowGrid is set, the
+        # new grid gets show_always=True and is displayed immediately.
         snapper.setTrackers()
         _seen_views.add(key)
     except Exception as exc:
@@ -128,14 +211,9 @@ def _on_sub_window_activated(_window: Any = None) -> None:
         _warn(f"deferred grid update failed: {exc}")
 
 
-def setup() -> None:
-    """Seed preferences (once) and install the view observer (idempotent)."""
+def _install_view_observer() -> None:
+    """Install the MDI observer that grids new 3D views (idempotent)."""
     global _observer_installed
-    if App is None or not App.GuiUp:
-        return
-    if not is_enabled():
-        return
-    seed_grid_preferences()
     if _observer_installed:
         return
     try:
@@ -153,3 +231,18 @@ def setup() -> None:
         _on_sub_window_activated()
     except Exception as exc:
         _warn(f"observer installation failed: {exc}")
+
+
+def setup() -> None:
+    """Install the grid feature (idempotent).
+
+    Preference seeding is gated by the ``AlwaysShowGrid`` kill-switch, so the
+    grid only turns itself on at startup when the feature is enabled. The view
+    observer follows the Draft ``alwaysShowGrid`` preference for current and
+    future 3D views. View-menu ownership remains entirely native.
+    """
+    if App is None or not App.GuiUp:
+        return
+    if is_enabled():
+        seed_grid_preferences()
+    _install_view_observer()

@@ -24,6 +24,11 @@ from typing import Any, Callable
 import uuid
 
 from VibeCADPreferences import load_settings
+from VibeCADScriptedOwnership import (
+    delete_contained_objects,
+    delete_owned_model_objects,
+    owned_model_objects,
+)
 from VibeCADTools import tool_failure
 
 
@@ -1828,10 +1833,10 @@ def commit_outputs(
             )
         retained = {item["key"] for item in committed}
         removed = []
-        for key, (body, _feature) in existing.items():
+        for key, (body, feature) in existing.items():
             if key not in retained:
                 removed.append(body.Name)
-                doc.removeObject(body.Name)
+                delete_contained_objects(doc, [body, feature])
         fidelities = {item["fidelity"] for item in committed}
         overall_fidelity = next(iter(fidelities)) if len(fidelities) == 1 else "mixed"
         container.Label = prepared["model_name"]
@@ -1921,12 +1926,26 @@ def delete_model(service: Any, model_id: str, expected_revision: str, reason: st
         return _failure("DELETE_REASON_REQUIRED", "schema", "reason cannot be empty.")
     deleted_objects: list[str] = []
     if container is not None:
-        deleted_objects = [obj.Name for obj in list(getattr(container, "OutListRecursive", []) or [])]
-        deleted_objects.append(container.Name)
         doc.openTransaction("Delete OpenSCAD model")
         try:
-            doc.removeObject(container.Name)
+            deleted_objects = delete_owned_model_objects(doc, PROP_MODEL_ID, model_id)
             doc.recompute()
+            remaining = sorted(
+                {
+                    name
+                    for name in deleted_objects
+                    if doc.getObject(name) is not None
+                }
+                | {
+                    str(obj.Name)
+                    for obj in owned_model_objects(doc, PROP_MODEL_ID, model_id)
+                }
+            )
+            if remaining:
+                raise RuntimeError(
+                    "FreeCAD retained model-owned objects after deletion: "
+                    + ", ".join(remaining)
+                )
             doc.commitTransaction()
         except Exception as exc:
             doc.abortTransaction()
