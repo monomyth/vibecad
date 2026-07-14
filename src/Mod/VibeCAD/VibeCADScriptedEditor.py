@@ -25,6 +25,7 @@ DEBOUNCE_MS = 500
 _controller: Any | None = None
 _preview_containers: dict[tuple[str, str], str] = {}
 _hidden_accepted: dict[tuple[str, str], list[str]] = {}
+_refresh_retry_pending = False
 
 
 def _warn(message: str) -> None:
@@ -64,6 +65,16 @@ def _model_source_path(engine: str, model: dict[str, Any]) -> Path | None:
 def _add_string_property(obj: Any, name: str) -> None:
     if name not in list(getattr(obj, "PropertiesList", []) or []):
         obj.addProperty("App::PropertyString", name, "VibeCAD Preview")
+
+
+def _set_shaded_display(obj: Any) -> None:
+    modes = list(obj.ViewObject.listDisplayModes())
+    if "Shaded" not in modes:
+        raise RuntimeError(
+            f"Preview object {obj.Name} cannot use Shaded display mode. "
+            f"Available modes: {modes}"
+        )
+    obj.ViewObject.DisplayMode = "Shaded"
 
 
 def _accepted_objects(doc: Any, engine: str, model_id: str) -> list[Any]:
@@ -216,6 +227,7 @@ def _show_preview(
         feature.Shape = item["shape"]
         container.addObject(feature)
         try:
+            _set_shaded_display(feature)
             feature.ViewObject.ShapeColor = (0.18, 0.68, 0.86)
             feature.ViewObject.LineColor = (0.75, 0.92, 1.0)
             feature.ViewObject.Transparency = 18
@@ -1248,6 +1260,26 @@ def ensure_scripted_model_editor_registered() -> Any:
 
 
 def refresh_scripted_model_editor() -> None:
+    global _refresh_retry_pending
+    doc = App.ActiveDocument
+    if doc is not None and bool(getattr(doc, "Recomputing", False)):
+        if not _refresh_retry_pending:
+            from PySide import QtCore
+
+            _refresh_retry_pending = True
+
+            def retry() -> None:
+                global _refresh_retry_pending
+                _refresh_retry_pending = False
+                refresh_scripted_model_editor()
+
+            QtCore.QTimer.singleShot(100, retry)
+        return
+    _refresh_retry_pending = False
+    if doc is not None:
+        from VibeCADOpenSCAD import restore_output_display_modes
+
+        restore_output_display_modes(doc)
     if _controller is not None:
         _controller.refresh()
 

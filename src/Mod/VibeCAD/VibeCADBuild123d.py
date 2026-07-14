@@ -1644,6 +1644,18 @@ def _execution_required_changes(
 
 
 def _freecad_shape_facts(shape: Any) -> dict[str, Any]:
+    if shape is None or bool(shape.isNull()):
+        return {
+            "valid": False,
+            "is_null": True,
+            "solid_count": 0,
+            "face_count": 0,
+            "edge_count": 0,
+            "vertex_count": 0,
+            "volume_mm3": 0.0,
+            "surface_area_mm2": 0.0,
+            "state": "empty_shape",
+        }
     bounds = shape.BoundBox
     solids = list(shape.Solids)
     faces = list(shape.Faces)
@@ -1651,6 +1663,7 @@ def _freecad_shape_facts(shape: Any) -> dict[str, Any]:
     center = solids[0].CenterOfMass if len(solids) == 1 else bounds.Center
     facts = {
         "valid": bool(shape.isValid()),
+        "is_null": False,
         "solid_count": len(solids),
         "face_count": len(faces),
         "edge_count": len(edges),

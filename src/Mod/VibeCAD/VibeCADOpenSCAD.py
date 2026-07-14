@@ -670,6 +670,31 @@ def _output_objects(container: Any) -> dict[str, tuple[Any, Any]]:
     return outputs
 
 
+def _set_shaded_display(obj: Any) -> None:
+    view = getattr(obj, "ViewObject", None)
+    if view is None:
+        raise RuntimeError(f"OpenSCAD output {obj.Name} has no view provider.")
+    modes = list(view.listDisplayModes())
+    if "Shaded" not in modes:
+        raise RuntimeError(
+            f"OpenSCAD output {obj.Name} cannot use Shaded display mode. "
+            f"Available modes: {modes}"
+        )
+    if str(view.DisplayMode) != "Shaded":
+        view.DisplayMode = "Shaded"
+
+
+def restore_output_display_modes(doc: Any) -> list[str]:
+    """Restore the edge-free display contract for accepted OpenSCAD outputs."""
+    restored: list[str] = []
+    for container in _model_objects(doc):
+        for body, feature in _output_objects(container).values():
+            for obj in (body, feature):
+                _set_shaded_display(obj)
+                restored.append(str(obj.Name))
+    return restored
+
+
 def inspect_model(service: Any, model_id: str) -> dict[str, Any]:
     doc = service._active_document()
     if doc is None:
@@ -1472,9 +1497,23 @@ def _parse_diagnostics(stderr: str) -> list[dict[str, Any]]:
 
 
 def _shape_facts(shape: Any) -> dict[str, Any]:
+    if shape is None or bool(shape.isNull()):
+        return {
+            "valid": False,
+            "is_null": True,
+            "shape_type": "Null",
+            "solids": 0,
+            "faces": 0,
+            "edges": 0,
+            "vertices": 0,
+            "volume_mm3": 0.0,
+            "area_mm2": 0.0,
+            "state": "empty_shape",
+        }
     box = shape.BoundBox
     return {
         "valid": bool(shape.isValid()),
+        "is_null": False,
         "shape_type": str(shape.ShapeType),
         "solids": len(shape.Solids),
         "faces": len(shape.Faces),
@@ -1775,15 +1814,9 @@ def commit_outputs(
                 setattr(obj, PROP_OUTPUT_KEY, key)
                 setattr(obj, PROP_FIDELITY, item["fidelity"])
             feature.Shape = item["shape"]
-            if item["fidelity"] == "faceted_brep":
-                display_modes = list(feature.ViewObject.listDisplayModes())
-                if "Shaded" not in display_modes:
-                    raise RuntimeError(
-                        f"OpenSCAD output {key} cannot use the required Shaded display mode. "
-                        f"Available modes: {display_modes}"
-                    )
-                feature.ViewObject.DisplayMode = "Shaded"
             body.Tip = feature
+            _set_shaded_display(body)
+            _set_shaded_display(feature)
             committed.append(
                 {
                     "key": key,
