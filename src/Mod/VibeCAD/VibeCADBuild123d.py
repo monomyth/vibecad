@@ -1508,6 +1508,15 @@ def _runner_environment(staging: Path) -> dict[str, str]:
             "TMPDIR": str(staging),
         }
     )
+    if sys.platform == "win32":
+        # pathlib.Path.home() ignores HOME on Windows.  Keep build123d and
+        # IPython inside the isolated staging directory without exposing the
+        # user's real profile to the worker process.
+        home_drive, home_path = os.path.splitdrive(str(staging))
+        environment["USERPROFILE"] = str(staging)
+        if home_drive:
+            environment["HOMEDRIVE"] = home_drive
+            environment["HOMEPATH"] = home_path or "\\"
     return environment
 
 

@@ -574,6 +574,17 @@ def _prepare_stub_runner(tmp_path: Path, result: dict[str, Any]) -> dict[str, An
     }
 
 
+def test_build123d_runner_uses_an_isolated_home(tmp_path: Path) -> None:
+    environment = build123d._runner_environment(tmp_path)
+
+    assert environment["HOME"] == str(tmp_path)
+    if sys.platform == "win32":
+        drive, path = os.path.splitdrive(str(tmp_path))
+        assert environment["USERPROFILE"] == str(tmp_path)
+        assert environment["HOMEDRIVE"] == drive
+        assert environment["HOMEPATH"] == (path or "\\")
+
+
 FILLET_EVIDENCE = {
     "fillet_diagnostics": {
         "connected_components": [
