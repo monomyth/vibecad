@@ -38,6 +38,19 @@ _ALLOWED_IMPORT_ROOTS = frozenset(
 _FILLET_DIAGNOSTIC_BUDGET_SECONDS = 12.0
 _FILLET_DIAGNOSTIC_RADIUS_FACTORS = (1.0, 0.75, 0.5)
 
+_DISALLOWED_EXPORT_SYMBOLS = frozenset(
+    {
+        "ExportDXF",
+        "ExportSVG",
+        "Mesher",
+        "export_brep",
+        "export_gltf",
+        "export_step",
+        "export_stl",
+    }
+)
+_DISALLOWED_BUILD123D_SUBMODULES = frozenset({"exporters", "exporters3d", "mesher"})
+
 
 def _restricted_import(
     name: str,
@@ -48,9 +61,27 @@ def _restricted_import(
 ) -> Any:
     if level:
         raise ImportError("Relative imports are not allowed in build123d source.")
-    root = str(name or "").split(".", 1)[0]
+    parts = str(name or "").split(".")
+    root = parts[0]
     if root not in _ALLOWED_IMPORT_ROOTS:
         raise ImportError(f"Import is not allowed in build123d source: {root}")
+    if root == "build123d":
+        denied_modules = [
+            part for part in parts[1:] if part in _DISALLOWED_BUILD123D_SUBMODULES
+        ]
+        if denied_modules:
+            raise ImportError(
+                f"Exporter modules are not allowed in build123d source: {name}"
+            )
+        for item in fromlist or ():
+            symbol = str(item)
+            if (
+                symbol in _DISALLOWED_EXPORT_SYMBOLS
+                or symbol in _DISALLOWED_BUILD123D_SUBMODULES
+            ):
+                raise ImportError(
+                    f"Exporter symbols are not allowed in build123d source: {symbol}"
+                )
     return __import__(name, globals, locals, fromlist, level)
 
 
@@ -683,6 +714,38 @@ def _exception_kind(exc: BaseException, evidence: dict[str, Any]) -> str:
     return "python_execution_failure"
 
 
+def _remove_exporter_symbols(module: Any) -> None:
+    """Strip file-writing exporter entry points before user source executes.
+
+    The worker's own STEP export uses the OCP writer directly, so removing
+    the build123d exporter surface does not affect legitimate output flow.
+    """
+    targets: list[Any] = [module]
+    shape_type = getattr(module, "Shape", None)
+    if shape_type is not None:
+        targets.append(shape_type)
+    for target in targets:
+        for symbol in _DISALLOWED_EXPORT_SYMBOLS:
+            if symbol in getattr(target, "__dict__", {}):
+                try:
+                    delattr(target, symbol)
+                except (AttributeError, TypeError):
+                    pass
+    for submodule in _DISALLOWED_BUILD123D_SUBMODULES:
+        if submodule in getattr(module, "__dict__", {}):
+            try:
+                delattr(module, submodule)
+            except (AttributeError, TypeError):
+                pass
+    exported_names = getattr(module, "__all__", None)
+    if isinstance(exported_names, (list, tuple)):
+        denied = _DISALLOWED_EXPORT_SYMBOLS | _DISALLOWED_BUILD123D_SUBMODULES
+        safe_names = [name for name in exported_names if str(name) not in denied]
+        module.__all__ = (
+            tuple(safe_names) if isinstance(exported_names, tuple) else safe_names
+        )
+
+
 def _export_step_geometry(shape: Any, output_path: Path) -> None:
     from OCP.IFSelect import IFSelect_RetDone
     from OCP.STEPControl import STEPControl_AsIs, STEPControl_Writer
@@ -715,6 +778,7 @@ def run(request_path: Path, result_path: Path, site_packages: Path) -> int:
                 f"build123d runtime version is {actual_version!r}; "
                 f"expected {expected_version!r}."
             )
+        _remove_exporter_symbols(build123d)
 
         inputs: dict[str, Shape] = {}
         raw_inputs = request.get("inputs") or {}

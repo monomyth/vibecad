@@ -35,6 +35,7 @@
 #include <QAbstractSpinBox>
 #include <QByteArray>
 #include <QComboBox>
+#include <QListView>
 #include <QTextStream>
 #include <QFileInfo>
 #include <QFileOpenEvent>
@@ -383,6 +384,30 @@ bool WheelEventFilter::eventFilter(QObject* obj, QEvent* ev)
         }
         else if (ev->type() == QEvent::Wheel) {
             return !sb->hasFocus();
+        }
+    }
+    return false;
+}
+
+// ----------------------------------------------------------------------------
+
+ListViewStyleRelayoutFilter::ListViewStyleRelayoutFilter(QObject* parent)
+    : QObject(parent)
+{}
+
+bool ListViewStyleRelayoutFilter::eventFilter(QObject* obj, QEvent* ev)
+{
+    // Qt caches QListView row positions before the application stylesheet is
+    // fully polished, so rows overlap when the stylesheet enlarges items via
+    // min-height/padding. Queue a one-shot relayout on first show to rebuild
+    // the row cache with correct stylesheet metrics.
+    if (ev->type() == QEvent::Show) {
+        auto view = qobject_cast<QListView*>(obj);
+        if (view && !view->property("fc_styleRelayoutDone").toBool()) {
+            view->setProperty("fc_styleRelayoutDone", true);
+            QTimer::singleShot(0, view, [view]() {
+                view->doItemsLayout();
+            });
         }
     }
     return false;

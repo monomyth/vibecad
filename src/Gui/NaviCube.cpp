@@ -36,7 +36,6 @@
 
 #include <Inventor/SbVec3f.h>
 #include <Inventor/SbVec4f.h>
-#include <Inventor/SbViewVolume.h>
 #include <Inventor/actions/SoAction.h>
 #include <Inventor/actions/SoGLRenderAction.h>
 #include <Inventor/elements/SoViewportRegionElement.h>
@@ -46,7 +45,6 @@
 #include <Inventor/nodes/SoCallback.h>
 #include <Inventor/nodes/SoOrthographicCamera.h>
 #include <Inventor/nodes/SoSeparator.h>
-#include <Inventor/projectors/SbSphereSheetProjector.h>
 
 #include <QApplication>
 #include <QCursor>
@@ -174,7 +172,6 @@ private:
     bool hovering = false;
     SbVec2s rotateStartPos = SbVec2s(0, 0);
     SbVec2s lastRotatePos = SbVec2s(0, 0);
-    SbSphereSheetProjector rotateProjector;
     QElapsedTimer clickTimer;
     PickId lastClickPickId = PickId::None;
     PickId pendingHiliteId = PickId::None;
@@ -372,12 +369,7 @@ void NaviCubeImplementation::setLabels(const std::vector<std::string>& labels)
 NaviCubeImplementation::NaviCubeImplementation(Gui::View3DInventorViewer* viewer)
     : baseColor {226, 232, 239}
     , hiliteColor {170, 226, 255}
-    , rotateProjector(SbSphere(SbVec3f(0, 0, 0), 0.8F))
 {
-    SbViewVolume rotateViewVolume;
-    rotateViewVolume.ortho(-1, 1, -1, 1, -1, 1);
-    rotateProjector.setViewVolume(rotateViewVolume);
-
     soNaviCube = new Gui::SoNaviCube();
     soNaviCube->ref();
 
@@ -1190,9 +1182,7 @@ bool NaviCubeImplementation::mouseMoved(short x, short y)
         }
 
         if (rotating) {
-            auto* camera = viewer->getSoRenderManager()->getCamera();
-            auto* navigation = viewer->navigationStyle();
-            if (camera && navigation) {
+            if (auto* navigation = viewer->navigationStyle()) {
                 const float cubeSize = static_cast<float>(physicalCubeWidgetSize);
                 const auto normalizePosition = [cubeSize](const SbVec2s& position) {
                     return SbVec2f(
@@ -1201,25 +1191,10 @@ bool NaviCubeImplementation::mouseMoved(short x, short y)
                     );
                 };
 
-                SbMatrix cameraOrientation;
-                camera->orientation.getValue().getValue(cameraOrientation);
-                rotateProjector.setWorkingSpace(cameraOrientation);
-                rotateProjector.project(normalizePosition(lastRotatePos));
-
-                SbRotation rotation;
-                rotateProjector.projectAndGetRotation(
-                    normalizePosition(SbVec2s(x, y)),
-                    rotation
+                navigation->spin_simplified(
+                    normalizePosition(lastRotatePos),
+                    normalizePosition(SbVec2s(x, y))
                 );
-                const float sensitivity = navigation->getSensitivity();
-                if (sensitivity > 1.0F) {
-                    SbVec3f axis;
-                    float radians = 0.0F;
-                    rotation.getValue(axis, radians);
-                    rotation.setValue(axis, sensitivity * radians);
-                }
-                rotation.invert();
-                navigation->reorientCamera(camera, rotation);
             }
             lastRotatePos.setValue(x, y);
             return true;

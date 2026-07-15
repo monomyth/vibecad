@@ -42,6 +42,7 @@
 #include <QFontMetrics>
 #include <QImageReader>
 #include <QMessageBox>
+#include <QMenu>
 #include <QPainter>
 #include <QPointer>
 #include <QSignalBlocker>
@@ -776,6 +777,25 @@ Gui::Action* StdCmdDrawStyle::createAction()
     auto pcAction = new Gui::ActionGroup(this, Gui::getMainWindow());
     pcAction->setDropDownMenu(true);
     pcAction->setIsMode(true);
+
+    QObject::connect(pcAction, &Gui::ActionGroup::aboutToShow, [](QMenu* menu) {
+        if (!menu) {
+            return;
+        }
+
+        Command* gridCommand =
+            Application::Instance->commandManager().getCommandByName("VibeCAD_ToggleGrid");
+        if (!gridCommand) {
+            return;
+        }
+
+        if (!menu->property("VibeCADGridActionAdded").toBool()) {
+            menu->addSeparator();
+            gridCommand->addTo(menu);
+            menu->setProperty("VibeCADGridActionAdded", true);
+        }
+        gridCommand->testActive();
+    });
     applyCommandData(this->className(), pcAction);
 
     QAction* a0 = pcAction->addAction(QString());

@@ -38,6 +38,7 @@ OPENSCAD_VERSION = "2021.01"
 MAX_SOURCE_BYTES = 1_000_000
 MAX_PROJECT_SOURCE_BYTES = 4_000_000
 DEFAULT_TIMEOUT_SECONDS = 300.0
+DEFAULT_MEMORY_LIMIT_BYTES = 6 * 1024 * 1024 * 1024
 
 PROP_MODEL_ID = "VibeCADOpenSCADModelId"
 PROP_SOURCE = "VibeCADOpenSCADSource"
@@ -678,7 +679,9 @@ def _output_objects(container: Any) -> dict[str, tuple[Any, Any]]:
 def _set_shaded_display(obj: Any) -> None:
     view = getattr(obj, "ViewObject", None)
     if view is None:
-        raise RuntimeError(f"OpenSCAD output {obj.Name} has no view provider.")
+        # Headless sessions (FreeCADCmd) have no view providers; the display
+        # contract only applies when a GUI is attached.
+        return
     modes = list(view.listDisplayModes())
     if "Shaded" not in modes:
         raise RuntimeError(
@@ -695,6 +698,8 @@ def restore_output_display_modes(doc: Any) -> list[str]:
     for container in _model_objects(doc):
         for body, feature in _output_objects(container).values():
             for obj in (body, feature):
+                if getattr(obj, "ViewObject", None) is None:
+                    continue
                 _set_shaded_display(obj)
                 restored.append(str(obj.Name))
     return restored
@@ -1281,6 +1286,108 @@ def _terminate_process(process: subprocess.Popen[Any]) -> None:
         process.wait(timeout=3.0)
 
 
+def _configured_budgets() -> tuple[float, int]:
+    """Preference-driven (timeout_seconds, memory_limit_bytes) with safe defaults."""
+    timeout = DEFAULT_TIMEOUT_SECONDS
+    memory = DEFAULT_MEMORY_LIMIT_BYTES
+    try:
+        settings = load_settings()
+        configured_timeout = float(
+            getattr(settings, "scripted_timeout_seconds", 0.0) or 0.0
+        )
+        configured_memory_mb = int(
+            getattr(settings, "scripted_memory_limit_mb", 0) or 0
+        )
+    except Exception:
+        return timeout, memory
+    if configured_timeout > 0:
+        timeout = configured_timeout
+    if configured_memory_mb > 0:
+        memory = configured_memory_mb * 1024 * 1024
+    return timeout, memory
+
+
+def _resolved_budgets(
+    timeout_seconds: float | None, memory_limit_bytes: int | None
+) -> tuple[float, int]:
+    """Resolve explicit budget overrides against preference-driven values."""
+    if timeout_seconds is not None and memory_limit_bytes is not None:
+        return float(timeout_seconds), int(memory_limit_bytes)
+    configured_timeout, configured_memory = _configured_budgets()
+    return (
+        float(timeout_seconds) if timeout_seconds is not None else configured_timeout,
+        int(memory_limit_bytes)
+        if memory_limit_bytes is not None
+        else configured_memory,
+    )
+
+
+def _process_memory_bytes(pid: int) -> int | None:
+    """Best-effort peak resident memory of ``pid`` in bytes; None when unknown."""
+    if sys.platform == "win32":
+        return _windows_process_memory_bytes(pid)
+    try:
+        status = Path(f"/proc/{pid}/status").read_text(
+            encoding="ascii", errors="replace"
+        )
+    except OSError:
+        return None
+    fallback: int | None = None
+    for line in status.splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        if line.startswith("VmHWM:"):
+            try:
+                return int(parts[1]) * 1024
+            except ValueError:
+                return None
+        if line.startswith("VmRSS:"):
+            try:
+                fallback = int(parts[1]) * 1024
+            except ValueError:
+                fallback = None
+    return fallback
+
+
+def _windows_process_memory_bytes(pid: int) -> int | None:
+    """Peak working-set bytes for ``pid`` via psapi; None when unavailable."""
+    import ctypes
+    from ctypes import wintypes
+
+    class _MemoryCounters(ctypes.Structure):
+        _fields_ = [
+            ("cb", wintypes.DWORD),
+            ("PageFaultCount", wintypes.DWORD),
+            ("PeakWorkingSetSize", ctypes.c_size_t),
+            ("WorkingSetSize", ctypes.c_size_t),
+            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+            ("PagefileUsage", ctypes.c_size_t),
+            ("PeakPagefileUsage", ctypes.c_size_t),
+        ]
+
+    process_query_limited_information = 0x1000
+    try:
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        psapi = ctypes.windll.psapi  # type: ignore[attr-defined]
+    except AttributeError:
+        return None
+    handle = kernel32.OpenProcess(process_query_limited_information, False, int(pid))
+    if not handle:
+        return None
+    try:
+        counters = _MemoryCounters()
+        counters.cb = ctypes.sizeof(counters)
+        if not psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):
+            return None
+        return int(counters.PeakWorkingSetSize)
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def _run_process(
     command: list[str],
     *,
@@ -1288,6 +1395,7 @@ def _run_process(
     environment: dict[str, str],
     cancellation_check: Callable[[], bool] | None,
     deadline: float,
+    memory_limit_bytes: int = 0,
 ) -> dict[str, Any]:
     creation_flags = int(getattr(subprocess, "CREATE_NO_WINDOW", 0)) if sys.platform == "win32" else 0
     process = subprocess.Popen(
@@ -1305,15 +1413,27 @@ def _run_process(
     )
     cancelled = False
     timed_out = False
+    memory_exceeded = False
+    observed_memory: int | None = None
+    next_memory_check = 0.0
     while process.poll() is None:
         if cancellation_check is not None and cancellation_check():
             cancelled = True
             break
-        if time.monotonic() >= deadline:
+        now = time.monotonic()
+        if now >= deadline:
             timed_out = True
             break
+        if memory_limit_bytes > 0 and now >= next_memory_check:
+            next_memory_check = now + 0.5
+            usage = _process_memory_bytes(process.pid)
+            if usage is not None:
+                observed_memory = usage
+                if usage > memory_limit_bytes:
+                    memory_exceeded = True
+                    break
         time.sleep(0.1)
-    if cancelled or timed_out:
+    if cancelled or timed_out or memory_exceeded:
         _terminate_process(process)
     stdout, stderr = process.communicate()
     return {
@@ -1322,6 +1442,8 @@ def _run_process(
         "stderr": stderr[-16000:],
         "cancelled": cancelled,
         "timed_out": timed_out,
+        "memory_exceeded": memory_exceeded,
+        "observed_memory_bytes": observed_memory,
     }
 
 
@@ -1358,8 +1480,12 @@ def execute_prepared(
     prepared: dict[str, Any],
     *,
     cancellation_check: Callable[[], bool] | None = None,
-    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+    timeout_seconds: float | None = None,
+    memory_limit_bytes: int | None = None,
 ) -> dict[str, Any]:
+    timeout_seconds, memory_limit_bytes = _resolved_budgets(
+        timeout_seconds, memory_limit_bytes
+    )
     staging = Path(prepared["staging"])
     started = time.monotonic()
     deadline = started + timeout_seconds
@@ -1374,6 +1500,7 @@ def execute_prepared(
             environment=environment,
             cancellation_check=cancellation_check,
             deadline=deadline,
+            memory_limit_bytes=memory_limit_bytes,
         )
     except Exception as exc:
         return _failure(
@@ -1386,6 +1513,21 @@ def execute_prepared(
         return _failure("RUN_CANCELLED", "execution", "OpenSCAD execution was cancelled.", observed=compiler)
     if compiler["timed_out"]:
         return _failure("EXECUTION_TIMEOUT", "execution", f"OpenSCAD exceeded {timeout_seconds:.0f} seconds.", observed=compiler)
+    if compiler.get("memory_exceeded"):
+        return _failure(
+            "MEMORY_LIMIT_EXCEEDED",
+            "execution",
+            "OpenSCAD exceeded the "
+            f"{memory_limit_bytes // (1024 * 1024)} MB memory budget.",
+            observed={
+                "memory_limit_bytes": memory_limit_bytes,
+                "observed_memory_bytes": compiler.get("observed_memory_bytes"),
+                "compiler": compiler,
+            },
+            required_changes=[
+                {"reduce_model_memory_or_increase_memory_budget_preference": True}
+            ],
+        )
     if compiler["returncode"] != 0 or not source_output.is_file():
         return _failure(
             "OPENSCAD_COMPILE_FAILED" if exact else "OPENSCAD_RENDER_FAILED",
@@ -1412,6 +1554,7 @@ def execute_prepared(
             environment=converter_environment,
             cancellation_check=cancellation_check,
             deadline=deadline,
+            memory_limit_bytes=memory_limit_bytes,
         )
     except Exception as exc:
         return _failure(
@@ -1435,6 +1578,21 @@ def execute_prepared(
             "conversion",
             f"OpenSCAD geometry conversion exceeded {timeout_seconds:.0f} seconds.",
             observed=converter,
+        )
+    if converter.get("memory_exceeded"):
+        return _failure(
+            "MEMORY_LIMIT_EXCEEDED",
+            "conversion",
+            "OpenSCAD geometry conversion exceeded the "
+            f"{memory_limit_bytes // (1024 * 1024)} MB memory budget.",
+            observed={
+                "memory_limit_bytes": memory_limit_bytes,
+                "observed_memory_bytes": converter.get("observed_memory_bytes"),
+                "converter": converter,
+            },
+            required_changes=[
+                {"reduce_model_memory_or_increase_memory_budget_preference": True}
+            ],
         )
     if converter["returncode"] != 0 or not conversion.get("ok"):
         exact_required_changes = (
@@ -1534,6 +1692,111 @@ def _shape_facts(shape: Any) -> dict[str, Any]:
     }
 
 
+_OUTPUT_KEY_PATTERN = re.compile(r"^Solid (\d+)$")
+_BBOX_TOLERANCE_MM = 1.0e-6
+_SCALAR_RELATIVE_TOLERANCE = 1.0e-6
+
+
+def _output_key_ordinal(key: str) -> int | None:
+    match = _OUTPUT_KEY_PATTERN.match(str(key))
+    return int(match.group(1)) if match else None
+
+
+def _output_key_sort(key: str) -> tuple[bool, int, str]:
+    ordinal = _output_key_ordinal(key)
+    return (ordinal is None, ordinal if ordinal is not None else 0, str(key))
+
+
+def _scalars_match(left: float, right: float) -> bool:
+    scale = max(abs(left), abs(right), 1.0)
+    return abs(left - right) <= _SCALAR_RELATIVE_TOLERANCE * scale
+
+
+def _bboxes_match(left: Any, right: Any) -> bool:
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        return False
+    for corner in ("min", "max"):
+        first = left.get(corner)
+        second = right.get(corner)
+        if (
+            not isinstance(first, (list, tuple))
+            or not isinstance(second, (list, tuple))
+            or len(first) != 3
+            or len(second) != 3
+        ):
+            return False
+        for a, b in zip(first, second):
+            if abs(float(a) - float(b)) > _BBOX_TOLERANCE_MM:
+                return False
+    return True
+
+
+def _solid_facts_match(new_facts: dict[str, Any], prior_facts: dict[str, Any]) -> bool:
+    for count_key in ("solids", "faces", "edges", "vertices"):
+        if int(new_facts.get(count_key) or 0) != int(prior_facts.get(count_key) or 0):
+            return False
+    for scalar_key in ("volume_mm3", "area_mm2"):
+        if not _scalars_match(
+            float(new_facts.get(scalar_key) or 0.0),
+            float(prior_facts.get(scalar_key) or 0.0),
+        ):
+            return False
+    return _bboxes_match(new_facts.get("bbox"), prior_facts.get("bbox"))
+
+
+def match_output_keys(
+    new_facts: list[dict[str, Any]],
+    accepted_output_facts: dict[str, Any],
+) -> list[str]:
+    """Assign stable output keys to freshly imported solids.
+
+    Solids that are geometrically identical to an accepted output keep that
+    output's key so untouched solids retain their FreeCAD bodies across
+    edits.  Remaining solids fall back to the prior positional pairing (so a
+    single edited solid keeps its key), and only solids in excess of the
+    accepted outputs receive brand-new keys.  Accepted keys left unassigned
+    are simply absent from the result, which makes commit_outputs remove
+    their bodies exactly as before.
+    """
+    prior_facts: dict[str, dict[str, Any]] = {}
+    for key, value in (accepted_output_facts or {}).items():
+        shape = value.get("shape") if isinstance(value, dict) else None
+        prior_facts[str(key)] = shape if isinstance(shape, dict) else {}
+
+    assigned: list[str | None] = [None] * len(new_facts)
+    unused_prior = dict(prior_facts)
+    # Pass 1: geometrically identical solids retain their accepted keys.
+    for index, facts in enumerate(new_facts):
+        for key in sorted(unused_prior, key=_output_key_sort):
+            if _solid_facts_match(facts, unused_prior[key]):
+                assigned[index] = key
+                del unused_prior[key]
+                break
+    # Pass 2: pair remaining solids with remaining accepted keys in ordinal
+    # order, matching the historical positional assignment exactly when no
+    # solid was recognised in pass 1.
+    remaining_keys = sorted(unused_prior, key=_output_key_sort)
+    remaining_indices = [index for index, key in enumerate(assigned) if key is None]
+    for index, key in zip(remaining_indices, remaining_keys):
+        assigned[index] = key
+    # Pass 3: brand-new solids get fresh ordinal keys that never recycle a
+    # key seen during this edit.
+    used = {key for key in assigned if key is not None} | set(prior_facts)
+    ordinals = [_output_key_ordinal(key) for key in used]
+    next_ordinal = max((value for value in ordinals if value is not None), default=0) + 1
+    for index, key in enumerate(assigned):
+        if key is not None:
+            continue
+        candidate = f"Solid {next_ordinal:03d}"
+        while candidate in used:
+            next_ordinal += 1
+            candidate = f"Solid {next_ordinal:03d}"
+        assigned[index] = candidate
+        used.add(candidate)
+        next_ordinal += 1
+    return [key for key in assigned if key is not None]
+
+
 def _recompute_errors(summary: Any) -> list[dict[str, Any]]:
     if not isinstance(summary, dict):
         raise RuntimeError("FreeCAD returned an invalid recompute diagnostic payload.")
@@ -1608,14 +1871,16 @@ def import_validated_outputs(prepared: dict[str, Any], execution: dict[str, Any]
                 required_changes=[{"select_conversion_mode": fidelity}],
             )
         )
+    facts_list = [_shape_facts(solid) for solid in solids]
+    keys = match_output_keys(facts_list, prepared.get("accepted_output_facts") or {})
     return [
         {
-            "key": f"Solid {index:03d}",
+            "key": key,
             "shape": solid,
             "fidelity": fidelity,
-            "shape_facts": _shape_facts(solid),
+            "shape_facts": facts,
         }
-        for index, solid in enumerate(solids, start=1)
+        for key, solid, facts in zip(keys, solids, facts_list)
     ]
 
 

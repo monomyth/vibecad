@@ -69,13 +69,17 @@ def _add_string_property(obj: Any, name: str) -> None:
 
 
 def _set_shaded_display(obj: Any) -> None:
-    modes = list(obj.ViewObject.listDisplayModes())
+    view = getattr(obj, "ViewObject", None)
+    if view is None:
+        # Headless sessions have no view providers; skip display styling.
+        return
+    modes = list(view.listDisplayModes())
     if "Shaded" not in modes:
         raise RuntimeError(
             f"Preview object {obj.Name} cannot use Shaded display mode. "
             f"Available modes: {modes}"
         )
-    obj.ViewObject.DisplayMode = "Shaded"
+    view.DisplayMode = "Shaded"
 
 
 def _accepted_objects(doc: Any, engine: str, model_id: str) -> list[Any]:
@@ -505,8 +509,8 @@ class ScriptedEditorController:
         self.active_imported: list[dict[str, Any]] | None = None
         self.active_engine = ""
         self.preview_revision = ""
+        self.editor_active = False
         self._connect()
-        self.refresh()
 
     def child(self, kind: Any, name: str):
         return self.root.findChild(kind, name)
@@ -551,6 +555,7 @@ class ScriptedEditorController:
         return self.child(self.QtWidgets.QPushButton, name)
 
     def _connect(self):
+        self.dock.visibilityChanged.connect(self._visibility_changed)
         self.selector.currentIndexChanged.connect(self._select_model)
         self.fidelity_selector.currentIndexChanged.connect(self._fidelity_changed)
         self.file_selector.currentIndexChanged.connect(self._select_source_file)
@@ -567,13 +572,101 @@ class ScriptedEditorController:
         self.button("VibeScriptedExport").clicked.connect(self.export)
         self.diagnostics.itemActivated.connect(self._diagnostic_activated)
 
+    def _visibility_changed(self, visible: bool):
+        if visible:
+            self.activate()
+        else:
+            self.deactivate()
+
+    def activate(self):
+        if self.editor_active:
+            self.refresh()
+            return
+        self.editor_active = True
+        self.refresh()
+
+    def deactivate(self):
+        self.editor_active = False
+        self._deselect_model(update_selector=True)
+
+    def automated_update_started(
+        self, engine: str, document_name: str, model_id: str
+    ):
+        if (
+            not self.editor_active
+            or engine != self.engine
+            or model_id != self.model_id
+            or document_name != str(getattr(App.ActiveDocument, "Name", "") or "")
+        ):
+            return
+        self._clear_source_watch()
+        self._cancel_preview(restore_accepted=True)
+        self.status.setText(f"AI is updating {self.model.get('label') or model_id}...")
+        self._update_actions()
+
+    def automated_update_finished(
+        self,
+        engine: str,
+        document_name: str,
+        model_id: str,
+    ):
+        if (
+            not self.editor_active
+            or engine != self.engine
+            or model_id != self.model_id
+            or document_name != str(getattr(App.ActiveDocument, "Name", "") or "")
+        ):
+            return
+        self._cancel_preview(restore_accepted=True)
+        self.refresh(model_id)
+
+    def _clear_source_watch(self):
+        for path in list(self.watcher.files()):
+            self.watcher.removePath(path)
+
+    def _clear_model_fields(self):
+        self.model_id = ""
+        self.working_revision = ""
+        self.accepted_revision = ""
+        self.model = {}
+        self.source_path = None
+        self.source_files = {}
+        self.current_source_file = "model.scad"
+
+    def _clear_editors(self):
+        self.loading = True
+        self.source.clear()
+        self.parameters.clear()
+        self.file_selector.clear()
+        self.loading = False
+
+    def _deselect_model(self, *, update_selector: bool):
+        self._cancel_preview(restore_accepted=True)
+        self._clear_source_watch()
+        self._clear_model_fields()
+        self._clear_editors()
+        try:
+            remove_all_previews()
+        except Exception as exc:
+            _warn(f"Could not remove scripted previews while deselecting: {exc}")
+        if update_selector and self.selector.count():
+            self.loading = True
+            none_index = self.selector.findData("")
+            self.selector.setCurrentIndex(max(0, none_index))
+            self.loading = False
+        self.status.setText("No scripted model selected.")
+        self.diagnostics.clear()
+        self._update_actions()
+
     def refresh(self, preferred_model_id: str = ""):
+        if not self.editor_active:
+            return
         service = get_service()
         next_engine = service.partdesign_engine()
         if next_engine != self.engine:
             self._cancel_preview(restore_accepted=True)
-            self.model_id = ""
-            self.model = {}
+            self._clear_source_watch()
+            self._clear_model_fields()
         self.engine = next_engine
         scripted = self.engine in {"build123d", "openscad"}
         self.root.setEnabled(scripted)
@@ -581,8 +674,11 @@ class ScriptedEditorController:
         self.file_selector.setVisible(self.engine == "openscad")
         self.fidelity_selector.setVisible(self.engine == "openscad")
         if not scripted:
+            self._clear_source_watch()
+            self._clear_model_fields()
             self.loading = True
             self.selector.clear()
+            self.selector.addItem("None", "")
             self.source.clear()
             self.parameters.clear()
             self.file_selector.clear()
@@ -597,29 +693,31 @@ class ScriptedEditorController:
         target = preferred_model_id or self.model_id
         self.loading = True
         self.selector.clear()
+        self.selector.addItem("None", "")
         for item in models:
             label = str(item.get("label") or item.get("model_id"))
             state = str(item.get("state") or "")
             self.selector.addItem(f"{label}  [{state}]", str(item.get("model_id") or ""))
-        index = self.selector.findData(target) if target else (0 if self.selector.count() else -1)
+        index = self.selector.findData(target) if target else 0
+        if index < 0:
+            index = 0
         if index >= 0:
             self.selector.setCurrentIndex(index)
         self.loading = False
-        if index >= 0:
+        if index > 0:
             self._load_model(str(self.selector.itemData(index) or ""))
         else:
-            self.model_id = ""
-            self.source.clear()
-            self.parameters.clear()
-            self.file_selector.clear()
-            self.source_files = {}
-            self.status.setText(f"No {self.engine} models in this document. Create or import one.")
+            self._deselect_model(update_selector=False)
         self._update_actions()
 
     def _select_model(self, index: int):
         if self.loading or index < 0:
             return
-        self._load_model(str(self.selector.itemData(index) or ""))
+        model_id = str(self.selector.itemData(index) or "")
+        if not model_id:
+            self._deselect_model(update_selector=False)
+            return
+        self._load_model(model_id)
 
     def _load_model(self, model_id: str):
         if not model_id:
@@ -700,8 +798,6 @@ class ScriptedEditorController:
         self._install_highlighter()
 
     def _install_highlighter(self):
-        from PySide import QtGui
-
         old = getattr(self.root, "_vibecad_source_highlighter", None)
         if old is not None:
             old.setDocument(None)
@@ -710,9 +806,8 @@ class ScriptedEditorController:
         self.root._vibecad_source_highlighter = highlighter_class(self.source.document(), self.engine)
 
     def _watch_source(self):
-        for path in self.watcher.files():
-            self.watcher.removePath(path)
-        if self.source_path is None:
+        self._clear_source_watch()
+        if not self.editor_active or not self.model_id or self.source_path is None:
             return
         directory = self.source_path.parent
         for name in self.source_files:
@@ -721,22 +816,30 @@ class ScriptedEditorController:
                 self.watcher.addPath(str(path))
 
     def _source_changed(self):
-        if self.loading or not self.model_id:
+        if self.loading or not self.editor_active or not self.model_id:
             return
         self.source_files[self.current_source_file] = self.source.toPlainText()
+        self._invalidate_preview_for_edit()
         self.status.setText("Working source changed. Rendering preview...")
         self.timer.start()
         self._update_actions()
 
     def _parameters_changed(self):
-        if self.loading or not self.model_id:
+        if self.loading or not self.editor_active or not self.model_id:
             return
+        self._invalidate_preview_for_edit()
         self.status.setText("Parameters changed. Rendering preview...")
         self.timer.start()
 
     def _fidelity_changed(self, _index: int):
-        if self.loading or self.engine != "openscad" or not self.model_id:
+        if (
+            self.loading
+            or not self.editor_active
+            or self.engine != "openscad"
+            or not self.model_id
+        ):
             return
+        self._invalidate_preview_for_edit()
         self.status.setText("OpenSCAD conversion mode changed. Rendering preview...")
         self.timer.start()
 
@@ -747,6 +850,8 @@ class ScriptedEditorController:
         return mode
 
     def _external_file_changed(self, path: str):
+        if not self.editor_active or not self.model_id:
+            return
         source_path = Path(path)
         if not source_path.is_file():
             return
@@ -766,6 +871,7 @@ class ScriptedEditorController:
         if content == previous:
             self._watch_source()
             return
+        self._invalidate_preview_for_edit()
         if relative == self.current_source_file and content != self.source.toPlainText():
             cursor_position = self.source.textCursor().position()
             self.loading = True
@@ -774,9 +880,11 @@ class ScriptedEditorController:
             cursor.setPosition(min(cursor_position, len(content)))
             self.source.setTextCursor(cursor)
             self.loading = False
-        self.status.setText(f"External source change detected in {relative}. Rendering preview...")
-        self.timer.start()
+        self.status.setText(
+            f"External source updated in {relative}. Press Render to preview it."
+        )
         self._watch_source()
+        self._update_actions()
 
     def _parse_parameters(self) -> dict[str, Any] | None:
         try:
@@ -789,8 +897,15 @@ class ScriptedEditorController:
             return None
         return value
 
+    def _invalidate_preview_for_edit(self):
+        self._cancel_preview(restore_accepted=True)
+
     def render(self):
-        if not self.model_id or self.engine not in {"build123d", "openscad"}:
+        if (
+            not self.editor_active
+            or not self.model_id
+            or self.engine not in {"build123d", "openscad"}
+        ):
             return
         parameters = self._parse_parameters()
         if parameters is None:
@@ -869,14 +984,18 @@ class ScriptedEditorController:
 
     def _preview_completed(self, event: dict[str, Any]):
         event_engine = str(event.get("engine") or "")
+        prepared = event["prepared"]
         if (
-            int(event.get("generation") or 0) != self.generation
+            not self.editor_active
+            or int(event.get("generation") or 0) != self.generation
             or event_engine != self.engine
+            or str(prepared.get("model_id") or "") != self.model_id
+            or str(prepared.get("document_name") or "")
+            != str(getattr(App.ActiveDocument, "Name", "") or "")
         ):
-            _engine_api(event_engine).cleanup_prepared(event["prepared"])
+            _engine_api(event_engine).cleanup_prepared(prepared)
             return
         self.button("VibeScriptedRender").setEnabled(True)
-        prepared = event["prepared"]
         execution = event["execution"]
         api = _engine_api(event_engine)
         if not execution.get("ok"):
@@ -922,6 +1041,9 @@ class ScriptedEditorController:
         ):
             self.status.setText("The current working revision has no valid preview to accept.")
             return
+        self.generation += 1
+        self.timer.stop()
+        self._clear_source_watch()
         api = _engine_api(self.active_engine)
         doc = App.ActiveDocument
         if doc is not None:
@@ -936,6 +1058,7 @@ class ScriptedEditorController:
         except Exception as exc:
             payload = getattr(exc, "payload", None)
             self._show_failure(payload if isinstance(payload, dict) else {"error": str(exc)})
+            self._watch_source()
             return
         api.cleanup_prepared(self.active_prepared)
         self.active_prepared = None
@@ -954,12 +1077,15 @@ class ScriptedEditorController:
         if not self.model_id:
             return
         self.generation += 1
+        self.timer.stop()
+        self._clear_source_watch()
         api = _engine_api(self.engine)
         try:
             result = api.revert_working_to_accepted(get_service(), self.model_id)
         except Exception as exc:
             payload = getattr(exc, "payload", None)
             self._show_failure(payload if isinstance(payload, dict) else {"error": str(exc)})
+            self._watch_source()
             return
         if self.active_prepared is not None:
             api.cleanup_prepared(self.active_prepared)
@@ -1128,6 +1254,11 @@ class ScriptedEditorController:
     def _cancel_preview(self, *, restore_accepted: bool) -> None:
         self.generation += 1
         self.timer.stop()
+        prepared_document_name = ""
+        if self.active_prepared is not None:
+            prepared_document_name = str(
+                self.active_prepared.get("document_name") or ""
+            )
         if self.active_prepared is not None and self.active_engine:
             _engine_api(self.active_engine).cleanup_prepared(self.active_prepared)
         active_model_id = self.model_id
@@ -1136,7 +1267,11 @@ class ScriptedEditorController:
         self.active_imported = None
         self.active_engine = ""
         self.preview_revision = ""
-        doc = App.ActiveDocument
+        doc = None
+        if prepared_document_name:
+            doc = dict(App.listDocuments()).get(prepared_document_name)
+        if doc is None:
+            doc = App.ActiveDocument
         if doc is not None and active_model_id:
             remove_preview(doc, active_model_id, restore_accepted=restore_accepted)
 
@@ -1191,19 +1326,24 @@ class ScriptedEditorController:
             self.source.goto_line(line)
 
     def _update_actions(self):
-        scripted = self.engine in {"build123d", "openscad"}
+        scripted = self.editor_active and self.engine in {"build123d", "openscad"}
         self.button("VibeScriptedNew").setEnabled(scripted)
-        self.button("VibeScriptedImport").setEnabled(self.engine == "openscad")
-        self.button("VibeScriptedRender").setEnabled(bool(self.model_id))
+        self.button("VibeScriptedImport").setEnabled(
+            scripted and self.engine == "openscad"
+        )
+        self.button("VibeScriptedRender").setEnabled(
+            bool(scripted and self.model_id)
+        )
         self.button("VibeScriptedAccept").setEnabled(
-            bool(self.active_prepared)
+            scripted
+            and bool(self.active_prepared)
             and self.preview_revision == self.working_revision
         )
         self.button("VibeScriptedRevert").setEnabled(
-            bool(self.model_id and self.accepted_revision)
+            bool(scripted and self.model_id and self.accepted_revision)
         )
         self.button("VibeScriptedExport").setEnabled(
-            bool(self.model_id and self.accepted_revision)
+            bool(scripted and self.model_id and self.accepted_revision)
         )
 
 
@@ -1233,10 +1373,10 @@ def show_scripted_model_editor() -> None:
         _controller = ScriptedEditorController(dock)
     elif _controller is None or _controller.dock is not dock:
         _controller = ScriptedEditorController(dock)
-    else:
-        _controller.refresh()
     dock.show()
     dock.raise_()
+    if not _controller.editor_active:
+        _controller.activate()
 
 
 def ensure_scripted_model_editor_registered() -> Any:
@@ -1255,10 +1395,12 @@ def ensure_scripted_model_editor_registered() -> Any:
             dock.setWidget(widget)
         dock.setMinimumWidth(540)
         dock.setMinimumHeight(300)
-        _controller = ScriptedEditorController(dock)
         dock.hide()
+        _controller = ScriptedEditorController(dock)
     elif _controller is None or _controller.dock is not dock:
         _controller = ScriptedEditorController(dock)
+        if dock.isVisible():
+            _controller.activate()
     dock.toggleViewAction().setVisible(True)
     return dock
 
@@ -1281,9 +1423,15 @@ def refresh_scripted_model_editor() -> None:
         return
     _refresh_retry_pending = False
     if doc is not None:
-        from VibeCADOpenSCAD import restore_output_display_modes
+        from VibeCADBuild123d import (
+            restore_output_display_modes as restore_build123d_display_modes,
+        )
+        from VibeCADOpenSCAD import (
+            restore_output_display_modes as restore_openscad_display_modes,
+        )
 
-        restore_output_display_modes(doc)
+        restore_openscad_display_modes(doc)
+        restore_build123d_display_modes(doc)
     if _controller is not None:
         _controller.refresh()
 
@@ -1296,6 +1444,20 @@ def active_preview_snapshot() -> dict[str, Any] | None:
         "model_id": _controller.model_id,
         "working_revision": _controller.working_revision,
     }
+
+
+def automated_model_update_started(
+    engine: str, document_name: str, model_id: str
+) -> None:
+    if _controller is not None:
+        _controller.automated_update_started(engine, document_name, model_id)
+
+
+def automated_model_update_finished(
+    engine: str, document_name: str, model_id: str
+) -> None:
+    if _controller is not None:
+        _controller.automated_update_finished(engine, document_name, model_id)
 
 
 def suspend_preview_for_save(doc: Any) -> list[dict[str, str]]:

@@ -65,6 +65,7 @@ private:
     void checkQtSvgImageFormatSupport();
     void setToolBarIconSize();
     void setWheelEventFilter();
+    void setListViewStyleRelayoutFilter();
     void setLocale();
     void setCursorFlashing();
     void applyStartupTheme();

@@ -29,13 +29,17 @@ if [[ ! -f "${module_directory}/build123d_worker.py" ]]; then
     exit 1
 fi
 
+smoke_runtime() {
+    "${python_executable}" -I -S -c \
+        "import sys; sys.path.insert(0, sys.argv[1]); import build123d; assert build123d.__version__ == '0.11.1'; namespace = {}; exec('from build123d import *', namespace, namespace); box = namespace['Box'](2, 3, 5); assert abs(float(box.volume) - 30.0) < 1.0e-9" \
+        "${site_packages}"
+}
+
 runtime_spec_hash="$(sha256sum "${requirements}" "$0" | sha256sum | awk '{print $1}')"
 if [[ -f "${stamp}" ]] \
   && [[ "$(tr -d '\r\n' < "${stamp}")" == "${runtime_spec_hash}" ]] \
   && [[ -d "${site_packages}/build123d-0.11.1.dist-info" ]]; then
-    "${python_executable}" -I -S -c \
-        "import sys; sys.path.insert(0, sys.argv[1]); import build123d; assert build123d.__version__ == '0.11.1'" \
-        "${site_packages}"
+    smoke_runtime
     echo "VibeCAD isolated build123d runtime is current"
     exit 0
 fi
@@ -49,7 +53,6 @@ mkdir -p "${site_packages}"
     --target "${site_packages}" \
     -r "${requirements}"
 
-"${python_executable}" -I -S -c \
-    "import sys; sys.path.insert(0, sys.argv[1]); import build123d; assert build123d.__version__ == '0.11.1'; print('VibeCAD isolated build123d runtime ok')" \
-    "${site_packages}"
+smoke_runtime
+echo "VibeCAD isolated build123d runtime ok"
 printf '%s\n' "${runtime_spec_hash}" > "${stamp}"

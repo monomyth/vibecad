@@ -227,6 +227,7 @@ void StartupPostProcess::execute()
     checkQtSvgImageFormatSupport();
     setToolBarIconSize();
     setWheelEventFilter();
+    setListViewStyleRelayoutFilter();
     setLocale();
     setCursorFlashing();
     applyStartupTheme();
@@ -298,6 +299,14 @@ void StartupPostProcess::setWheelEventFilter()
         auto filter = new WheelEventFilter(qtApp);
         qtApp->installEventFilter(filter);
     }
+}
+
+void StartupPostProcess::setListViewStyleRelayoutFilter()
+{
+    // work around Qt caching QListView row geometry before the stylesheet is
+    // fully polished, which makes rows overlap with themes that enlarge items
+    auto filter = new ListViewStyleRelayoutFilter(qtApp);
+    qtApp->installEventFilter(filter);
 }
 
 void StartupPostProcess::setLocale()

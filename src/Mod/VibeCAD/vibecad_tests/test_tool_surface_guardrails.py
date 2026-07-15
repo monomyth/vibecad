@@ -5,9 +5,11 @@
 Four invariants are enforced:
 
 1. No orphan tools — every registered tool spec is surfaced through
-   ``CORE_PROVIDER_TOOLS`` or at least one workbench pack. A tool registered
-   without pack membership fails this test, so legacy or experimental tools
-   cannot silently become callable by default.
+   ``CORE_PROVIDER_TOOLS``, at least one workbench pack, or one of the
+   scripted-engine session surfaces (``BUILD123D_PROVIDER_TOOLS`` /
+   ``OPENSCAD_PROVIDER_TOOLS``). A tool registered without any surface
+   fails this test, so legacy or experimental tools cannot silently
+   become callable by default.
 2. No dangling names — every name in ``CORE_PROVIDER_TOOLS`` and every pack
    ``tool_names``/``required_adjacent_tool_names`` entry resolves to a
    registered, validating :class:`ToolSpec`.
@@ -41,6 +43,13 @@ TRANSACTION_EXEMPT = {
     "partdesign.edit_sketch",
     # Accepts native sketch edit mode; resetEdit owns the Sketcher transaction commit.
     "sketcher.close_sketch",
+}
+
+# Runner-handled engine tools carry only a spec in tool_impl; their document
+# mutations run inside the engine module, so search it for markers too.
+ENGINE_MODULES = {
+    "build123d": TOOL_IMPL_DIR.parent / "VibeCADBuild123d.py",
+    "openscad": TOOL_IMPL_DIR.parent / "VibeCADOpenSCAD.py",
 }
 
 TRANSACTION_MARKERS = ("run_freecad_transaction", "openTransaction")
@@ -87,30 +96,45 @@ def core_tools() -> frozenset[str]:
     return frozenset(session.CORE_PROVIDER_TOOLS)
 
 
+@pytest.fixture(scope="module")
+def engine_tools() -> frozenset[str]:
+    import VibeCADSession as session
+
+    return frozenset(
+        session.BUILD123D_PROVIDER_TOOLS | session.OPENSCAD_PROVIDER_TOOLS
+    )
+
+
 def _surfaced_names(
-    core_tools: frozenset[str], packs: list[dict[str, Any]]
+    core_tools: frozenset[str],
+    packs: list[dict[str, Any]],
+    engine_tools: frozenset[str] = frozenset(),
 ) -> set[str]:
-    surfaced = set(core_tools)
+    surfaced = set(core_tools) | set(engine_tools)
     for pack in packs:
         surfaced.update(pack["tool_names"])
         surfaced.update(pack.get("required_adjacent_tool_names", ()))
     return surfaced
 
 
-def test_no_orphan_tools(specs, packs, core_tools) -> None:
-    """1. Every registered tool must belong to core or at least one pack."""
-    orphans = sorted(set(specs) - _surfaced_names(core_tools, packs))
+def test_no_orphan_tools(specs, packs, core_tools, engine_tools) -> None:
+    """1. Every registered tool must belong to core, a pack, or an engine."""
+    orphans = sorted(set(specs) - _surfaced_names(core_tools, packs, engine_tools))
     assert not orphans, (
-        "Tools registered but not surfaced by CORE_PROVIDER_TOOLS or any "
-        f"workbench pack (add to a pack or remove the registration): {orphans}"
+        "Tools registered but not surfaced by CORE_PROVIDER_TOOLS, any "
+        "workbench pack, or an engine session surface (add to one or remove "
+        f"the registration): {orphans}"
     )
 
 
-def test_no_dangling_names(specs, packs, core_tools) -> None:
+def test_no_dangling_names(specs, packs, core_tools, engine_tools) -> None:
     """2. Every surfaced name must resolve to a registered spec."""
-    dangling = sorted(_surfaced_names(core_tools, packs) - set(specs))
+    dangling = sorted(
+        _surfaced_names(core_tools, packs, engine_tools) - set(specs)
+    )
     assert not dangling, (
-        f"Names surfaced by core/packs with no registered tool spec: {dangling}"
+        "Names surfaced by core/packs/engines with no registered tool spec: "
+        f"{dangling}"
     )
 
 
@@ -144,9 +168,14 @@ def test_write_tools_run_in_transactions(specs) -> None:
     for name, (spec, path, _) in sorted(specs.items()):
         if spec.safety in read_levels or name in TRANSACTION_EXEMPT:
             continue
+        module_paths = [path]
+        engine_module = ENGINE_MODULES.get(name.split(".", 1)[0])
+        if engine_module is not None:
+            module_paths.append(engine_module)
         if not any(
             marker in source
-            for source in _module_sources_with_local_imports(path)
+            for module_path in module_paths
+            for source in _module_sources_with_local_imports(module_path)
             for marker in TRANSACTION_MARKERS
         ):
             offenders.append(name)

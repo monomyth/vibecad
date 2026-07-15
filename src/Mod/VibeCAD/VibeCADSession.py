@@ -916,6 +916,16 @@ def make_provider_tool_runner(
                 _emit(
                     progress_callback,
                     {
+                        "event": "scripted_model_update_started",
+                        "engine": "openscad",
+                        "document_name": prepared["document_name"],
+                        "model_id": prepared["model_id"],
+                        "revision": prepared["revision"],
+                    },
+                )
+                _emit(
+                    progress_callback,
+                    {
                         "event": "openscad_execution_started",
                         "model_name": prepared["model_name"],
                     },
@@ -988,6 +998,18 @@ def make_provider_tool_runner(
                             payload["observed"] = observed
                     cleanup_prepared(prepared)
             assert payload is not None
+            if prepared is not None:
+                _emit(
+                    progress_callback,
+                    {
+                        "event": "scripted_model_update_finished",
+                        "engine": "openscad",
+                        "document_name": prepared["document_name"],
+                        "model_id": prepared["model_id"],
+                        "revision": prepared["revision"],
+                        "ok": bool(payload.get("ok")),
+                    },
+                )
             return finalize(payload)
         if tool_name in BUILD123D_RUNNER_TOOLS:
             from VibeCADBuild123d import (
@@ -1006,6 +1028,16 @@ def make_provider_tool_runner(
                 prepared = _on_document_thread(
                     document_thread_dispatch,
                     lambda: prepare_execution(service, tool_name, args),
+                )
+                _emit(
+                    progress_callback,
+                    {
+                        "event": "scripted_model_update_started",
+                        "engine": "build123d",
+                        "document_name": prepared["document_name"],
+                        "model_id": prepared["model_id"],
+                        "revision": prepared["revision"],
+                    },
                 )
                 _emit(
                     progress_callback,
@@ -1082,6 +1114,18 @@ def make_provider_tool_runner(
                             payload["observed"] = observed
                     cleanup_prepared(prepared)
             assert payload is not None
+            if prepared is not None:
+                _emit(
+                    progress_callback,
+                    {
+                        "event": "scripted_model_update_finished",
+                        "engine": "build123d",
+                        "document_name": prepared["document_name"],
+                        "model_id": prepared["model_id"],
+                        "revision": prepared["revision"],
+                        "ok": bool(payload.get("ok")),
+                    },
+                )
             return finalize(payload)
         try:
             raw = _on_document_thread(

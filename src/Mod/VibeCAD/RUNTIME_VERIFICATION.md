@@ -21,8 +21,62 @@ manual checklist for deleted tools.
 - Sketcher exposes native translation only; hand-built copy/mirror/offset/array modes
   were deleted.
 
+## Automated Engine Verification
+
+The scripted engines (build123d and OpenSCAD) are verified by an automated pytest
+suite in `vibecad_tests/` (run with `pytest src/Mod/VibeCAD/vibecad_tests`), not by
+manual checklists. `test_engine_contracts.py` exercises both engines' contracts
+directly, without a GUI session:
+
+- Source policy: disallowed imports/calls/dunder access, size and syntax limits,
+  NUL bytes, and unsafe project-relative paths are rejected with
+  `SOURCE_POLICY_VIOLATION` and offending line numbers.
+- Exporter escape hatch: build123d sources using `export_step`/`export_stl`/
+  `export_brep`/`export_gltf`/`ExportSVG`/`ExportDXF`/`Mesher` or importing
+  `build123d.exporters`/`exporters3d`/`mesher` are rejected at validation, and the
+  sidecar worker independently denies those imports and strips the symbols from the
+  `build123d` module and `Shape` class before user code runs. Its filtered
+  `build123d.__all__` keeps normal `from build123d import *` modeling source valid
+  without exposing the file-writing symbols.
+- Source edits: non-unique or zero-match edits fail with structured edit errors;
+  single-match edits re-validate the whole source.
+- Revision integrity: content-addressed revision hashes are stable, ignore
+  parameter key order, and change with every hashed field; artifacts whose
+  recorded revision or source no longer match are rejected
+  (`MODEL_ARTIFACT_REVISION_MISMATCH`).
+- Failure-evidence contract (corrected): a failed sidecar execution returns a
+  structured failure payload — `ok`/`failure_code`/`failure_stage`/`error`/
+  `requested`/`observed`/`required_changes`/`retry_same_call` — instead of raising.
+  build123d failures carry `observed.exception_evidence` (including the fillet
+  diagnostic ladder's per-component working radii in `required_changes`);
+  OpenSCAD compile failures carry parsed `observed.diagnostics` with
+  severity/file/line. A runner that cannot start or produces no result returns
+  `RUNNER_START_FAILED`/a structured failure rather than an exception.
+- Transactional parity: both engines' accept and delete paths run inside FreeCAD
+  document transactions; stub-document tests assert open→commit ordering on
+  success and open→abort with no orphaned objects on failure, and recompute
+  errors during accept raise structured commit failures.
+- Display contract: accepted bodies/features are set to Shaded in GUI sessions,
+  commits succeed headlessly when `ViewObject` is `None`, and display modes are
+  restored on document reload for both engines.
+- Output identity: OpenSCAD solids keep their accepted output keys across edits
+  when geometrically unchanged, new solids receive fresh never-recycled keys, and
+  removed solids' keys are not reassigned.
+- Resource budgets: timeout and memory budgets come from preferences
+  (`ScriptedTimeoutSeconds`/`ScriptedMemoryLimitMB`, defaults 300 s / 6144 MB) with
+  explicit-override support; a parent-side watchdog terminates workers exceeding
+  the memory budget on POSIX and Windows and returns `MEMORY_LIMIT_EXCEEDED` with
+  observed usage.
+
+Guardrail tests (`test_tool_surface_guardrails.py`) additionally verify that the
+build123d/OpenSCAD engine tools are surfaced (no orphans) and that their write
+tools carry document-transaction markers.
+
 ## Verified In This Build
 
+- The automated engine suite above passes in full, and
+  `ruff check --select F,E9` is clean across `VibeCADBuild123d.py`,
+  `VibeCADOpenSCAD.py`, `build123d_worker.py`, and `openscad_freecad_worker.py`.
 - Every tool module imports and every JSON Schema validates.
 - Registry, pack, handler signature, duplicate, orphan, dangling-name, and workbench
   ownership audits pass.

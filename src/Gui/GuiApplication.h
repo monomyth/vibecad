@@ -92,4 +92,20 @@ public:
     bool eventFilter(QObject* obj, QEvent* ev) override;
 };
 
+/** Works around a Qt layout-caching bug where QListView caches item row
+ * positions before the application stylesheet is fully polished, causing
+ * rows to overlap when the stylesheet enlarges items (min-height/padding).
+ * On the first Show event of any QListView-derived widget a single
+ * doItemsLayout() is queued so the row cache is rebuilt with the correct
+ * stylesheet metrics. Other widget types are not affected.
+ */
+class ListViewStyleRelayoutFilter: public QObject
+{
+    Q_OBJECT
+
+public:
+    explicit ListViewStyleRelayoutFilter(QObject* parent);
+    bool eventFilter(QObject* obj, QEvent* ev) override;
+};
+
 }  // namespace Gui

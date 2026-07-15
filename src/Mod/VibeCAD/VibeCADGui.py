@@ -1593,6 +1593,29 @@ def _handle_progress_event(
     dock: Any,
     event: dict[str, Any],
 ) -> None:
+    event_name = str(event.get("event") or "")
+    if event_name in {
+        "scripted_model_update_started",
+        "scripted_model_update_finished",
+    }:
+        try:
+            from VibeCADScriptedEditor import (
+                automated_model_update_finished,
+                automated_model_update_started,
+            )
+
+            arguments = (
+                str(event.get("engine") or ""),
+                str(event.get("document_name") or ""),
+                str(event.get("model_id") or ""),
+            )
+            if event_name == "scripted_model_update_started":
+                automated_model_update_started(*arguments)
+            else:
+                automated_model_update_finished(*arguments)
+        except Exception as exc:
+            _warn(f"VibeCAD scripted editor synchronization failed: {exc}")
+        return
     if event.get("event") == "provider_text_delta":
         _append_live_delta(str(event.get("text") or ""))
         return

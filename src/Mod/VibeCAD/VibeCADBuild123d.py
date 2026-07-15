@@ -19,6 +19,7 @@ import time
 import uuid
 from typing import Any, Callable
 
+from VibeCADPreferences import load_settings
 from VibeCADScriptedOwnership import (
     delete_contained_objects,
     delete_owned_model_objects,
@@ -84,6 +85,18 @@ _DISALLOWED_CALLS = frozenset(
         "__import__",
     }
 )
+_DISALLOWED_EXPORT_SYMBOLS = frozenset(
+    {
+        "ExportDXF",
+        "ExportSVG",
+        "Mesher",
+        "export_brep",
+        "export_gltf",
+        "export_step",
+        "export_stl",
+    }
+)
+_DISALLOWED_BUILD123D_SUBMODULES = frozenset({"exporters", "exporters3d", "mesher"})
 _runtime_health_cache: dict[str, Any] | None = None
 
 
@@ -246,21 +259,67 @@ def validate_source(source: str) -> None:
                 violations.append(
                     {"line": node.lineno, "reason": f"imports not allowed: {denied}"}
                 )
+            for alias in node.names:
+                parts = alias.name.split(".")
+                if parts[0] == "build123d" and any(
+                    part in _DISALLOWED_BUILD123D_SUBMODULES for part in parts[1:]
+                ):
+                    violations.append(
+                        {
+                            "line": node.lineno,
+                            "reason": f"exporter module not allowed: {alias.name}",
+                        }
+                    )
         elif isinstance(node, ast.ImportFrom):
-            root = str(node.module or "").split(".", 1)[0]
+            module = str(node.module or "")
+            parts = module.split(".")
+            root = parts[0]
             if root not in _ALLOWED_IMPORT_ROOTS:
                 violations.append(
                     {"line": node.lineno, "reason": f"import not allowed: {root}"}
                 )
+            elif root == "build123d":
+                if any(part in _DISALLOWED_BUILD123D_SUBMODULES for part in parts[1:]):
+                    violations.append(
+                        {
+                            "line": node.lineno,
+                            "reason": f"exporter module not allowed: {module}",
+                        }
+                    )
+                for alias in node.names:
+                    if alias.name in _DISALLOWED_EXPORT_SYMBOLS:
+                        violations.append(
+                            {
+                                "line": node.lineno,
+                                "reason": (
+                                    f"exporter import not allowed: {alias.name}"
+                                ),
+                            }
+                        )
         elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
             if node.func.id in _DISALLOWED_CALLS:
                 violations.append(
                     {"line": node.lineno, "reason": f"call not allowed: {node.func.id}"}
                 )
-        elif isinstance(node, ast.Attribute) and node.attr.startswith("__"):
+        elif isinstance(node, ast.Name) and node.id in _DISALLOWED_EXPORT_SYMBOLS:
             violations.append(
-                {"line": node.lineno, "reason": f"dunder access not allowed: {node.attr}"}
+                {"line": node.lineno, "reason": f"exporter access not allowed: {node.id}"}
             )
+        elif isinstance(node, ast.Attribute):
+            if node.attr.startswith("__"):
+                violations.append(
+                    {
+                        "line": node.lineno,
+                        "reason": f"dunder access not allowed: {node.attr}",
+                    }
+                )
+            elif node.attr in _DISALLOWED_EXPORT_SYMBOLS:
+                violations.append(
+                    {
+                        "line": node.lineno,
+                        "reason": f"exporter access not allowed: {node.attr}",
+                    }
+                )
     if violations:
         raise Build123dFailure(
             _failure(
@@ -667,25 +726,33 @@ def delete_model(
         )
     deleted_objects: list[str] = []
     if container is not None:
-        deleted_objects = delete_owned_model_objects(doc, PROP_MODEL_ID, model_id)
-        doc.recompute()
-        remaining = sorted(
-            {
-                name
-                for name in deleted_objects
-                if doc.getObject(name) is not None
-            }
-            | {
-                str(obj.Name)
-                for obj in owned_model_objects(doc, PROP_MODEL_ID, model_id)
-            }
-        )
-        if remaining:
+        doc.openTransaction("Delete build123d model")
+        try:
+            deleted_objects = delete_owned_model_objects(doc, PROP_MODEL_ID, model_id)
+            doc.recompute()
+            remaining = sorted(
+                {
+                    name
+                    for name in deleted_objects
+                    if doc.getObject(name) is not None
+                }
+                | {
+                    str(obj.Name)
+                    for obj in owned_model_objects(doc, PROP_MODEL_ID, model_id)
+                }
+            )
+            if remaining:
+                raise RuntimeError(
+                    "FreeCAD retained model-owned objects after deletion: "
+                    + ", ".join(remaining)
+                )
+            doc.commitTransaction()
+        except Exception as exc:
+            doc.abortTransaction()
             return _failure(
                 "DELETE_FAILED",
                 "commit",
-                "FreeCAD retained model-owned objects after deletion.",
-                observed={"remaining_objects": remaining},
+                f"build123d model deletion failed: {exc}",
             )
     shutil.rmtree(artifact_directory)
     return {
@@ -1353,6 +1420,7 @@ def prepare_execution(
             shape.exportStep(str(staging / relative))
             input_files[alias] = str(relative)
 
+        configured_timeout, configured_memory = _configured_budgets()
         request = {
             "schema": "vibecad-build123d-execution-v1",
             "build123d_version": BUILD123D_VERSION,
@@ -1361,8 +1429,8 @@ def prepare_execution(
             "inputs": input_files,
             "expected_outputs": expected_outputs,
             "output_directory": "outputs",
-            "memory_limit_bytes": DEFAULT_MEMORY_LIMIT_BYTES,
-            "cpu_limit_seconds": DEFAULT_CPU_LIMIT_SECONDS,
+            "memory_limit_bytes": configured_memory,
+            "cpu_limit_seconds": max(DEFAULT_CPU_LIMIT_SECONDS, int(configured_timeout)),
             "output_limit_bytes": DEFAULT_OUTPUT_LIMIT_BYTES,
         }
         _write_json(staging / "request.json", request)
@@ -1443,12 +1511,118 @@ def _runner_environment(staging: Path) -> dict[str, str]:
     return environment
 
 
+def _configured_budgets() -> tuple[float, int]:
+    """Preference-driven (timeout_seconds, memory_limit_bytes) with safe defaults."""
+    timeout = DEFAULT_TIMEOUT_SECONDS
+    memory = DEFAULT_MEMORY_LIMIT_BYTES
+    try:
+        settings = load_settings()
+        configured_timeout = float(
+            getattr(settings, "scripted_timeout_seconds", 0.0) or 0.0
+        )
+        configured_memory_mb = int(
+            getattr(settings, "scripted_memory_limit_mb", 0) or 0
+        )
+    except Exception:
+        return timeout, memory
+    if configured_timeout > 0:
+        timeout = configured_timeout
+    if configured_memory_mb > 0:
+        memory = configured_memory_mb * 1024 * 1024
+    return timeout, memory
+
+
+def _resolved_budgets(
+    timeout_seconds: float | None, memory_limit_bytes: int | None
+) -> tuple[float, int]:
+    """Resolve explicit budget overrides against preference-driven values."""
+    if timeout_seconds is not None and memory_limit_bytes is not None:
+        return float(timeout_seconds), int(memory_limit_bytes)
+    configured_timeout, configured_memory = _configured_budgets()
+    return (
+        float(timeout_seconds) if timeout_seconds is not None else configured_timeout,
+        int(memory_limit_bytes)
+        if memory_limit_bytes is not None
+        else configured_memory,
+    )
+
+
+def _process_memory_bytes(pid: int) -> int | None:
+    """Best-effort peak resident memory of ``pid`` in bytes; None when unknown."""
+    if sys.platform == "win32":
+        return _windows_process_memory_bytes(pid)
+    try:
+        status = Path(f"/proc/{pid}/status").read_text(
+            encoding="ascii", errors="replace"
+        )
+    except OSError:
+        return None
+    fallback: int | None = None
+    for line in status.splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        if line.startswith("VmHWM:"):
+            try:
+                return int(parts[1]) * 1024
+            except ValueError:
+                return None
+        if line.startswith("VmRSS:"):
+            try:
+                fallback = int(parts[1]) * 1024
+            except ValueError:
+                fallback = None
+    return fallback
+
+
+def _windows_process_memory_bytes(pid: int) -> int | None:
+    """Peak working-set bytes for ``pid`` via psapi; None when unavailable."""
+    import ctypes
+    from ctypes import wintypes
+
+    class _MemoryCounters(ctypes.Structure):
+        _fields_ = [
+            ("cb", wintypes.DWORD),
+            ("PageFaultCount", wintypes.DWORD),
+            ("PeakWorkingSetSize", ctypes.c_size_t),
+            ("WorkingSetSize", ctypes.c_size_t),
+            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+            ("PagefileUsage", ctypes.c_size_t),
+            ("PeakPagefileUsage", ctypes.c_size_t),
+        ]
+
+    process_query_limited_information = 0x1000
+    try:
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        psapi = ctypes.windll.psapi  # type: ignore[attr-defined]
+    except AttributeError:
+        return None
+    handle = kernel32.OpenProcess(process_query_limited_information, False, int(pid))
+    if not handle:
+        return None
+    try:
+        counters = _MemoryCounters()
+        counters.cb = ctypes.sizeof(counters)
+        if not psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):
+            return None
+        return int(counters.PeakWorkingSetSize)
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def execute_prepared(
     prepared: dict[str, Any],
     *,
     cancellation_check: Callable[[], bool] | None = None,
-    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+    timeout_seconds: float | None = None,
+    memory_limit_bytes: int | None = None,
 ) -> dict[str, Any]:
+    timeout_seconds, memory_limit_bytes = _resolved_budgets(
+        timeout_seconds, memory_limit_bytes
+    )
     command = _runner_command(prepared)
     staging = Path(str(prepared["staging"]))
     started = time.monotonic()
@@ -1470,12 +1644,6 @@ def execute_prepared(
             creationflags=creation_flags,
         )
     except Exception as exc:
-        evidence = (
-            result.get("exception_evidence")
-            if isinstance(result, dict)
-            and isinstance(result.get("exception_evidence"), dict)
-            else {}
-        )
         return _failure(
             "RUNNER_START_FAILED",
             "runtime",
@@ -1484,15 +1652,27 @@ def execute_prepared(
         )
     cancelled = False
     timed_out = False
+    memory_exceeded = False
+    observed_memory: int | None = None
+    next_memory_check = 0.0
     while process.poll() is None:
         if cancellation_check is not None and cancellation_check():
             cancelled = True
             break
-        if time.monotonic() - started > timeout_seconds:
+        now = time.monotonic()
+        if now - started > timeout_seconds:
             timed_out = True
             break
+        if memory_limit_bytes > 0 and now >= next_memory_check:
+            next_memory_check = now + 0.5
+            usage = _process_memory_bytes(process.pid)
+            if usage is not None:
+                observed_memory = usage
+                if usage > memory_limit_bytes:
+                    memory_exceeded = True
+                    break
         time.sleep(0.1)
-    if cancelled or timed_out:
+    if cancelled or timed_out or memory_exceeded:
         try:
             if sys.platform != "win32":
                 os.killpg(process.pid, signal.SIGTERM)
@@ -1511,6 +1691,21 @@ def execute_prepared(
             "build123d execution was cancelled.",
             observed={"elapsed_seconds": elapsed},
             cancelled=True,
+        )
+    if memory_exceeded:
+        return _failure(
+            "MEMORY_LIMIT_EXCEEDED",
+            "execution",
+            "build123d execution exceeded the "
+            f"{memory_limit_bytes // (1024 * 1024)} MB memory budget.",
+            observed={
+                "memory_limit_bytes": memory_limit_bytes,
+                "observed_memory_bytes": observed_memory,
+                "elapsed_seconds": elapsed,
+            },
+            required_changes=[
+                {"reduce_model_memory_or_increase_memory_budget_preference": True}
+            ],
         )
     if timed_out:
         return _failure(
@@ -1546,6 +1741,12 @@ def execute_prepared(
             str(result.get("exception_kind") or "")
             if isinstance(result, dict)
             else ""
+        )
+        evidence = (
+            result.get("exception_evidence")
+            if isinstance(result, dict)
+            and isinstance(result.get("exception_evidence"), dict)
+            else {}
         )
         failure_code = {
             "design_assertion_failure": "BUILD123D_DESIGN_ASSERTION_FAILED",
@@ -1884,7 +2085,7 @@ def runtime_execution_smoke() -> dict[str, Any]:
             "schema": "vibecad-build123d-execution-v1",
             "build123d_version": BUILD123D_VERSION,
             "source": (
-                "from build123d import Box\n"
+                "from build123d import *\n"
                 "result = {'Runtime Smoke': Box(2, 3, 5)}\n"
             ),
             "parameters": {},
@@ -1949,6 +2150,35 @@ def _output_objects(container: Any) -> dict[str, tuple[Any, Any]]:
         if feature is not None:
             result[key] = (body, feature)
     return result
+
+
+def _set_shaded_display(obj: Any) -> None:
+    view = getattr(obj, "ViewObject", None)
+    if view is None:
+        # Headless sessions (FreeCADCmd) have no view providers; the display
+        # contract only applies when a GUI is attached.
+        return
+    modes = list(view.listDisplayModes())
+    if "Shaded" not in modes:
+        raise RuntimeError(
+            f"build123d output {obj.Name} cannot use Shaded display mode. "
+            f"Available modes: {modes}"
+        )
+    if str(view.DisplayMode) != "Shaded":
+        view.DisplayMode = "Shaded"
+
+
+def restore_output_display_modes(doc: Any) -> list[str]:
+    """Restore the edge-free display contract for accepted build123d outputs."""
+    restored: list[str] = []
+    for container in _model_objects(doc):
+        for body, feature in _output_objects(container).values():
+            for obj in (body, feature):
+                if getattr(obj, "ViewObject", None) is None:
+                    continue
+                _set_shaded_display(obj)
+                restored.append(str(obj.Name))
+    return restored
 
 
 def _mirror_model(
@@ -2040,6 +2270,25 @@ def _mirror_model(
     }
 
 
+def _recompute_errors(summary: Any) -> list[dict[str, Any]]:
+    if not isinstance(summary, dict):
+        raise RuntimeError("FreeCAD returned an invalid recompute diagnostic payload.")
+    if not bool(summary.get("captured")):
+        raise RuntimeError(
+            "FreeCAD recompute diagnostics are unavailable: "
+            + str(summary.get("reason") or "no diagnostic reason was supplied")
+        )
+    diagnostics = summary.get("diagnostics")
+    if not isinstance(diagnostics, list):
+        raise RuntimeError("FreeCAD recompute diagnostics did not contain a list.")
+    return [
+        dict(item)
+        for item in diagnostics
+        if isinstance(item, dict)
+        and str(item.get("severity") or "").lower() == "error"
+    ]
+
+
 def commit_outputs(
     service: Any,
     prepared: dict[str, Any],
@@ -2097,95 +2346,122 @@ def commit_outputs(
                 )
             )
 
-    container = target
-    created_container = False
-    if container is None:
-        container = doc.addObject(
+    created_container = target is None
+    doc.openTransaction("Accept build123d model")
+    try:
+        container = target or doc.addObject(
             "App::Part", _safe_internal_name(prepared["model_name"], "Build123dModel")
         )
-        created_container = True
-    for prop in (
-        PROP_MODEL_ID,
-        PROP_SOURCE,
-        PROP_PARAMETERS,
-        PROP_REVISION,
-        PROP_RUNTIME_VERSION,
-        PROP_OUTPUTS,
-        PROP_INPUTS,
-    ):
-        _add_string_property(container, prop)
+        for prop in (
+            PROP_MODEL_ID,
+            PROP_SOURCE,
+            PROP_PARAMETERS,
+            PROP_REVISION,
+            PROP_RUNTIME_VERSION,
+            PROP_OUTPUTS,
+            PROP_INPUTS,
+        ):
+            _add_string_property(container, prop)
 
-    existing = _output_objects(container)
-    committed: list[dict[str, Any]] = []
-    for item in imported:
-        key = item["key"]
-        pair = existing.get(key)
-        if pair is None:
-            body = doc.addObject(
-                "PartDesign::Body", _safe_internal_name(key, "Build123dBody")
-            )
-            body.Label = key
-            container.addObject(body)
-            _add_string_property(body, PROP_MODEL_ID)
-            _add_string_property(body, PROP_OUTPUT_KEY)
-            feature = body.newObject("PartDesign::Feature", "Build123dFeature")
-            feature.Label = f"{key} (build123d)"
-            _add_string_property(feature, PROP_MODEL_ID)
-            _add_string_property(feature, PROP_OUTPUT_KEY)
-        else:
-            body, feature = pair
-            body.Label = key
-            feature.Label = f"{key} (build123d)"
-        setattr(body, PROP_MODEL_ID, prepared["model_id"])
-        setattr(body, PROP_OUTPUT_KEY, key)
-        setattr(feature, PROP_MODEL_ID, prepared["model_id"])
-        setattr(feature, PROP_OUTPUT_KEY, key)
-        feature.Shape = item["shape"]
-        body.Tip = feature
-        committed.append(
-            {
-                "key": key,
-                "body": body.Name,
-                "feature": feature.Name,
-                "shape": item["freecad_shape"],
-                "build123d_shape": item["build123d_shape"],
-                "step_transfer": item["step_transfer"],
-            }
-        )
-
-    retained = set(prepared["expected_outputs"])
-    removed: list[str] = []
-    for key, (body, feature) in existing.items():
-        if key in retained:
-            continue
-        removed.append(body.Name)
-        delete_contained_objects(doc, [body, feature])
-
-    container.Label = prepared["model_name"]
-    setattr(container, PROP_MODEL_ID, prepared["model_id"])
-    setattr(container, PROP_SOURCE, prepared["source"])
-    setattr(container, PROP_PARAMETERS, _canonical_json(prepared["parameters"]))
-    setattr(container, PROP_REVISION, prepared["revision"])
-    setattr(container, PROP_RUNTIME_VERSION, BUILD123D_VERSION)
-    setattr(container, PROP_INPUTS, _canonical_json(prepared["input_objects"]))
-    setattr(
-        container,
-        PROP_OUTPUTS,
-        json.dumps(
-            {
-                item["key"]: {
-                    "body": item["body"],
-                    "feature": item["feature"],
+        existing = _output_objects(container)
+        committed: list[dict[str, Any]] = []
+        for item in imported:
+            key = item["key"]
+            pair = existing.get(key)
+            if pair is None:
+                body = doc.addObject(
+                    "PartDesign::Body", _safe_internal_name(key, "Build123dBody")
+                )
+                body.Label = key
+                container.addObject(body)
+                _add_string_property(body, PROP_MODEL_ID)
+                _add_string_property(body, PROP_OUTPUT_KEY)
+                feature = body.newObject("PartDesign::Feature", "Build123dFeature")
+                feature.Label = f"{key} (build123d)"
+                _add_string_property(feature, PROP_MODEL_ID)
+                _add_string_property(feature, PROP_OUTPUT_KEY)
+            else:
+                body, feature = pair
+                body.Label = key
+                feature.Label = f"{key} (build123d)"
+            setattr(body, PROP_MODEL_ID, prepared["model_id"])
+            setattr(body, PROP_OUTPUT_KEY, key)
+            setattr(feature, PROP_MODEL_ID, prepared["model_id"])
+            setattr(feature, PROP_OUTPUT_KEY, key)
+            feature.Shape = item["shape"]
+            body.Tip = feature
+            _set_shaded_display(body)
+            _set_shaded_display(feature)
+            committed.append(
+                {
+                    "key": key,
+                    "body": body.Name,
+                    "feature": feature.Name,
+                    "shape": item["freecad_shape"],
+                    "build123d_shape": item["build123d_shape"],
+                    "step_transfer": item["step_transfer"],
                 }
-                for item in committed
-            },
-            ensure_ascii=True,
-            separators=(",", ":"),
-        ),
-    )
-    doc.recompute()
-    diagnostics = service.recompute_diagnostics()
-    mirror = _mirror_model(prepared["project_root"], container, committed)
+            )
+
+        retained = set(prepared["expected_outputs"])
+        removed: list[str] = []
+        for key, (body, feature) in existing.items():
+            if key in retained:
+                continue
+            removed.append(body.Name)
+            delete_contained_objects(doc, [body, feature])
+
+        container.Label = prepared["model_name"]
+        setattr(container, PROP_MODEL_ID, prepared["model_id"])
+        setattr(container, PROP_SOURCE, prepared["source"])
+        setattr(container, PROP_PARAMETERS, _canonical_json(prepared["parameters"]))
+        setattr(container, PROP_REVISION, prepared["revision"])
+        setattr(container, PROP_RUNTIME_VERSION, BUILD123D_VERSION)
+        setattr(container, PROP_INPUTS, _canonical_json(prepared["input_objects"]))
+        setattr(
+            container,
+            PROP_OUTPUTS,
+            json.dumps(
+                {
+                    item["key"]: {
+                        "body": item["body"],
+                        "feature": item["feature"],
+                    }
+                    for item in committed
+                },
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ),
+        )
+        doc.recompute()
+        diagnostics = service.recompute_diagnostics()
+        errors = _recompute_errors(diagnostics)
+        if errors:
+            first = errors[0]
+            raise Build123dFailure(
+                _failure(
+                    "BUILD123D_COMMIT_FAILED",
+                    "commit",
+                    "FreeCAD reported errors while accepting build123d outputs. "
+                    f"First: {first.get('code') or 'UNKNOWN'} on "
+                    f"{first.get('object') or 'unknown object'}: "
+                    f"{first.get('message') or 'no message'}",
+                    observed={"recompute_errors": errors},
+                )
+            )
+        mirror = _mirror_model(prepared["project_root"], container, committed)
+        doc.commitTransaction()
+    except Exception as exc:
+        doc.abortTransaction()
+        if isinstance(exc, Build123dFailure):
+            raise
+        raise Build123dFailure(
+            _failure(
+                "BUILD123D_COMMIT_FAILED",
+                "commit",
+                f"build123d geometry could not be committed: {exc}",
+            )
+        ) from exc
     return {
         "ok": True,
         "created": created_container,

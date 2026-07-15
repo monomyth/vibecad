@@ -33,6 +33,8 @@ DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5"
 DEFAULT_MODELS = {"openai": DEFAULT_MODEL, "anthropic": DEFAULT_ANTHROPIC_MODEL}
 REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh")
 DEFAULT_REASONING_EFFORT = "high"
+DEFAULT_SCRIPTED_TIMEOUT_SECONDS = 300.0
+DEFAULT_SCRIPTED_MEMORY_LIMIT_MB = 6144
 
 
 def normalize_provider(value: str | None) -> str:
@@ -57,6 +59,8 @@ class VibeCADSettings:
     openscad_enabled: bool = False
     openscad_executable: str = ""
     openscad_library_paths: str = ""
+    scripted_timeout_seconds: float = DEFAULT_SCRIPTED_TIMEOUT_SECONDS
+    scripted_memory_limit_mb: int = DEFAULT_SCRIPTED_MEMORY_LIMIT_MB
 
     @property
     def resolved_dotenv_path(self) -> Path | None:
@@ -122,6 +126,22 @@ def normalize_reasoning_effort(value: str | None) -> str:
     return clean if clean in REASONING_EFFORTS else DEFAULT_REASONING_EFFORT
 
 
+def _positive_float(value: object, default: float) -> float:
+    try:
+        clean = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+    return clean if clean > 0 else default
+
+
+def _positive_int(value: object, default: int) -> int:
+    try:
+        clean = int(value)  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        return default
+    return clean if clean > 0 else default
+
+
 def load_settings() -> VibeCADSettings:
     pref = preferences()
     return VibeCADSettings(
@@ -147,6 +167,14 @@ def load_settings() -> VibeCADSettings:
         openscad_enabled=pref.GetBool("OpenSCADEnabled", False),
         openscad_executable=pref.GetString("OpenSCADExecutable", ""),
         openscad_library_paths=pref.GetString("OpenSCADLibraryPaths", ""),
+        scripted_timeout_seconds=_positive_float(
+            pref.GetFloat("ScriptedTimeoutSeconds", DEFAULT_SCRIPTED_TIMEOUT_SECONDS),
+            DEFAULT_SCRIPTED_TIMEOUT_SECONDS,
+        ),
+        scripted_memory_limit_mb=_positive_int(
+            pref.GetInt("ScriptedMemoryLimitMB", DEFAULT_SCRIPTED_MEMORY_LIMIT_MB),
+            DEFAULT_SCRIPTED_MEMORY_LIMIT_MB,
+        ),
     )
 
 
@@ -183,6 +211,18 @@ def save_settings(settings: VibeCADSettings) -> None:
     pref.SetBool("OpenSCADEnabled", bool(settings.openscad_enabled))
     pref.SetString("OpenSCADExecutable", settings.openscad_executable.strip())
     pref.SetString("OpenSCADLibraryPaths", settings.openscad_library_paths.strip())
+    pref.SetFloat(
+        "ScriptedTimeoutSeconds",
+        _positive_float(
+            settings.scripted_timeout_seconds, DEFAULT_SCRIPTED_TIMEOUT_SECONDS
+        ),
+    )
+    pref.SetInt(
+        "ScriptedMemoryLimitMB",
+        _positive_int(
+            settings.scripted_memory_limit_mb, DEFAULT_SCRIPTED_MEMORY_LIMIT_MB
+        ),
+    )
 
 
 def save_debug_settings(settings: VibeCADDebugSettings) -> None:
@@ -208,6 +248,8 @@ def reset_settings() -> None:
     pref.RemBool("OpenSCADEnabled")
     pref.RemString("OpenSCADExecutable")
     pref.RemString("OpenSCADLibraryPaths")
+    pref.RemFloat("ScriptedTimeoutSeconds")
+    pref.RemInt("ScriptedMemoryLimitMB")
     pref.RemBool("ContextDebugEnabled")
     pref.RemString("ContextDebugDirectory")
 
@@ -650,6 +692,7 @@ class VibeCADPreferencesPage:
         self.status.setText(f"{auth.status.value}{source}{key}{message}")
 
     def _current_settings(self) -> VibeCADSettings:
+        persisted = load_settings()
         return VibeCADSettings(
             use_online_provider=self.use_online.isChecked(),
             model=self.model.currentText().strip() or DEFAULT_MODEL,
@@ -673,6 +716,8 @@ class VibeCADPreferencesPage:
             openscad_enabled=self.openscad_enabled.isChecked(),
             openscad_executable=self.openscad_executable.text().strip(),
             openscad_library_paths=self.openscad_library_paths.toPlainText().strip(),
+            scripted_timeout_seconds=persisted.scripted_timeout_seconds,
+            scripted_memory_limit_mb=persisted.scripted_memory_limit_mb,
         )
 
     def _refresh_status(self) -> None:
