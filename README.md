@@ -1,82 +1,179 @@
 <p align="center">
-  <img src="src/Mod/VibeCAD/preferences-vibecad.svg" width="96" alt="VibeCAD mark">
+  <img src="docs/images/vibecad-mark.svg" width="96" alt="VibeCAD mark">
 </p>
 
 # VibeCAD
 
-VibeCAD is an AI-native parametric CAD platform for designing real 3D parts through conversation, direct modeling tools, and editable geometry history.
+VibeCAD is an AI-native parametric CAD platform for designing real 3D parts through conversation, focused modeling tools, and editable geometry history.
 
-![VibeCAD workspace](docs/images/vibecad-workspace.png)
+![VibeCAD workspace showing a turbocharger assembly and the AI assistant](docs/images/vibecad-workspace.png)
 
-## What It Is
+## Before You Start
 
-VibeCAD gives the model access to CAD-native operations instead of treating design as a text-to-mesh trick. The assistant can inspect the active document, reason about the current part, call modeling tools, and explain what changed in the same conversation where the user describes intent.
+**You need an API key for the AI provider you select.** VibeCAD currently connects directly to OpenAI and Anthropic, and it can use OpenAI-compatible endpoints such as xAI, Ollama, and other local model servers.
 
-The goal is not fully autonomous CAD. The goal is a practical design surface where the human owns intent and the AI performs high-quality CAD work with enough visibility that the user can steer, correct, and continue.
+Store the key in one of these places:
 
-## Highlights
+- **OS keyring (recommended):** paste the key in VibeCAD Preferences, click **Save Key**, and then click **Validate**.
+- **A selected `.env` file:** create the file yourself, select it in VibeCAD Preferences, and click **Validate**. VibeCAD does not search for `.env` files automatically.
 
-- AI assistant panel with persisted conversation, live reasoning/tool activity, and steering in one resizable surface.
-- Tool availability follows the human-selected FreeCAD workbench and the real active edit object; there is no separate phase state machine.
-- Focused PartDesign and Sketcher surfaces for native editable bodies, references, constrained profiles, features, transforms, dress-ups, screenshots, and in-place repair.
-- Optional build123d and OpenSCAD engines inside PartDesign, each with a small dedicated AI tool surface instead of a mixed catalog of unrelated tools.
-- A source-backed scripted model editor with live diagnostics, parameter editing, transient previews, explicit Accept/Revert, and export of accepted geometry.
-- OpenSCAD project support includes editable local `include`/`use` files, exact CSG conversion where supported, explicit faceted conversion when selected, and bundled BOSL2/MCAD libraries in release artifacts.
-- Local and cloud model support through configurable providers, including OpenAI-compatible local servers.
-- VibeLight and VibeDark themes with modern chrome, panel styling, and assistant integration.
-- Release packaging for Linux and Windows so the full application can be tested outside a development checkout.
+API keys are not stored in ordinary application preferences.
 
 ## Install
 
-Download the latest build from the repository Releases page.
+Download the latest build from [VibeCAD Releases](https://github.com/10-X-eng/vibecad/releases/latest).
 
-The release assets are intended to include:
-
-- Linux AppImage
-- Linux Debian package
-- Windows installer
-- Windows portable archive
-- SHA256 checksum files
-
-On Linux, make the AppImage executable and run it:
+### Linux AppImage
 
 ```bash
 chmod +x VibeCAD*.AppImage
 ./VibeCAD*.AppImage
 ```
 
-On Windows, run the installer from the release assets and launch VibeCAD from the Start menu.
+### Debian Package
+
+Run this command from the directory containing the downloaded package:
+
+```bash
+sudo apt install ./vibecad_*_amd64.deb
+```
+
+The leading `./` is required when installing a local package with `apt`.
+
+### Windows
+
+Download the Windows installer, run it, and launch VibeCAD from the Start menu. A portable archive is also available for installations that should not modify the system.
+
+SHA256 files are published beside release artifacts so downloads can be verified before installation.
+
+## Configure an AI Provider
+
+Open **Preferences**, then select **VibeCAD > VibeCAD**.
+
+1. Enable **Use online provider**.
+2. Select **OpenAI** or **Anthropic** under **Provider**.
+3. Leave the provider's base URL blank for its official service. Set a base URL only when using a compatible service or local endpoint.
+4. Configure the API key using the keyring or `.env` method below.
+5. Click **Fetch models**, then select a returned model.
+6. Choose a supported **Reasoning effort**. Use `none` when a model does not support thinking or reasoning parameters.
+7. Click **Apply** or **OK** to save the provider, model, endpoint, and `.env` path settings.
+
+### Save a Key in the OS Keyring
+
+1. Select the provider first. Keys are stored separately for OpenAI and Anthropic.
+2. Paste the provider key into **API key**.
+3. Click **Save Key**. The field clears after VibeCAD hands the key to the operating system's credential store.
+4. Click **Validate**. A successful check reports `verified` in **Auth status**.
+5. Click **Fetch models** and choose the model to use.
+
+**Logout** removes only the selected provider's keyring entry. It does not remove a process environment variable or edit a selected `.env` file.
+
+### Use a `.env` File
+
+Create a text file containing the variable for the selected provider:
+
+```dotenv
+# OpenAI and OpenAI-compatible providers, including xAI
+OPENAI_API_KEY=your-key-here
+
+# Anthropic
+ANTHROPIC_API_KEY=your-key-here
+```
+
+In VibeCAD Preferences:
+
+1. Click **Browse** beside **.env path** and select that exact file.
+2. Leave the **API key** field empty; **Save Key** is only for the OS keyring.
+3. Click **Validate**, then **Fetch models**.
+4. Click **Apply** or **OK** so the selected path is used by future sessions.
+
+Do not commit a `.env` file containing a real key to source control.
+
+### Credential Precedence
+
+VibeCAD resolves a key in this order:
+
+1. The provider's process environment variable.
+2. The `.env` file explicitly selected in Preferences.
+3. The OS keyring.
+
+This order matters when a valid key appears to be ignored. For example, an old `OPENAI_API_KEY` exported by the shell overrides both the selected `.env` file and a newer key saved in the keyring.
+
+## Configure Grok Through xAI
+
+xAI exposes an OpenAI-compatible API, so Grok uses VibeCAD's OpenAI provider adapter:
+
+1. Obtain an API key from xAI.
+2. Select **OpenAI** as the provider.
+3. Set **OpenAI base URL** to `https://api.x.ai/v1`.
+4. Paste the xAI key, click **Save Key**, and then click **Validate**.
+5. Click **Fetch models** and select the Grok model returned by xAI.
+6. Choose a reasoning effort supported by that model, then click **Apply** or **OK**.
+
+When using a `.env` file for xAI, use `OPENAI_API_KEY` because the OpenAI-compatible provider adapter is selected.
+
+![VibeCAD Preferences configured for Grok through the xAI endpoint](docs/images/vibecad-grok-provider-setup.png)
+
+## Start a CAD Conversation
+
+1. Create or open a CAD document and **save it**. VibeCAD keeps the assistant disabled for unsaved documents so the conversation, design record, references, and generated source have a durable project location.
+2. Select the workbench that matches the work you are doing. VibeCAD exposes the focused tool surface for the active workbench.
+3. Open **View > Panels > VibeCAD Assistant** if the assistant is not visible.
+4. Describe the intended result, including the dimensions, interfaces, material, manufacturing process, and constraints that matter.
+5. Use **Attach Image** for a reference design, or paste an image into the message box with `Ctrl+V`. Use **Attach View** to include the current viewport.
+6. Click **Send**. While work is running, the same input becomes **Steer**, so corrections stay in the same conversation. **Stop** ends the run after the current provider or CAD step returns.
+7. Save the CAD document normally. Reopening it restores the associated VibeCAD conversations and project records.
+
+Be explicit about functional intent, not only appearance. For an existing model, identify what should be preserved and what should change. For a new part, provide mating geometry and critical dimensions whenever they are known.
+
+## Conversations
+
+The conversation selector at the top of the assistant opens prior conversations for the current CAD document. The new-conversation button starts a clean thread without deleting earlier work. This makes it possible to separate a redesign, manufacturing discussion, or analysis task while retaining the project's history.
+
+When **Intent Memory** is enabled in Preferences, VibeCAD compiles durable project intent after completed conversations. This preserves important requirements without replaying an unlimited chat transcript on every model call.
+
+## PartDesign Modeling Engines
+
+The modeling-engine selector appears in the VibeCAD panel while PartDesign is active. The human controls this selection for each saved CAD document.
+
+- **Native:** editable sketches and PartDesign feature history.
+- **VibeScript:** VibeCAD's native scripted modeling engine; enabled by default.
+- **build123d:** optional Python-based scripted modeling, enabled in Preferences.
+- **OpenSCAD:** optional editable OpenSCAD source, enabled in Preferences.
+
+Scripted engines keep source, parameters, diagnostics, and accepted outputs with the project. Their temporary preview is not the saved model; inspect it in the **Model Code Editor** and use **Accept** to commit the candidate result.
 
 ## Local Models
 
-For local OpenAI-compatible servers, configure the provider with the local endpoint and model name. For Ollama, the common setup is:
+For Ollama or another local OpenAI-compatible server, select the OpenAI provider and configure its endpoint. A common Ollama setup is:
 
 ```text
-Base URL: http://localhost:11434/v1
-Model: your-local-model
+OpenAI base URL: http://localhost:11434/v1
+Model: select a model returned by Fetch models
 API key: any non-empty value accepted by the local server
 Reasoning effort: none
 ```
 
-Some local models reject thinking/reasoning parameters. Set reasoning effort to `none` for those models.
+The local server must already be running and expose an OpenAI-compatible API. Some local models reject reasoning parameters even when the server supports the endpoint; use `none` for those models.
 
-## Development Notes
+## Troubleshooting
 
-VibeCAD is built around a real CAD document, not a disposable generated object. When a user asks to fix, improve, optimize, or continue an existing model, the current design is the authority. The assistant should inspect the active document, identify the target object, and modify that object unless the user explicitly asks for a replacement.
+- **`not_configured`:** VibeCAD could not find the selected provider's environment variable, a valid key in the selected `.env` file, or a keyring entry.
+- **`configured_unverified`:** a key was found but has not been checked against the configured endpoint. Click **Validate**.
+- **`invalid`:** the endpoint rejected the key. Confirm the selected provider, base URL, credential precedence, and account access.
+- **`offline`:** the key could not be verified because the configured endpoint could not be reached.
+- **No models are listed:** validate authentication first, then click **Fetch models**.
+- **The model does not support thinking:** set **Reasoning effort** to `none`.
+- **The assistant input is disabled:** save the active CAD document.
+- **The assistant panel was closed:** reopen it from **View > Panels > VibeCAD Assistant**.
 
-The human creates, opens, saves, and selects the document and workbench. VibeCAD receives the current CAD state automatically and exposes only operations that are valid for that workbench and edit mode. Unsupported workbenches do not receive partial legacy tool packs.
+## Project Status
 
-PartDesign can use its native feature history or a human-selected scripted engine. build123d and OpenSCAD models keep their source, parameters, dependencies, revision history, and accepted outputs beside the VibeCAD project records. Preview geometry is temporary; only an explicit Accept updates the document's durable scripted result. OpenSCAD source is edited in the same PartDesign panel rather than in a separate legacy workbench.
+VibeCAD is under active development. The current focus is reliable, readable AI-assisted part design with explicit human control over the document, workbench, modeling engine, and design direction.
 
-The assistant UI should keep the human oriented:
+Release packaging details are documented in [docs/vibecad-release-packaging.md](docs/vibecad-release-packaging.md).
 
-- user messages are shown as conversation,
-- model thinking is shown separately,
-- tool calls and CAD mutations are visible as progress,
-- final prose responses are readable and markdown-aware.
+## Credits
 
-Release packaging details live in [docs/vibecad-release-packaging.md](docs/vibecad-release-packaging.md).
-
-## Status
-
-VibeCAD is under active development. The current focus is making AI-assisted part design reliable, readable, and useful for real modeling work before broadening the same quality bar across assembly, manufacturing, and analysis workflows.
+- The VibeLight and VibeDark themes are based on [OpenTheme by Obelisk79](https://github.com/obelisk79/OpenTheme).
+- VibeCAD is built on the work of the [FreeCAD project](https://github.com/FreeCAD/FreeCAD). Thank you to the contributors and the wider [FreeCAD community](https://forum.freecad.org/) whose CAD engine, workbenches, documentation, and support made this project possible.
