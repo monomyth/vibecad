@@ -47,20 +47,25 @@ jobs:
       release_tag: ${{ steps.meta.outputs.release_tag }}
       matrix: ${{ steps.meta.outputs.matrix }}
     steps:
+      - name: Check out requested source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+          fetch-depth: 1
+          submodules: false
+          persist-credentials: false
+
       - name: Resolve source and architecture matrix
         id: meta
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
           SOURCE_REF: ${{ inputs.source_ref }}
           ARCHITECTURE: ${{ inputs.architecture }}
           INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
 
-          source_sha="$(
-            gh api "repos/${GITHUB_REPOSITORY}/commits/${SOURCE_REF}" --jq '.sha'
-          )"
+          source_sha="$(git rev-parse HEAD)"
           if [[ ! "${source_sha}" =~ ^[0-9a-f]{40}$ ]]; then
             echo "Could not resolve ${SOURCE_REF} to a commit: ${source_sha}" >&2
             exit 1
