@@ -110,7 +110,7 @@ find "${conda_env}" -name "*.pyc" -type f -delete
 python ../scripts/fix_macos_lib_paths.py \
     "${conda_env}/lib" \
     --bundle-prefix "${conda_env_absolute}" \
-    --forbid-prefix "${default_env_absolute}"
+    --source-prefix "${default_env_absolute}"
 
 # build and install the launcher
 cmake -B build launcher

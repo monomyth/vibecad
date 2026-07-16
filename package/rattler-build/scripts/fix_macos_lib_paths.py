@@ -25,13 +25,7 @@ def _parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument("scan_path", type=Path)
     parser.add_argument("--bundle-prefix", required=True, type=Path)
-    parser.add_argument(
-        "--forbid-prefix",
-        action="append",
-        default=[],
-        type=Path,
-        help="Fail if a stale load command still references this prefix.",
-    )
+    parser.add_argument("--source-prefix", required=True, type=Path)
     parser.add_argument(
         "--scan-only",
         action="store_true",
@@ -105,28 +99,22 @@ def _sign(file_path: Path) -> None:
     )
 
 
-def _assert_not_forbidden(
-    value: str,
+def _source_destination(
+    path: Path,
     *,
-    file_path: Path,
-    forbidden_prefixes: tuple[Path, ...],
-) -> None:
-    if not os.path.isabs(value):
-        return
-    path = _normalized(Path(value))
-    for prefix in forbidden_prefixes:
-        if _is_relative_to(path, prefix):
-            raise RuntimeError(
-                f"Stale macOS load command in {file_path}: {value} still "
-                f"references source prefix {prefix}."
-            )
+    source_prefix: Path,
+    bundle_prefix: Path,
+) -> Path | None:
+    if not _is_relative_to(path, source_prefix):
+        return None
+    return bundle_prefix / path.relative_to(source_prefix)
 
 
 def _repair_file(
     file_path: Path,
     *,
     bundle_prefix: Path,
-    forbidden_prefixes: tuple[Path, ...],
+    source_prefix: Path,
     scan_only: bool,
 ) -> int:
     commands = _load_commands(file_path)
@@ -136,14 +124,22 @@ def _repair_file(
     changes: list[tuple[str, ...]] = []
 
     for rpath in rpaths:
-        _assert_not_forbidden(
-            rpath,
-            file_path=file_path,
-            forbidden_prefixes=forbidden_prefixes,
-        )
         if not os.path.isabs(rpath):
             continue
         resolved = _normalized(Path(rpath))
+        relocated = _source_destination(
+            resolved,
+            source_prefix=source_prefix,
+            bundle_prefix=bundle_prefix,
+        )
+        if relocated is not None:
+            if relocated != file_path.parent:
+                raise RuntimeError(
+                    f"Unsupported source-prefix RPATH in {file_path}: {rpath} "
+                    f"would relocate to {relocated}."
+                )
+            changes.append(("-delete_rpath", rpath))
+            continue
         if resolved == file_path.parent:
             changes.append(("-delete_rpath", rpath))
             continue
@@ -159,15 +155,21 @@ def _repair_file(
             )
 
     for reexport in reexports:
-        _assert_not_forbidden(
-            reexport,
-            file_path=file_path,
-            forbidden_prefixes=forbidden_prefixes,
-        )
         if not os.path.isabs(reexport):
             continue
         resolved = _normalized(Path(reexport))
-        if _is_relative_to(resolved, bundle_prefix):
+        relocated = _source_destination(
+            resolved,
+            source_prefix=source_prefix,
+            bundle_prefix=bundle_prefix,
+        )
+        bundled_library = relocated if relocated is not None else resolved
+        if _is_relative_to(bundled_library, bundle_prefix):
+            if not bundled_library.exists():
+                raise RuntimeError(
+                    f"Re-exported library is missing from the app bundle: "
+                    f"{reexport} should resolve to {bundled_library}."
+                )
             changes.append(
                 ("-change", reexport, f"@rpath/{Path(reexport).name}")
             )
@@ -194,12 +196,14 @@ def main() -> int:
     arguments = _parse_arguments()
     scan_path = _normalized(arguments.scan_path)
     bundle_prefix = _normalized(arguments.bundle_prefix)
-    forbidden_prefixes = tuple(_normalized(path) for path in arguments.forbid_prefix)
+    source_prefix = _normalized(arguments.source_prefix)
 
     if not scan_path.is_dir():
         raise SystemExit(f"macOS library directory does not exist: {scan_path}")
     if not bundle_prefix.is_dir():
         raise SystemExit(f"macOS bundle prefix does not exist: {bundle_prefix}")
+    if not source_prefix.is_dir():
+        raise SystemExit(f"Source conda prefix does not exist: {source_prefix}")
 
     changed = 0
     scanned = 0
@@ -210,7 +214,7 @@ def main() -> int:
         changed += _repair_file(
             file_path,
             bundle_prefix=bundle_prefix,
-            forbidden_prefixes=forbidden_prefixes,
+            source_prefix=source_prefix,
             scan_only=arguments.scan_only,
         )
 
