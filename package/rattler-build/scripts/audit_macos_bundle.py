@@ -98,11 +98,18 @@ def _load_command_paths(output: str) -> list[tuple[str, str]]:
 
 def _linked_libraries(output: str) -> list[str]:
     libraries: list[str] = []
-    for raw_line in output.splitlines()[1:]:
+    for raw_line in output.splitlines():
+        # Dependency records are indented. Universal binaries add an
+        # unindented "file (architecture ...):" header for every slice.
+        if not raw_line[:1].isspace():
+            continue
         line = raw_line.strip()
         if not line:
             continue
-        libraries.append(line.split(" (compatibility version", 1)[0])
+        marker = " (compatibility version"
+        if marker not in line:
+            raise RuntimeError(f"Unrecognized otool -L dependency record: {line}")
+        libraries.append(line.split(marker, 1)[0])
     return libraries
 
 
