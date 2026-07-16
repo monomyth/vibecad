@@ -301,7 +301,35 @@ fi
 sha256sum ${version_name}.7z > ${version_name}.7z-SHA256.txt
 
 if [ "${MAKE_INSTALLER}" == "true" ]; then
-    FILES_FREECAD="$(cygpath -w $(pwd))\\${version_name}"
+    # NSIS still opens source files through MAX_PATH-limited APIs. The GitHub
+    # workspace plus the release name can push valid runtime files beyond that
+    # limit, so compile from a short, temporary drive mapping without removing
+    # anything from the distributable runtime.
+    nsis_source_drive="$("${conda_env}/python.exe" - <<'PY' | tr -d '\r\n'
+import ctypes
+
+logical_drives = ctypes.windll.kernel32.GetLogicalDrives()
+for drive_index in range(ord("Z") - ord("A"), ord("C") - ord("A"), -1):
+    if not logical_drives & (1 << drive_index):
+        print(f"{chr(ord('A') + drive_index)}:")
+        break
+else:
+    raise SystemExit("No unused Windows drive letter is available for NSIS staging.")
+PY
+)"
+    if [[ ! "${nsis_source_drive}" =~ ^[A-Z]:$ ]]; then
+        echo "Could not select a valid unused Windows drive for NSIS staging: ${nsis_source_drive}" >&2
+        exit 1
+    fi
+    bundle_source_windows="$(cygpath -w "$(pwd)/${version_name}")"
+    cleanup_nsis_source_drive() {
+        if [[ -n "${nsis_source_drive:-}" ]]; then
+            MSYS2_ARG_CONV_EXCL='*' subst.exe "${nsis_source_drive}" /D >/dev/null 2>&1 || true
+        fi
+    }
+    trap cleanup_nsis_source_drive EXIT
+    MSYS2_ARG_CONV_EXCL='*' subst.exe "${nsis_source_drive}" "${bundle_source_windows}"
+    FILES_FREECAD="${nsis_source_drive}"
     nsis_cpdir=$(pwd)/.nsis_tmp
     cp -r "${CONDA_PREFIX}/NSIS" "${nsis_cpdir}"
     # curl -L -o ".nsis-log.zip" http://prdownloads.sourceforge.net/nsis/nsis-3.11-log.zip # we use the log variant of the package already
@@ -344,6 +372,8 @@ if [ "${MAKE_INSTALLER}" == "true" ]; then
         echo "Error: Failed to get NsProcess plugin. Aborting installer creation..."
     fi
     rm -rf "${nsis_cpdir}"
+    cleanup_nsis_source_drive
+    trap - EXIT
 fi
 
 if [ "${UPLOAD_RELEASE}" == "true" ]; then
