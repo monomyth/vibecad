@@ -170,6 +170,7 @@ jobs:
           pixi install -e package
 
       - name: Create and validate VibeCAD DMG
+        timeout-minutes: 120
         shell: bash
         working-directory: package/rattler-build
         env:

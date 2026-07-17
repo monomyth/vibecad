@@ -208,7 +208,7 @@ for check in \
 done
 
 echo "Running VibeCAD app launcher smoke test..."
-"${app_name}/Contents/MacOS/FreeCAD" --safe-mode --version
+"${app_name}/Contents/MacOS/FreeCAD" --vibecad-launcher-smoke
 
 if [[ "${MACOS_SIGN_RELEASE:-false}" == "true" ]]; then
     # create the signed dmg
@@ -236,7 +236,7 @@ else
     fi
     codesign --force --deep --sign - "${app_name}"
     codesign --verify --deep --strict "${app_name}"
-    "${app_name}/Contents/MacOS/FreeCAD" --safe-mode --version
+    "${app_name}/Contents/MacOS/FreeCAD" --vibecad-launcher-smoke
 
     # create the dmg
     dmgbuild \

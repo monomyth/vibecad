@@ -59,9 +59,12 @@ int main(int argc, char* argv[], char* const* envp)
         const auto launcher = executablePath();
         const auto resources = std::filesystem::canonical(
             launcher.parent_path() / ".." / "Resources");
-        const auto freecad = resources / "bin" / "freecad";
-        if (!std::filesystem::is_regular_file(freecad)) {
-            std::cerr << "VibeCAD runtime executable is missing: " << freecad << '\n';
+        const bool launcherSmoke = argc == 2
+            && std::strcmp(argv[1], "--vibecad-launcher-smoke") == 0;
+        const char* runtimeName = launcherSmoke ? "freecadcmd" : "freecad";
+        const auto runtime = resources / "bin" / runtimeName;
+        if (!std::filesystem::is_regular_file(runtime)) {
+            std::cerr << "VibeCAD runtime executable is missing: " << runtime << '\n';
             return 1;
         }
 
@@ -85,15 +88,22 @@ int main(int argc, char* argv[], char* const* envp)
         auto environmentPointers = mutablePointers(environmentStorage);
 
         std::vector<std::string> argumentStorage;
-        argumentStorage.reserve(static_cast<std::size_t>(argc));
-        argumentStorage.push_back(freecad.string());
-        for (int index = 1; index < argc; ++index) {
-            argumentStorage.emplace_back(argv[index]);
+        argumentStorage.reserve(
+            launcherSmoke ? 3U : static_cast<std::size_t>(argc));
+        argumentStorage.push_back(runtime.string());
+        if (launcherSmoke) {
+            argumentStorage.emplace_back("--safe-mode");
+            argumentStorage.emplace_back("--version");
+        }
+        else {
+            for (int index = 1; index < argc; ++index) {
+                argumentStorage.emplace_back(argv[index]);
+            }
         }
         auto argumentPointers = mutablePointers(argumentStorage);
 
         execve(
-            freecad.c_str(),
+            runtime.c_str(),
             argumentPointers.data(),
             environmentPointers.data());
         std::cerr << "Could not launch the VibeCAD runtime: " << std::strerror(errno)
