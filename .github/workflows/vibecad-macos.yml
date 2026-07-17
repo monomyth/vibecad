@@ -169,19 +169,6 @@ jobs:
           pixi install -e default
           pixi install -e package
 
-      - name: Create and validate VibeCAD DMG
-        timeout-minutes: 120
-        shell: bash
-        working-directory: package/rattler-build
-        env:
-          BUILD_TAG: ${{ needs.prepare.outputs.build_tag }}
-          MACOS_DEPLOYMENT_TARGET: "12.0"
-          MACOS_SIGN_RELEASE: "false"
-          UPLOAD_RELEASE: "false"
-        run: |
-          set -euo pipefail
-          pixi run -e package create_bundle
-
       - name: Save ccache
         if: always()
         uses: actions/cache/save@v4
@@ -200,6 +187,35 @@ jobs:
             ~/.cache/rattler
             ~/Library/Caches/pip
           key: ${{ steps.cache-pixi.outputs.cache-primary-key }}
+
+      - name: Reclaim macOS packaging workspace
+        shell: bash
+        working-directory: package/rattler-build
+        run: |
+          set -euo pipefail
+          echo "Rattler build workspace before packaging cleanup:"
+          du -sk .pixi/bld
+          rm -rf .pixi/bld
+          if [[ -d "${RUNNER_TEMP}/ccache" ]]; then
+            echo "Compiler cache before packaging cleanup:"
+            du -sk "${RUNNER_TEMP}/ccache"
+            rm -rf "${RUNNER_TEMP}/ccache"
+          fi
+          echo "Runner disk space available for macOS packaging:"
+          df -h .
+
+      - name: Create and validate VibeCAD DMG
+        timeout-minutes: 120
+        shell: bash
+        working-directory: package/rattler-build
+        env:
+          BUILD_TAG: ${{ needs.prepare.outputs.build_tag }}
+          MACOS_DEPLOYMENT_TARGET: "12.0"
+          MACOS_SIGN_RELEASE: "false"
+          UPLOAD_RELEASE: "false"
+        run: |
+          set -euo pipefail
+          pixi run -e package create_bundle
 
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
