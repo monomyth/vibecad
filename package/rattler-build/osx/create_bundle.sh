@@ -239,6 +239,8 @@ else
     "${app_name}/Contents/MacOS/FreeCAD" --vibecad-launcher-smoke
 
     # create the dmg
+    echo "Staged macOS application size before DMG creation:"
+    du -sk "${app_name}"
     dmgbuild \
         -s dmg_settings.py \
         -Dapp_name="${app_name}" \

@@ -160,6 +160,8 @@ run_codesign "${CONTAINING_FOLDER}/${APP_NAME}"
 
 # Create a disk image from the folder
 echo "Creating disk image ${DMG_NAME}"
+echo "Staged macOS application size before DMG creation:"
+du -sk "${CONTAINING_FOLDER}/${APP_NAME}"
 dmgbuild -s ${DMG_SETTINGS} -Dcontaining_folder="${CONTAINING_FOLDER}" -Dapp_name="${APP_NAME}" "${VOLUME_NAME}" "${DMG_NAME}"
 
 ID_FILE="${DMG_NAME}.notarization_id"

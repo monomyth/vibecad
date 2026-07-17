@@ -11,4 +11,7 @@ symlinks = {"Applications": "/Applications"}
 badge_icon = f"{defines['containing_folder']}/{defines['app_name']}/{defines['icon_path']}"
 window_rect = ((200, 200), (600, 400))
 icon_locations = {f"{defines['app_name']}": (180, 150), "Applications": (420, 150)}
-size = "4g"
+
+# Let dmgbuild derive the filesystem size from the staged bundle. A fixed image
+# size fails as soon as one architecture's runtime payload crosses that limit.
+size = None
