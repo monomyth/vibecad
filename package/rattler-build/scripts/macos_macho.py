@@ -6,6 +6,17 @@ from pathlib import Path
 import subprocess
 
 
+DYLIB_DEPENDENCY_COMMANDS = frozenset(
+    {
+        "LC_LAZY_LOAD_DYLIB",
+        "LC_LOAD_DYLIB",
+        "LC_LOAD_UPWARD_DYLIB",
+        "LC_LOAD_WEAK_DYLIB",
+        "LC_REEXPORT_DYLIB",
+    }
+)
+
+
 def otool(file_path: Path, option: str) -> str | None:
     result = subprocess.run(
         ["otool", option, str(file_path)],
@@ -45,6 +56,20 @@ def load_command_paths(output: str) -> list[tuple[str, str]]:
             )
             command = ""
     return paths
+
+
+def dylib_dependencies(output: str) -> list[str]:
+    dependencies: list[str] = []
+    command = ""
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if line.startswith("cmd "):
+            command = line.removeprefix("cmd ")
+            continue
+        if command in DYLIB_DEPENDENCY_COMMANDS and line.startswith("name "):
+            dependencies.append(line.removeprefix("name ").split(" (offset", 1)[0])
+            command = ""
+    return dependencies
 
 
 def linked_libraries(output: str) -> list[str]:

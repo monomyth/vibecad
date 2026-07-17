@@ -30,9 +30,16 @@ python ../scripts/relocate_conda_environment.py \
 ../scripts/install_vibecad_codex_runtime.sh \
     "${conda_env}/bin/python" \
     "${module_directory}"
-python ../scripts/sanitize_macos_wheel_rpaths.py \
+python ../scripts/relocate_macos_runtime_rpaths.py \
     "${module_directory}/build123d_runtime/site-packages" \
     --bundle-prefix "${conda_env_absolute}"
+python ../scripts/relocate_macos_runtime_rpaths.py \
+    "${module_directory}/openscad_runtime/OpenSCAD.app" \
+    --bundle-prefix "${conda_env_absolute}"
+codesign --force --deep --sign - \
+    "${module_directory}/openscad_runtime/OpenSCAD.app"
+codesign --verify --deep --strict \
+    "${module_directory}/openscad_runtime/OpenSCAD.app"
 "${conda_env}/bin/python" \
     ../scripts/write_vibecad_build123d_manifest.py \
     "${module_directory}/build123d_runtime" \
