@@ -76,29 +76,38 @@ def _installed_managed_files(
     source: Path,
     managed_files: list[File],
 ) -> list[File]:
-    installed_files: list[File] = []
-    seen_targets: set[str] = set()
+    installed_by_target: dict[str, File] = {}
     missing_sources: list[str] = []
     for file in managed_files:
         relative = _relative_target(file.target)
-        if file.target in seen_targets:
-            raise RuntimeError(
-                f"Duplicate package-managed environment target: {file.target}"
-            )
-        seen_targets.add(file.target)
         installed_source = source / relative
         if not os.path.lexists(installed_source):
             missing_sources.append(file.target)
             continue
-        installed_files.append(
-            File(
-                str(installed_source),
-                file.target,
-                is_conda=True,
-                file_mode=file.file_mode,
-                prefix_placeholder=file.prefix_placeholder,
-            )
+        candidate = File(
+            str(installed_source),
+            file.target,
+            is_conda=True,
+            file_mode=file.file_mode,
+            prefix_placeholder=file.prefix_placeholder,
         )
+        previous = installed_by_target.get(file.target)
+        if previous is not None:
+            previous_metadata = (
+                previous.file_mode,
+                previous.prefix_placeholder,
+            )
+            candidate_metadata = (
+                candidate.file_mode,
+                candidate.prefix_placeholder,
+            )
+            if candidate_metadata != previous_metadata:
+                raise RuntimeError(
+                    "Conflicting package metadata for shared environment target "
+                    f"{file.target}: {previous_metadata!r} != {candidate_metadata!r}"
+                )
+            continue
+        installed_by_target[file.target] = candidate
     if missing_sources:
         rendered = ", ".join(sorted(missing_sources)[:20])
         suffix = "" if len(missing_sources) <= 20 else " ..."
@@ -106,7 +115,7 @@ def _installed_managed_files(
             "Package-managed files are missing from the installed environment: "
             f"{rendered}{suffix}"
         )
-    return installed_files
+    return list(installed_by_target.values())
 
 
 def _python_runtime_target(prefix: Path) -> str:
