@@ -8,18 +8,13 @@ from pathlib import Path
 import subprocess
 from typing import Iterable
 
-
-SYSTEM_PREFIXES = (
-    Path("/System/Library"),
-    Path("/usr/lib"),
-    Path("/Library/Apple/System/Library"),
-)
+from macos_macho import dylib_dependency_paths, load_command_paths, otool
 
 
 def _parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Repair the known absolute LC_RPATH and LC_REEXPORT_DYLIB entries "
+            "Repair source-prefixed Mach-O identities, dependencies, and RPATHs "
             "in the top-level macOS bundle library directory."
         )
     )
@@ -44,43 +39,6 @@ def _is_relative_to(path: Path, parent: Path) -> bool:
         return True
     except ValueError:
         return False
-
-
-def _is_system_path(path: Path) -> bool:
-    return any(_is_relative_to(path, prefix) for prefix in SYSTEM_PREFIXES)
-
-
-def _load_commands(file_path: Path) -> tuple[list[str], list[str]] | None:
-    result = subprocess.run(
-        ["otool", "-l", str(file_path)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        diagnostic = f"{result.stdout}\n{result.stderr}"
-        if "is not an object file" in diagnostic or "The file was not recognized" in diagnostic:
-            return None
-        raise RuntimeError(
-            f"otool failed for {file_path} with status {result.returncode}:\n"
-            f"{diagnostic.strip()}"
-        )
-
-    rpaths: list[str] = []
-    reexports: list[str] = []
-    command = ""
-    for raw_line in result.stdout.splitlines():
-        line = raw_line.strip()
-        if line.startswith("cmd "):
-            command = line.removeprefix("cmd ")
-            continue
-        if command == "LC_RPATH" and line.startswith("path "):
-            rpaths.append(line.removeprefix("path ").split(" (offset", 1)[0])
-            command = ""
-        elif command == "LC_REEXPORT_DYLIB" and line.startswith("name "):
-            reexports.append(line.removeprefix("name ").split(" (offset", 1)[0])
-            command = ""
-    return rpaths, reexports
 
 
 def _run_install_name_tool(arguments: Iterable[str], file_path: Path) -> None:
@@ -110,6 +68,18 @@ def _source_destination(
     return bundle_prefix / path.relative_to(source_prefix)
 
 
+def _loader_reference(target: Path, *, loader_directory: Path) -> str:
+    relative = os.path.relpath(target, start=loader_directory)
+    if relative == ".":
+        return "@loader_path"
+    return f"@loader_path/{Path(relative).as_posix()}"
+
+
+def _append_unique(changes: list[tuple[str, ...]], change: tuple[str, ...]) -> None:
+    if change not in changes:
+        changes.append(change)
+
+
 def _repair_file(
     file_path: Path,
     *,
@@ -117,10 +87,15 @@ def _repair_file(
     source_prefix: Path,
     scan_only: bool,
 ) -> int:
-    commands = _load_commands(file_path)
-    if commands is None:
+    load_output = otool(file_path, "-l")
+    if load_output is None:
         return 0
-    rpaths, reexports = commands
+    command_paths = load_command_paths(load_output)
+    dependencies = dylib_dependency_paths(load_output)
+    rpaths = [value for command, value in command_paths if command == "LC_RPATH"]
+    install_ids = [
+        value for command, value in command_paths if command == "LC_ID_DYLIB"
+    ]
     changes: list[tuple[str, ...]] = []
 
     for rpath in rpaths:
@@ -138,47 +113,62 @@ def _repair_file(
                     f"Unsupported source-prefix RPATH in {file_path}: {rpath} "
                     f"would relocate to {relocated}."
                 )
-            changes.append(("-delete_rpath", rpath))
+            _append_unique(changes, ("-delete_rpath", rpath))
             continue
         if resolved == file_path.parent:
-            changes.append(("-delete_rpath", rpath))
+            _append_unique(changes, ("-delete_rpath", rpath))
             continue
         if _is_relative_to(resolved, bundle_prefix):
             raise RuntimeError(
                 f"Unsupported absolute bundle RPATH in {file_path}: {rpath}. "
                 "The package must use an @loader_path or @rpath-relative entry."
             )
-        if not _is_system_path(resolved):
-            raise RuntimeError(
-                f"External absolute RPATH in {file_path}: {rpath}. "
-                "The macOS app would not be self-contained."
-            )
-
-    for reexport in reexports:
-        if not os.path.isabs(reexport):
+    for install_id in install_ids:
+        if not os.path.isabs(install_id):
             continue
-        resolved = _normalized(Path(reexport))
+        resolved = _normalized(Path(install_id))
+        relocated = _source_destination(
+            resolved,
+            source_prefix=source_prefix,
+            bundle_prefix=bundle_prefix,
+        )
+        bundled_identity = relocated if relocated is not None else resolved
+        if not _is_relative_to(bundled_identity, bundle_prefix):
+            continue
+        if not bundled_identity.exists():
+            raise RuntimeError(
+                f"Mach-O install identity is missing from the app bundle: "
+                f"{install_id} should resolve to {bundled_identity}."
+            )
+        if bundled_identity.resolve() != file_path.resolve():
+            raise RuntimeError(
+                f"Mach-O install identity points at a different bundled file: "
+                f"{file_path} has {install_id}, which maps to {bundled_identity}."
+            )
+        _append_unique(changes, ("-id", f"@rpath/{Path(install_id).name}"))
+
+    for _, dependency in dependencies:
+        if not os.path.isabs(dependency):
+            continue
+        resolved = _normalized(Path(dependency))
         relocated = _source_destination(
             resolved,
             source_prefix=source_prefix,
             bundle_prefix=bundle_prefix,
         )
         bundled_library = relocated if relocated is not None else resolved
-        if _is_relative_to(bundled_library, bundle_prefix):
-            if not bundled_library.exists():
-                raise RuntimeError(
-                    f"Re-exported library is missing from the app bundle: "
-                    f"{reexport} should resolve to {bundled_library}."
-                )
-            changes.append(
-                ("-change", reexport, f"@rpath/{Path(reexport).name}")
-            )
+        if not _is_relative_to(bundled_library, bundle_prefix):
             continue
-        if not _is_system_path(resolved):
+        if not bundled_library.exists():
             raise RuntimeError(
-                f"External absolute re-export in {file_path}: {reexport}. "
-                "The macOS app would not be self-contained."
+                f"Mach-O dependency is missing from the app bundle: {dependency} "
+                f"should resolve to {bundled_library}."
             )
+        replacement = _loader_reference(
+            bundled_library,
+            loader_directory=file_path.parent,
+        )
+        _append_unique(changes, ("-change", dependency, replacement))
 
     if not changes:
         return 0
@@ -189,6 +179,22 @@ def _repair_file(
             _run_install_name_tool(change, file_path)
     if not scan_only:
         _sign(file_path)
+        updated_output = otool(file_path, "-l")
+        if updated_output is None:
+            raise RuntimeError(
+                f"Modified file is no longer recognized as Mach-O: {file_path}"
+            )
+        updated_paths = [
+            value for _, value in load_command_paths(updated_output)
+        ] + [value for _, value in dylib_dependency_paths(updated_output)]
+        stale_paths = sorted(
+            {value for value in updated_paths if str(source_prefix) in value}
+        )
+        if stale_paths:
+            raise RuntimeError(
+                f"Source-prefix relocation did not persist for {file_path}: "
+                f"{stale_paths}"
+            )
     return len(changes)
 
 

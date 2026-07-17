@@ -112,8 +112,9 @@ rm -rf "$(dirname "${iconset}")"
 find "${conda_env}" -path "*/__pycache__/*" -delete
 find "${conda_env}" -name "*.pyc" -type f -delete
 
-# Fix only the known top-level rpaths and re-exported libraries. Recursively
-# rewriting every native extension can remove load paths required at runtime.
+# Repair relocatable identities and dependencies only in the top-level library
+# directory. Recursively rewriting every native extension can remove load paths
+# required by wheel-private runtimes.
 # see https://github.com/FreeCAD/FreeCAD/issues/10144#issuecomment-1836686775
 # and https://github.com/FreeCAD/FreeCAD-Bundle/pull/203
 # and https://github.com/FreeCAD/FreeCAD-Bundle/issues/375

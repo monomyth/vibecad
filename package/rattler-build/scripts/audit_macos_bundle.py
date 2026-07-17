@@ -143,33 +143,59 @@ def main() -> int:
     candidates = 0
     mach_o_files = 0
     references = 0
+    violations: list[str] = []
     for file_path in sorted(bundle.rglob("*")):
-        if not file_path.is_file() or file_path.is_symlink() or not _candidate(file_path):
+        if (
+            not file_path.is_file()
+            or file_path.is_symlink()
+            or not _candidate(file_path)
+        ):
             continue
         candidates += 1
-        load_output = otool(file_path, "-l")
+        try:
+            load_output = otool(file_path, "-l")
+        except RuntimeError as exc:
+            violations.append(str(exc))
+            continue
         if load_output is None:
             continue
         mach_o_files += 1
         for command, value in load_command_paths(load_output):
             references += 1
-            _validate_path(
-                value,
-                command=command,
-                file_path=file_path,
-                bundle=bundle,
-                forbidden_prefixes=forbidden_prefixes,
-            )
+            try:
+                _validate_path(
+                    value,
+                    command=command,
+                    file_path=file_path,
+                    bundle=bundle,
+                    forbidden_prefixes=forbidden_prefixes,
+                )
+            except RuntimeError as exc:
+                violations.append(str(exc))
 
         for command, value in dylib_dependency_paths(load_output):
             references += 1
-            _validate_path(
-                value,
-                command=command,
-                file_path=file_path,
-                bundle=bundle,
-                forbidden_prefixes=forbidden_prefixes,
-            )
+            try:
+                _validate_path(
+                    value,
+                    command=command,
+                    file_path=file_path,
+                    bundle=bundle,
+                    forbidden_prefixes=forbidden_prefixes,
+                )
+            except RuntimeError as exc:
+                violations.append(str(exc))
+
+    if violations:
+        distinct_violations = list(dict.fromkeys(violations))
+        rendered = "\n".join(
+            f"- {violation}" for violation in distinct_violations
+        )
+        raise RuntimeError(
+            "macOS bundle relocation audit found "
+            f"{len(distinct_violations)} distinct violation(s):\n"
+            f"{rendered}"
+        )
 
     print(
         "macOS bundle relocation audit passed: "
