@@ -22,6 +22,7 @@ from VibeCADProvider import (
     BaseProvider,
     CodexProvider,
     OfflineProvider,
+    OpenAICompatibleProvider,
     ProviderUnavailable,
     provider_tool_schema_digest,
 )
@@ -588,6 +589,15 @@ def choose_provider(
     auth = service.auth_state()
     if provider_name != "chatgpt" and not auth.can_call_provider:
         return OfflineProvider()
+    if provider_name == "xai":
+        return OpenAICompatibleProvider(
+            model=service.provider_model(),
+            api_key=service.provider_api_key(),
+            reasoning_effort=service.provider_reasoning_effort(),
+            base_url=service.provider_base_url(),
+            web_search_enabled=service.web_search_enabled(),
+            provider_id="xai",
+        )
     if provider_name in {"openai", "chatgpt"}:
         return CodexProvider(
             model=service.provider_model(),
@@ -624,6 +634,10 @@ def provider_execution_identity(provider: BaseProvider) -> dict[str, Any]:
         provider_id = provider.provider_id
         provider_label = provider.provider_label
         fallback_allowed: bool | None = False
+    elif isinstance(provider, OpenAICompatibleProvider):
+        provider_id = provider.provider_id
+        provider_label = provider.provider_label
+        fallback_allowed = False
     elif isinstance(provider, AnthropicProvider):
         provider_id = "anthropic"
         provider_label = "Anthropic"
@@ -1155,7 +1169,7 @@ def _capture_context_for_provider(
             workbench, schemas, resolution=resolution
         )
     except ValueError as exc:
-        if service.provider_name() not in {"openai", "chatgpt"}:
+        if service.provider_name() not in {"openai", "xai", "chatgpt"}:
             raise
         context["provider_tool_surface"] = {
             "kind": "unavailable",
@@ -5205,7 +5219,7 @@ def rebuild_intent_memory(
     )
     if isinstance(active_provider, AnthropicProvider):
         provider_id = "anthropic"
-    elif isinstance(active_provider, CodexProvider):
+    elif isinstance(active_provider, (CodexProvider, OpenAICompatibleProvider)):
         provider_id = active_provider.provider_id
     else:
         raise ProviderUnavailable("Intent Memory rebuild requires an online provider.")

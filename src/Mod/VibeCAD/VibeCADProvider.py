@@ -56,6 +56,11 @@ ANTHROPIC_ADAPTIVE_EFFORT = {
     "xhigh": "xhigh",
 }
 ANTHROPIC_STREAM_MAX_ATTEMPTS = 3
+DEFAULT_XAI_RESPONSES_BASE_URL = "https://api.x.ai/v1"
+DEFAULT_OPENAI_COMPAT_MAX_TURNS = 48
+# Non-streaming urlopen used to die at 300s while Grok still reasoned.
+DEFAULT_OPENAI_COMPAT_HTTP_TIMEOUT_SECONDS = 1800.0
+DEFAULT_OPENAI_COMPAT_STALL_TIMEOUT_SECONDS = 180.0
 
 
 VIBECAD_SYSTEM_INSTRUCTIONS = """You are VibeCAD, the mechanical design engineer for the user's live FreeCAD model.
@@ -1076,6 +1081,89 @@ class AnthropicProvider(BaseProvider):
             if self.timeout_seconds and self.timeout_seconds > 0:
                 raise ProviderUnavailable(
                     f"Anthropic provider timed out after {self.timeout_seconds:g} seconds."
+                ) from exc
+            raise
+
+
+class OpenAICompatibleProvider(BaseProvider):
+    """Direct OpenAI-compatible Responses API adapter (xAI/Grok).
+
+    Codex app-server sends namespaced tools and tool-result ModelInput that
+    xAI's ``/v1/responses`` rejects. This path uses flat function tools over
+    the same parent/child CAD tool bridge as Anthropic, with stdlib HTTP.
+    """
+
+    def __init__(
+        self,
+        model: str = "grok-4.6",
+        api_key: str | None = None,
+        reasoning_effort: str = "high",
+        timeout_seconds: float | None = None,
+        max_turns: int | None = None,
+        base_url: str | None = None,
+        web_search_enabled: bool = False,
+        provider_id: str = "xai",
+    ) -> None:
+        self.model = str(model or "").strip() or "grok-4.6"
+        self.api_key = str(api_key or "").strip() or None
+        self.reasoning_effort = reasoning_effort
+        self.timeout_seconds = timeout_seconds
+        self.max_turns = max_turns
+        self.base_url = str(base_url or "").strip() or None
+        self.web_search_enabled = bool(web_search_enabled)
+        clean_id = str(provider_id or "").strip().lower()
+        self._provider_id = clean_id if clean_id else "xai"
+
+    @property
+    def provider_id(self) -> str:
+        return self._provider_id
+
+    @property
+    def provider_label(self) -> str:
+        if self.provider_id == "xai":
+            return "xAI (Grok) Responses API"
+        return f"{self.provider_id} Responses API"
+
+    def run(
+        self,
+        prompt: str,
+        context: dict[str, Any],
+        tool_runner: ToolRunner | None = None,
+        cancellation_check: CancellationCheck | None = None,
+        progress_callback: ProgressCallback | None = None,
+    ) -> ProviderResult:
+        if not self.api_key:
+            raise ProviderUnavailable(
+                "No xAI API key is configured. Set XAI_API_KEY in .env "
+                "or save a key for the xAI (Grok) provider."
+            )
+        try:
+            provider_context = dict(context)
+            provider_context["_vibecad_provider_options"] = {
+                "web_search_enabled": self.web_search_enabled,
+                "provider_id": self.provider_id,
+                "provider_label": self.provider_label,
+            }
+            return _run_provider_subprocess(
+                prompt=prompt,
+                context=provider_context,
+                tool_runner=tool_runner,
+                model=self.model,
+                api_key=self.api_key,
+                reasoning_effort=self.reasoning_effort,
+                timeout_seconds=self.timeout_seconds,
+                max_turns=self.max_turns,
+                base_url=self.base_url,
+                cancellation_check=cancellation_check,
+                progress_callback=progress_callback,
+                child_main=_openai_compatible_child_main,
+                provider_label=self.provider_label,
+            )
+        except TimeoutError as exc:
+            if self.timeout_seconds and self.timeout_seconds > 0:
+                raise ProviderUnavailable(
+                    f"{self.provider_label} timed out after "
+                    f"{self.timeout_seconds:g} seconds."
                 ) from exc
             raise
 
@@ -4263,6 +4351,596 @@ def _anthropic_child_main(
         )
     except BaseException as exc:
         _send_child_error(conn, "Anthropic provider", exc)
+    finally:
+        conn.close()
+
+
+def _openai_compatible_tool_definition(schema: dict[str, Any]) -> dict[str, Any]:
+    tool_name = str(schema.get("name") or "").strip()
+    if not tool_name:
+        raise ValueError("Provider tool schema is missing name.")
+    return {
+        "type": "function",
+        "name": _provider_function_name(tool_name),
+        "description": str(schema.get("description") or ""),
+        "parameters": _provider_tool_parameters(schema),
+    }
+
+
+def _openai_compatible_request_tools(
+    definitions: list[dict[str, Any]],
+    web_search_enabled: bool,
+) -> list[dict[str, Any]]:
+    tools = list(definitions)
+    if web_search_enabled:
+        tools.append({"type": "web_search"})
+    return tools
+
+
+def _openai_compatible_endpoint(base_url: str | None) -> str:
+    clean = str(base_url or DEFAULT_XAI_RESPONSES_BASE_URL).strip().rstrip("/")
+    if clean.endswith("/responses"):
+        return clean
+    return f"{clean}/responses"
+
+
+def _openai_compatible_user_content(
+    prompt: str,
+    context: dict[str, Any],
+) -> list[dict[str, Any]]:
+    visible = _model_visible_context(context)
+    parts: list[dict[str, Any]] = [{"type": "input_text", "text": str(prompt or "")}]
+    for note in _context_image_delivery_notes(visible):
+        parts.append({"type": "input_text", "text": note})
+    for label, mime_type, data in _context_image_blocks(
+        visible,
+        max_bytes=MAX_PROVIDER_IMAGE_BYTES,
+        prefer_jpeg=True,
+    ):
+        parts.append({"type": "input_text", "text": label})
+        parts.append(
+            {
+                "type": "input_image",
+                "image_url": f"data:{mime_type};base64,{data}",
+            }
+        )
+    return parts
+
+
+def _openai_compatible_final_text(output_items: list[dict[str, Any]]) -> str:
+    texts: list[str] = []
+    for item in output_items:
+        if not isinstance(item, dict) or item.get("type") != "message":
+            continue
+        content = item.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") in {"output_text", "text"}:
+                text = str(block.get("text") or "").strip()
+                if text:
+                    texts.append(text)
+    return "\n\n".join(texts).strip()
+
+
+def _openai_compatible_http_timeout(timeout_seconds: float | None) -> float:
+    if timeout_seconds is not None and timeout_seconds > 0:
+        return float(timeout_seconds)
+    return DEFAULT_OPENAI_COMPAT_HTTP_TIMEOUT_SECONDS
+
+
+def _iter_sse_events(response: Any):
+    event_name = ""
+    data_lines: list[str] = []
+    while True:
+        raw_line = response.readline()
+        if not raw_line:
+            break
+        line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+        if line.startswith(":"):
+            continue
+        if line.startswith("event:"):
+            event_name = line[6:].strip()
+            continue
+        if line.startswith("data:"):
+            data_lines.append(line[5:].lstrip())
+            continue
+        if line:
+            continue
+        if not data_lines:
+            event_name = ""
+            continue
+        blob = "\n".join(data_lines)
+        data_lines = []
+        name = event_name
+        event_name = ""
+        if blob.strip() == "[DONE]":
+            return
+        try:
+            payload = json.loads(blob)
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            yield name or str(payload.get("type") or ""), payload
+
+
+def _openai_compatible_http_post(
+    *,
+    endpoint: str,
+    api_key: str,
+    payload: dict[str, Any],
+    timeout_seconds: float | None,
+    stream: bool = False,
+    event_callback: Callable[[str, dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    from urllib import error as url_error
+    from urllib import request as url_request
+
+    request_payload = dict(payload)
+    if stream:
+        request_payload["stream"] = True
+    body = json.dumps(
+        request_payload, ensure_ascii=True, separators=(",", ":")
+    ).encode("utf-8")
+    accept = "text/event-stream" if stream else "application/json"
+    request = url_request.Request(
+        endpoint,
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": accept,
+        },
+    )
+    overall_timeout = _openai_compatible_http_timeout(timeout_seconds)
+    stall_timeout = min(
+        overall_timeout, DEFAULT_OPENAI_COMPAT_STALL_TIMEOUT_SECONDS
+    )
+    # Streaming uses a stall timeout so a hung socket dies; each SSE line
+    # resets it. Non-streaming must use the full overall timeout.
+    socket_timeout = stall_timeout if stream else overall_timeout
+    started = time.monotonic()
+    try:
+        with url_request.urlopen(request, timeout=socket_timeout) as response:
+            if not stream:
+                raw = response.read()
+                try:
+                    parsed = json.loads(raw.decode("utf-8"))
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"Responses API returned non-JSON body: {exc}"
+                    ) from exc
+                if not isinstance(parsed, dict):
+                    raise RuntimeError(
+                        "Responses API returned a non-object payload."
+                    )
+                return parsed
+
+            completed: dict[str, Any] | None = None
+            for event_name, event in _iter_sse_events(response):
+                if time.monotonic() - started >= overall_timeout:
+                    raise TimeoutError(
+                        "The xAI Responses stream exceeded "
+                        f"{overall_timeout:g} seconds."
+                    )
+                event_type = str(event.get("type") or event_name or "")
+                if event_callback is not None:
+                    event_callback(event_type, event)
+                if event_type == "response.completed":
+                    payload_response = event.get("response")
+                    if isinstance(payload_response, dict):
+                        completed = payload_response
+                    break
+                if event_type in {"response.failed", "error"}:
+                    error = event.get("error") or event.get("response")
+                    message = (
+                        str(error.get("message") or error)
+                        if isinstance(error, dict)
+                        else str(error or event_type)
+                    )
+                    raise RuntimeError(message)
+            if not isinstance(completed, dict):
+                raise RuntimeError(
+                    "Responses API stream ended without a completed response."
+                )
+            return completed
+    except TimeoutError as exc:
+        raise TimeoutError(
+            "The read operation timed out while waiting for xAI. "
+            "Grok with high reasoning can take several minutes on a CAD turn."
+        ) from exc
+    except url_error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            detail = str(exc)
+        raise RuntimeError(f"Responses API HTTP {exc.code}: {detail[:800]}") from exc
+    except url_error.URLError as exc:
+        reason = getattr(exc, "reason", exc)
+        if isinstance(reason, TimeoutError) or "timed out" in str(exc).lower():
+            raise TimeoutError(
+                "The read operation timed out while waiting for xAI. "
+                "Grok with high reasoning can take several minutes on a CAD turn."
+            ) from exc
+        raise RuntimeError(f"Responses API network error: {exc}") from exc
+
+
+def openai_compatible_forced_tool_call(
+    *,
+    prompt: str,
+    instructions: str,
+    tool_schema: dict[str, Any],
+    model: str,
+    api_key: str,
+    base_url: str | None = None,
+    reasoning_effort: str | None = None,
+    timeout_seconds: float | None = None,
+    provider_id: str = "xai",
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """One-shot forced function call over the Responses API (no CAD tools)."""
+    clean_key = str(api_key or "").strip()
+    if not clean_key:
+        raise ProviderUnavailable("No API key is configured for the Responses API.")
+    definition = _openai_compatible_tool_definition(tool_schema)
+    function_name = str(definition["name"])
+    endpoint = _openai_compatible_endpoint(base_url)
+    effort = _provider_reasoning_effort(reasoning_effort)
+    request_payload: dict[str, Any] = {
+        "model": str(model or "").strip() or "grok-4.6",
+        "instructions": str(instructions or ""),
+        "input": [{"role": "user", "content": str(prompt or "")}],
+        "tools": [definition],
+        "tool_choice": {"type": "function", "name": function_name},
+        "store": False,
+    }
+    if effort:
+        request_payload["reasoning"] = {"effort": effort}
+    debug_context = context if isinstance(context, dict) else {}
+    _capture_outbound_request(
+        debug_context,
+        provider=provider_id,
+        sdk_call="responses.create.forced_tool",
+        turn=1,
+        request=request_payload,
+        base_url=base_url,
+    )
+    response = _openai_compatible_http_post(
+        endpoint=endpoint,
+        api_key=clean_key,
+        payload=request_payload,
+        timeout_seconds=timeout_seconds,
+    )
+    output_items = response.get("output")
+    if not isinstance(output_items, list):
+        output_items = []
+    calls = [
+        item
+        for item in output_items
+        if isinstance(item, dict)
+        and item.get("type") == "function_call"
+        and str(item.get("name") or "") == function_name
+    ]
+    if len(calls) != 1:
+        raise RuntimeError(
+            f"Responses API did not return exactly one {function_name} call "
+            f"(got {len(calls)})."
+        )
+    raw_args = calls[0].get("arguments")
+    if isinstance(raw_args, dict):
+        return raw_args
+    if isinstance(raw_args, str):
+        try:
+            parsed = json.loads(raw_args or "{}")
+        except Exception as exc:
+            raise RuntimeError(
+                f"Responses API tool arguments were not JSON: {exc}"
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise RuntimeError("Responses API tool arguments must be an object.")
+        return parsed
+    raise RuntimeError("Responses API tool call had no arguments.")
+
+
+def _openai_compatible_child_main(
+    conn,
+    prompt: str,
+    context: dict[str, Any],
+    model: str,
+    api_key: str | None,
+    reasoning_effort: str | None,
+    timeout_seconds: float | None,
+    max_turns: int | None,
+    clear_inherited_modules: bool,
+    base_url: str | None = None,
+) -> None:
+    try:
+        if not str(api_key or "").strip():
+            raise RuntimeError(
+                "No API key is configured for the Responses API provider."
+            )
+        live_context = dict(context)
+        options = live_context.get("_vibecad_provider_options")
+        web_search_enabled = _provider_option(live_context, "web_search_enabled")
+        provider_id = "xai"
+        provider_label = "xAI (Grok) Responses API"
+        if isinstance(options, dict):
+            provider_id = (
+                str(options.get("provider_id") or provider_id).strip() or provider_id
+            )
+            provider_label = (
+                str(options.get("provider_label") or provider_label).strip()
+                or provider_label
+            )
+
+        def build_tool_surface(
+            surface_context: dict[str, Any],
+        ) -> tuple[dict[str, str], list[dict[str, Any]]]:
+            _validate_provider_wire_surface(surface_context)
+            by_name: dict[str, str] = {}
+            definitions: list[dict[str, Any]] = []
+            for index, schema in enumerate(
+                surface_context.get("provider_tool_schemas") or []
+            ):
+                if not isinstance(schema, dict):
+                    raise ValueError(
+                        f"Provider tool schema {index} must be an object."
+                    )
+                tool_name = str(schema.get("name") or "").strip()
+                if not tool_name:
+                    raise ValueError(
+                        f"Provider tool schema {index} is missing name."
+                    )
+                definition = _openai_compatible_tool_definition(schema)
+                function_name = str(definition["name"])
+                if function_name in by_name:
+                    raise ValueError(
+                        f"Duplicate provider function name: {function_name}"
+                    )
+                by_name[function_name] = tool_name
+                definitions.append(definition)
+            return by_name, definitions
+
+        tools_by_name, tool_definitions = build_tool_surface(live_context)
+        endpoint = _openai_compatible_endpoint(base_url)
+        instructions = _provider_instructions(live_context)
+        turn_limit = (
+            int(max_turns)
+            if max_turns is not None and max_turns > 0
+            else DEFAULT_OPENAI_COMPAT_MAX_TURNS
+        )
+        previous_response_id: str | None = None
+        next_input: list[dict[str, Any]] = [
+            {
+                "role": "user",
+                "content": _openai_compatible_user_content(prompt, live_context),
+            }
+        ]
+        effort = _provider_reasoning_effort(reasoning_effort)
+
+        for turn in range(1, turn_limit + 1):
+            tools = _openai_compatible_request_tools(
+                tool_definitions, web_search_enabled
+            )
+            request_payload: dict[str, Any] = {
+                "model": model,
+                "input": next_input,
+                "tools": tools,
+                "tool_choice": "auto",
+                "store": True,
+            }
+            if previous_response_id:
+                request_payload["previous_response_id"] = previous_response_id
+            else:
+                request_payload["instructions"] = instructions
+                if effort:
+                    request_payload["reasoning"] = {"effort": effort}
+            _capture_outbound_request(
+                live_context,
+                provider=provider_id,
+                sdk_call="responses.create",
+                turn=turn,
+                request=request_payload,
+                base_url=base_url,
+            )
+            _send_child_progress(
+                conn,
+                {
+                    "event": "openai_compat_request_started",
+                    "provider": provider_label,
+                    "turn": turn,
+                    "model": model,
+                    "tool_count": len(tools),
+                    "has_previous": bool(previous_response_id),
+                    "stream": True,
+                },
+            )
+
+            def on_stream_event(event_type: str, event: dict[str, Any]) -> None:
+                if event_type == "response.reasoning_summary_text.delta":
+                    delta = event.get("delta")
+                    if delta:
+                        _send_child_progress(
+                            conn,
+                            {
+                                "event": "provider_reasoning_delta",
+                                "provider": provider_label,
+                                "turn": turn,
+                                "text": str(delta),
+                            },
+                        )
+                elif event_type in {
+                    "response.output_text.delta",
+                    "response.text.delta",
+                }:
+                    delta = event.get("delta")
+                    if delta:
+                        _send_child_progress(
+                            conn,
+                            {
+                                "event": "provider_text_delta",
+                                "provider": provider_label,
+                                "turn": turn,
+                                "text": str(delta),
+                            },
+                        )
+
+            try:
+                response = _openai_compatible_http_post(
+                    endpoint=endpoint,
+                    api_key=str(api_key),
+                    payload=request_payload,
+                    timeout_seconds=timeout_seconds,
+                    stream=True,
+                    event_callback=on_stream_event,
+                )
+            except TimeoutError as exc:
+                raise RuntimeError(str(exc)) from exc
+            response_id = str(response.get("id") or "").strip()
+            if response_id:
+                previous_response_id = response_id
+            output_items = response.get("output")
+            if not isinstance(output_items, list):
+                output_items = []
+            status = str(response.get("status") or "").strip().lower()
+            if status == "failed":
+                error = response.get("error")
+                message = (
+                    str(error.get("message") or error)
+                    if isinstance(error, dict)
+                    else str(error or "Responses API request failed.")
+                )
+                raise RuntimeError(message)
+
+            function_calls = [
+                item
+                for item in output_items
+                if isinstance(item, dict) and item.get("type") == "function_call"
+            ]
+            final_text = _openai_compatible_final_text(
+                [item for item in output_items if isinstance(item, dict)]
+            )
+            _send_child_progress(
+                conn,
+                {
+                    "event": "openai_compat_response_received",
+                    "provider": provider_label,
+                    "turn": turn,
+                    "status": status,
+                    "function_call_count": len(function_calls),
+                    "has_message": bool(final_text),
+                    "response_id": response_id,
+                },
+            )
+            if not function_calls:
+                conn.send(
+                    {
+                        "type": "done",
+                        "final_output": final_text,
+                        "raw": {
+                            "response_id": response_id,
+                            "status": status,
+                            "provider_id": provider_id,
+                        },
+                    }
+                )
+                return
+
+            tool_outputs: list[dict[str, Any]] = []
+            for call in function_calls:
+                call_name = str(call.get("name") or "").strip()
+                call_id = str(call.get("call_id") or call.get("id") or "").strip()
+                raw_args = call.get("arguments")
+                if isinstance(raw_args, str):
+                    try:
+                        parsed_args = json.loads(raw_args or "{}")
+                    except Exception:
+                        parsed_args = {}
+                elif isinstance(raw_args, dict):
+                    parsed_args = raw_args
+                else:
+                    parsed_args = {}
+                tool_name = tools_by_name.get(call_name)
+                updated_context = None
+                if not call_id:
+                    result: Any = {
+                        "ok": False,
+                        "error": "Responses API function call is missing call_id.",
+                    }
+                elif tool_name is None:
+                    result = {
+                        "ok": False,
+                        "error": f"Unknown VibeCAD tool: {call_name}",
+                    }
+                else:
+                    arguments_json = json.dumps(
+                        _json_safe(parsed_args),
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                    )
+                    conn.send(
+                        {
+                            "type": "tool",
+                            "tool_name": tool_name,
+                            "arguments_json": arguments_json,
+                        }
+                    )
+                    bridge = conn.recv()
+                    if bridge.get("type") != "tool_result":
+                        raise RuntimeError("Invalid VibeCAD tool bridge response.")
+                    result = bridge.get("result")
+                    if not isinstance(result, dict):
+                        result = {
+                            "ok": False,
+                            "error": "VibeCAD tool returned no structured result.",
+                        }
+                    updated_context = bridge.get("context")
+                if isinstance(updated_context, dict):
+                    live_context = updated_context
+                    tools_by_name, tool_definitions = build_tool_surface(
+                        live_context
+                    )
+                    instructions = _provider_instructions(live_context)
+                if isinstance(result, dict):
+                    result["vibecad_state_after"] = _provider_state_after_tool(
+                        live_context,
+                        result,
+                    )
+                visible_result = (
+                    _provider_visible_tool_result(result)
+                    if isinstance(result, dict)
+                    else result
+                )
+                if call_id:
+                    tool_outputs.append(
+                        {
+                            "type": "function_call_output",
+                            "call_id": call_id,
+                            "output": json.dumps(
+                                _json_safe(visible_result),
+                                ensure_ascii=True,
+                                separators=(",", ":"),
+                            ),
+                        }
+                    )
+            if not tool_outputs:
+                raise RuntimeError(
+                    "Responses API returned function calls without call_ids."
+                )
+            next_input = tool_outputs
+
+        conn.send(
+            {
+                "type": "error",
+                "error": f"{provider_label} turn limit reached ({turn_limit}).",
+            }
+        )
+    except Exception as exc:
+        _send_child_error(conn, "xAI (Grok) Responses API", exc)
     finally:
         conn.close()
 

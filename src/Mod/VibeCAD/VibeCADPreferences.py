@@ -17,6 +17,7 @@ import FreeCAD as App
 
 from VibeCADAuth import (
     DEFAULT_PROVIDER,
+    DEFAULT_XAI_BASE_URL,
     PROVIDERS,
     delete_keyring_key,
     list_provider_models,
@@ -39,10 +40,12 @@ from VibeCADPromptStarters import (
 
 PREFERENCE_GROUP = "User parameter:BaseApp/Preferences/Mod/VibeCAD"
 DEFAULT_MODEL = "gpt-5.5"
+DEFAULT_XAI_MODEL = "grok-4.6"
 DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5"
 DEFAULT_CHATGPT_MODEL = ""
 DEFAULT_MODELS = {
     "openai": DEFAULT_MODEL,
+    "xai": DEFAULT_XAI_MODEL,
     "anthropic": DEFAULT_ANTHROPIC_MODEL,
     "chatgpt": DEFAULT_CHATGPT_MODEL,
 }
@@ -102,6 +105,8 @@ class VibeCADSettings:
             return self.anthropic_model.strip() or DEFAULT_ANTHROPIC_MODEL
         if provider == "chatgpt":
             return self.chatgpt_model.strip()
+        if provider == "xai":
+            return self.model.strip() or DEFAULT_XAI_MODEL
         return self.model.strip() or DEFAULT_MODEL
 
     @property
@@ -134,6 +139,8 @@ class VibeCADSettings:
             return self.anthropic_model.strip() or DEFAULT_ANTHROPIC_MODEL
         if clean_provider == "chatgpt":
             return self.chatgpt_model.strip()
+        if clean_provider == "xai":
+            return self.model.strip() or DEFAULT_XAI_MODEL
         return self.model.strip() or DEFAULT_MODEL
 
     def intent_memory_model_for(self, provider: str) -> str:
@@ -183,8 +190,30 @@ def _positive_int(value: object, default: int) -> int:
     return clean if clean > 0 else default
 
 
+def _migrate_xai_defaults(pref) -> None:
+    """Once: if OpenAI was pointed at xAI/Grok, select the xAI provider.
+
+    Does not change the default for new installs (still OpenAI). Existing
+    users who already stored Provider=xai are left alone.
+    """
+    if pref.GetBool("MigratedToXaiProvider", False):
+        return
+    provider = str(pref.GetString("Provider", "") or "").strip().lower()
+    base_url = str(pref.GetString("OpenAIBaseUrl", "") or "").strip().rstrip("/")
+    model = str(pref.GetString("Model", "") or "").strip().lower()
+    uses_xai = base_url.endswith("api.x.ai/v1") or model.startswith("grok-")
+    if provider in {"", "openai"} and uses_xai:
+        pref.SetString("Provider", "xai")
+        if not model.startswith("grok-"):
+            pref.SetString("Model", DEFAULT_XAI_MODEL)
+        if not base_url:
+            pref.SetString("OpenAIBaseUrl", DEFAULT_XAI_BASE_URL)
+    pref.SetBool("MigratedToXaiProvider", True)
+
+
 def load_settings() -> VibeCADSettings:
     pref = preferences()
+    _migrate_xai_defaults(pref)
     return VibeCADSettings(
         mcp_enabled=pref.GetBool("MCPEnabled", False),
         use_online_provider=pref.GetBool("UseOnlineProvider", True),
@@ -229,7 +258,15 @@ def save_settings(settings: VibeCADSettings) -> None:
     pref = preferences()
     pref.SetBool("MCPEnabled", bool(settings.mcp_enabled))
     pref.SetBool("UseOnlineProvider", bool(settings.use_online_provider))
-    pref.SetString("Model", settings.model.strip() or DEFAULT_MODEL)
+    pref.SetString(
+        "Model",
+        settings.model.strip()
+        or (
+            DEFAULT_XAI_MODEL
+            if normalize_provider(settings.provider) == "xai"
+            else DEFAULT_MODEL
+        ),
+    )
     pref.SetString("DotenvPath", settings.dotenv_path.strip())
     pref.SetString(
         "ReasoningEffort", normalize_reasoning_effort(settings.reasoning_effort)
@@ -442,7 +479,8 @@ class VibeCADPreferencesPage:
         self.model = QtWidgets.QComboBox(self.form)
         self.model.setObjectName("VibeCADPrefModel")
         self.model.setEditable(True)
-        layout.addRow("OpenAI model", self.model)
+        self.model_row_label = "OpenAI model"
+        layout.addRow(self.model_row_label, self.model)
 
         self.anthropic_model = QtWidgets.QComboBox(self.form)
         self.anthropic_model.setObjectName("VibeCADPrefAnthropicModel")
@@ -717,16 +755,35 @@ class VibeCADPreferencesPage:
 
     def _update_provider_visibility(self) -> None:
         provider = self._selected_provider()
-        self._set_form_row_visible(self.model, provider == "openai")
+        openai_compatible = provider in {"openai", "xai"}
+        self._set_form_row_visible(self.model, openai_compatible)
+        model_label = self._layout.labelForField(self.model)
+        if model_label is not None:
+            model_label.setText(
+                "xAI model" if provider == "xai" else "OpenAI model"
+            )
         self._set_form_row_visible(self.anthropic_model, provider == "anthropic")
         self._set_form_row_visible(self.chatgpt_model, provider == "chatgpt")
         self._set_form_row_visible(self.web_search_enabled, True)
         self._set_form_row_visible(self.design_review_enabled, True)
         self._set_form_row_visible(self.codex_skills_enabled, provider == "chatgpt")
-        self._set_form_row_visible(self.openai_base_url, provider == "openai")
+        self._set_form_row_visible(self.openai_base_url, openai_compatible)
+        if provider == "xai":
+            self.openai_base_url.setPlaceholderText(DEFAULT_XAI_BASE_URL)
+            self.openai_base_url.setToolTip(
+                "Override the xAI Responses endpoint (include the /v1 segment). "
+                "Leave blank to use https://api.x.ai/v1."
+            )
+        else:
+            self.openai_base_url.setPlaceholderText("https://api.openai.com/v1")
+            self.openai_base_url.setToolTip(
+                "Override the OpenAI API endpoint (include the /v1 segment). "
+                "Leave blank to use the official endpoint. Use this to point at "
+                "a local server that implements the OpenAI API."
+            )
         self._set_form_row_visible(self.anthropic_base_url, provider == "anthropic")
         self._set_form_row_visible(
-            self.openai_intent_memory_model, provider == "openai"
+            self.openai_intent_memory_model, openai_compatible
         )
         self._set_form_row_visible(
             self.anthropic_intent_memory_model, provider == "anthropic"
@@ -734,7 +791,7 @@ class VibeCADPreferencesPage:
         self._set_form_row_visible(
             self.chatgpt_intent_memory_model, provider == "chatgpt"
         )
-        api_key_provider = provider in {"openai", "anthropic"}
+        api_key_provider = provider in {"openai", "xai", "anthropic"}
         self._set_form_row_visible(self.dotenv_row, api_key_provider)
         self._set_form_row_visible(self.api_key_row, api_key_provider)
         self._set_form_row_visible(self.chatgpt_auth_row, provider == "chatgpt")
@@ -780,6 +837,9 @@ class VibeCADPreferencesPage:
 
     def _provider_changed(self, _index: int = 0) -> None:
         self.api_key.clear()
+        provider = self._selected_provider()
+        if provider == "xai" and not self.model.currentText().strip():
+            self._set_combo_text(self.model, DEFAULT_XAI_MODEL)
         self._update_provider_visibility()
         self._refresh_status()
 
@@ -969,6 +1029,8 @@ class VibeCADPreferencesPage:
             return "Use active Anthropic model"
         if provider == "chatgpt":
             return "Use active ChatGPT model"
+        if provider == "xai":
+            return "Use active xAI model"
         return "Use active OpenAI model"
 
     def _apply_provider_models(self, provider: str, models: list[str]) -> None:

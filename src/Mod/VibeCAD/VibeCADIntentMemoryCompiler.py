@@ -27,6 +27,7 @@ from VibeCADProvider import (
     _json_safe,
     _run_provider_subprocess,
     _send_child_error,
+    openai_compatible_forced_tool_call,
 )
 
 
@@ -385,7 +386,7 @@ def compile_intent_memory_update(
 ) -> dict[str, Any]:
     """Run one isolated, forced-tool compiler request and return its arguments."""
     clean_provider = str(provider or "").strip().lower()
-    if clean_provider not in {"openai", "anthropic", "chatgpt"}:
+    if clean_provider not in {"openai", "xai", "anthropic", "chatgpt"}:
         raise ValueError(f"Unsupported Intent Memory provider: {provider!r}.")
     if not uncovered_turns:
         raise ValueError("Intent Memory compiler requires at least one uncovered turn.")
@@ -397,6 +398,23 @@ def compile_intent_memory_update(
         "uncovered_turn_count": len(uncovered_turns),
     }
     prompt = _compiler_prompt(memory, uncovered_turns, legacy_design_markdown)
+    if clean_provider == "xai":
+        if not str(api_key or "").strip():
+            raise ProviderUnavailable(
+                "No xAI API key is configured for Intent Memory."
+            )
+        return openai_compatible_forced_tool_call(
+            prompt=prompt,
+            instructions=COMPILER_INSTRUCTIONS,
+            tool_schema=compiler_tool_schema(),
+            model=model,
+            api_key=str(api_key),
+            base_url=base_url,
+            reasoning_effort=None,
+            timeout_seconds=timeout_seconds,
+            provider_id="xai",
+            context=context,
+        )
     if clean_provider in {"openai", "chatgpt"}:
         return _codex_compiler(
             provider=clean_provider,

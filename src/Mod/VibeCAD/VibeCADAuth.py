@@ -22,6 +22,7 @@ KEYRING_SERVICE = "FreeCAD VibeCAD"
 KEYRING_USERNAME = "openai-api-key"
 
 DEFAULT_PROVIDER = "openai"
+DEFAULT_XAI_BASE_URL = "https://api.x.ai/v1"
 ANTHROPIC_API_VERSION = "2023-06-01"
 
 
@@ -35,10 +36,24 @@ class ProviderSpec:
     env_var: str
     keyring_username: str
     models_url: str
+    env_var_aliases: tuple[str, ...] = ()
+    default_base_url: str | None = None
 
     @property
     def uses_api_key(self) -> bool:
         return self.auth_kind == "api_key"
+
+    def credential_env_vars(self) -> tuple[str, ...]:
+        names = (self.env_var,) + tuple(self.env_var_aliases)
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for name in names:
+            clean = str(name or "").strip()
+            if not clean or clean in seen:
+                continue
+            seen.add(clean)
+            ordered.append(clean)
+        return tuple(ordered)
 
     def auth_headers(self, api_key: str) -> dict[str, str]:
         if not self.uses_api_key:
@@ -55,12 +70,12 @@ class ProviderSpec:
     def models_url_for(self, base_url: str | None = None) -> str:
         """Return the models endpoint URL, honoring an optional base URL override.
 
-        Follows each SDK's base-URL convention: OpenAI base URLs include the
-        ``/v1`` segment (e.g. ``http://localhost:8000/v1``), while Anthropic
-        base URLs do not (e.g. ``https://api.anthropic.com``).
+        Follows each SDK's base-URL convention: OpenAI-compatible base URLs
+        include the ``/v1`` segment (e.g. ``https://api.x.ai/v1``), while
+        Anthropic base URLs do not (e.g. ``https://api.anthropic.com``).
         """
 
-        clean = (base_url or "").strip().rstrip("/")
+        clean = (base_url or self.default_base_url or "").strip().rstrip("/")
         if not self.uses_api_key:
             raise ValueError(f"{self.display_name} has no HTTP models endpoint.")
         if not clean:
@@ -71,6 +86,16 @@ class ProviderSpec:
 
 
 PROVIDERS: dict[str, ProviderSpec] = {
+    "xai": ProviderSpec(
+        provider_id="xai",
+        display_name="xAI (Grok)",
+        auth_kind="api_key",
+        env_var="XAI_API_KEY",
+        keyring_username="xai-api-key",
+        models_url=f"{DEFAULT_XAI_BASE_URL}/models",
+        env_var_aliases=("GROK_API_KEY",),
+        default_base_url=DEFAULT_XAI_BASE_URL,
+    ),
     "openai": ProviderSpec(
         provider_id="openai",
         display_name="OpenAI API key (Codex)",
@@ -147,15 +172,22 @@ def read_dotenv_key(path: Path, provider: str = DEFAULT_PROVIDER) -> str | None:
         return None
     if not path.exists():
         return None
+    wanted = set(spec.credential_env_vars())
+    found: dict[str, str] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#") or "=" not in stripped:
             continue
         key, value = stripped.split("=", 1)
-        if key.strip() != spec.env_var:
+        name = key.strip()
+        if name not in wanted:
             continue
         value = value.strip().strip('"').strip("'")
-        return value or None
+        if value:
+            found[name] = value
+    for name in spec.credential_env_vars():
+        if name in found:
+            return found[name]
     return None
 
 
@@ -234,9 +266,10 @@ def resolve_auth_credential(
     if not spec.uses_api_key:
         return None
     data = env if env is not None else os.environ
-    value = data.get(spec.env_var)
-    if value:
-        return AuthCredential(value=value, source="environment")
+    for name in spec.credential_env_vars():
+        value = data.get(name)
+        if value:
+            return AuthCredential(value=value, source=f"environment:{name}")
 
     if dotenv_path is not None:
         value = read_dotenv_key(dotenv_path, provider=provider)
@@ -368,7 +401,9 @@ def validate_api_key(
             ),
         )
     except error.HTTPError as exc:
-        status = AuthStatus.INVALID if exc.code in {401, 403} else AuthStatus.OFFLINE
+        # xAI returns HTTP 400 for an unrecognized key; OpenAI uses 401/403.
+        invalid_codes = {400, 401, 403} if spec.provider_id == "xai" else {401, 403}
+        status = AuthStatus.INVALID if exc.code in invalid_codes else AuthStatus.OFFLINE
         return AuthState(
             status,
             source=source,

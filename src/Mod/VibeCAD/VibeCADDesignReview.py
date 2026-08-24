@@ -25,6 +25,7 @@ from VibeCADProvider import (
     _json_safe,
     _provider_reasoning_effort,
     _run_provider_subprocess,
+    openai_compatible_forced_tool_call,
 )
 
 
@@ -529,9 +530,27 @@ def run_design_review(
     timeout_seconds: float | None = None,
 ) -> dict[str, Any]:
     clean_provider = str(provider or "").strip().lower()
-    if clean_provider not in {"openai", "anthropic", "chatgpt"}:
+    if clean_provider not in {"openai", "xai", "anthropic", "chatgpt"}:
         raise ValueError(f"Unsupported design-review provider: {provider!r}.")
     prompt = _review_prompt(customer_intent, design_draft, context)
+    if clean_provider == "xai":
+        if not str(api_key or "").strip():
+            raise ProviderUnavailable(
+                "No xAI API key is configured for design review."
+            )
+        raw = openai_compatible_forced_tool_call(
+            prompt=prompt,
+            instructions=REVIEW_INSTRUCTIONS,
+            tool_schema=_review_tool_schema(),
+            model=model,
+            api_key=str(api_key),
+            base_url=base_url,
+            reasoning_effort=reasoning_effort,
+            timeout_seconds=timeout_seconds,
+            provider_id="xai",
+            context=context,
+        )
+        return _validate_review(raw)
     if clean_provider in {"openai", "chatgpt"}:
         return _codex_review(
             provider=clean_provider,
